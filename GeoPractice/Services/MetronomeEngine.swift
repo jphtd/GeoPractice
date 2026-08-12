@@ -9,6 +9,7 @@ final class MetronomeEngine: ObservableObject {
     @Published private(set) var isPlaying = false
     @Published private(set) var currentBeat = 0
     @Published private(set) var currentSubdivision = 0
+    @Published private(set) var currentCycle = 0
     @Published private(set) var lastPulseDate = Date.distantPast
     @Published var errorMessage: String?
 
@@ -102,6 +103,7 @@ final class MetronomeEngine: ObservableObject {
         isPlaying = false
         currentBeat = 0
         currentSubdivision = 0
+        currentCycle = 0
         lastPulseDate = .distantPast
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
@@ -109,6 +111,10 @@ final class MetronomeEngine: ObservableObject {
     private func restartPlayback() {
         playbackToken = UUID()
         scheduler.stop()
+        currentBeat = 0
+        currentSubdivision = 0
+        currentCycle = 0
+        lastPulseDate = .distantPast
         do {
             try beginScheduledPlayback()
         } catch {
@@ -118,11 +124,12 @@ final class MetronomeEngine: ObservableObject {
     }
 
     private func beginScheduledPlayback() throws {
-        playbackToken = try scheduler.start(preset: preset) { [weak self] token, beat, subdivision in
+        playbackToken = try scheduler.start(preset: preset) { [weak self] token, beat, subdivision, cycle in
             Task { @MainActor [weak self] in
                 guard let self, self.isPlaying, self.playbackToken == token else { return }
                 self.currentBeat = beat
                 self.currentSubdivision = subdivision
+                self.currentCycle = cycle
                 self.lastPulseDate = .now
             }
         }
@@ -177,6 +184,10 @@ final class MetronomeEngine: ObservableObject {
                     self.scheduler.stop()
                     self.scheduler = BeatAudioScheduler()
                     self.isPlaying = false
+                    self.currentBeat = 0
+                    self.currentSubdivision = 0
+                    self.currentCycle = 0
+                    self.lastPulseDate = .distantPast
                     self.errorMessage = "音频服务已重置，请重新点击播放。"
                 }
             }
@@ -197,9 +208,10 @@ private final class BeatAudioScheduler: @unchecked Sendable {
         let preset: MetronomePreset
         let startHostTime: UInt64
         let presentationLatency: TimeInterval
-        let onTick: @Sendable (UUID, Int, Int) -> Void
+        let onTick: @Sendable (UUID, Int, Int, Int) -> Void
         var nextExactFrame: Double
         var eventIndex: Int
+        var cycle: Int
     }
 
     private let audioEngine = AVAudioEngine()
@@ -217,7 +229,7 @@ private final class BeatAudioScheduler: @unchecked Sendable {
 
     func start(
         preset: MetronomePreset,
-        onTick: @escaping @Sendable (UUID, Int, Int) -> Void
+        onTick: @escaping @Sendable (UUID, Int, Int, Int) -> Void
     ) throws -> UUID {
         try schedulingQueue.sync {
             stopLocked()
@@ -240,7 +252,8 @@ private final class BeatAudioScheduler: @unchecked Sendable {
                 presentationLatency: audioEngine.outputNode.presentationLatency,
                 onTick: onTick,
                 nextExactFrame: 0,
-                eventIndex: 0
+                eventIndex: 0,
+                cycle: 0
             )
 
             scheduleAheadLocked()
@@ -290,13 +303,15 @@ private final class BeatAudioScheduler: @unchecked Sendable {
             elapsedSeconds = -AVAudioTime.seconds(forHostTime: session.startHostTime - nowHostTime)
         }
         let horizonFrame = max(0, elapsedSeconds + lookAheadSeconds) * sampleRate
-        let exactInterval = sampleRate * 60 / Double(session.preset.bpm * session.preset.subdivision)
-        let eventCount = session.preset.beats * session.preset.subdivision
+        let exactInterval = sampleRate * 60
+            / Double(session.preset.bpm)
+            / session.preset.eventDensity
+        let eventCount = session.preset.beats * session.preset.pulsesPerBeat
 
         while session.nextExactFrame <= horizonFrame {
             let scheduledFrame = AVAudioFramePosition(session.nextExactFrame.rounded())
-            let beat = session.eventIndex / session.preset.subdivision
-            let subdivision = session.eventIndex % session.preset.subdivision
+            let beat = session.eventIndex / session.preset.pulsesPerBeat
+            let subdivision = session.eventIndex % session.preset.pulsesPerBeat
             let kind = clickKind(beat: beat, subdivision: subdivision, preset: session.preset)
 
             if let buffer = clickBuffers[kind], let playerNode = playerNodes[kind] {
@@ -308,6 +323,7 @@ private final class BeatAudioScheduler: @unchecked Sendable {
                 token: session.token,
                 beat: beat,
                 subdivision: subdivision,
+                cycle: session.cycle,
                 eventFrame: session.nextExactFrame,
                 startHostTime: session.startHostTime,
                 presentationLatency: session.presentationLatency,
@@ -315,7 +331,11 @@ private final class BeatAudioScheduler: @unchecked Sendable {
             )
 
             session.nextExactFrame += exactInterval
-            session.eventIndex = (session.eventIndex + 1) % eventCount
+            session.eventIndex += 1
+            if session.eventIndex == eventCount {
+                session.eventIndex = 0
+                session.cycle += 1
+            }
         }
         playbackSession = session
     }
@@ -324,10 +344,11 @@ private final class BeatAudioScheduler: @unchecked Sendable {
         token: UUID,
         beat: Int,
         subdivision: Int,
+        cycle: Int,
         eventFrame: Double,
         startHostTime: UInt64,
         presentationLatency: TimeInterval,
-        callback: @escaping @Sendable (UUID, Int, Int) -> Void
+        callback: @escaping @Sendable (UUID, Int, Int, Int) -> Void
     ) {
         let eventOffset = AVAudioTime.hostTime(forSeconds: eventFrame / sampleRate)
         let eventHostTime = startHostTime + eventOffset
@@ -338,7 +359,7 @@ private final class BeatAudioScheduler: @unchecked Sendable {
         let delay = renderDelay + presentationLatency
 
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            callback(token, beat, subdivision)
+            callback(token, beat, subdivision, cycle)
         }
     }
 
@@ -346,10 +367,10 @@ private final class BeatAudioScheduler: @unchecked Sendable {
         if subdivision > 0 {
             return .subdivision
         }
-        if beat == 0 {
+        if preset.strongBeatIndices.contains(beat) {
             return .downbeat
         }
-        if preset.groupStartIndices.contains(beat) {
+        if preset.secondaryAccentIndices.contains(beat) {
             return .groupAccent
         }
         return .beat

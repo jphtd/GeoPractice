@@ -30,37 +30,6 @@ struct GeoBackground: View {
     }
 }
 
-struct GeoBrand: View {
-    var compact = false
-
-    var body: some View {
-        HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.white.opacity(0.34), lineWidth: 1)
-                    .frame(width: 30, height: 30)
-                    .rotationEffect(.degrees(45))
-                Circle()
-                    .fill(.white)
-                    .frame(width: 9, height: 9)
-                    .shadow(color: .white.opacity(0.8), radius: 7)
-            }
-            HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text("节拍打卡")
-                    .font(.system(size: compact ? 15 : 17, weight: .bold, design: .rounded))
-                    .tracking(0.3)
-                if !compact {
-                    Text("PULSE LOG")
-                        .font(.system(size: 9, weight: .semibold))
-                        .tracking(1.5)
-                        .foregroundStyle(GeoTheme.muted)
-                }
-            }
-        }
-        .foregroundStyle(GeoTheme.text)
-    }
-}
-
 struct GeoCard<Content: View>: View {
     var cornerRadius: CGFloat = 22
     @ViewBuilder var content: Content
@@ -82,6 +51,79 @@ struct GeoCard<Content: View>: View {
                             .stroke(Color.white.opacity(0.075), lineWidth: 1)
                     }
                     .shadow(color: .black.opacity(0.28), radius: 30, y: 20)
+            }
+    }
+}
+
+/// A restrained glass capsule that uses the current Liquid Glass rendering on
+/// new systems and an iOS 17 Material fallback. The fallback is intentionally
+/// translucent: the dark shapes in the V4 sketch describe glass, not black ink.
+struct GeoGlassCapsule<Content: View>: View {
+    @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
+    @ViewBuilder var content: Content
+
+    var body: some View {
+        Group {
+            if reduceTransparency {
+                content
+                    .background(GeoTheme.panelRaised, in: Capsule(style: .continuous))
+                    .overlay {
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(0.20), lineWidth: 1)
+                    }
+            } else {
+                translucentGlass
+            }
+        }
+        .shadow(color: .black.opacity(0.22), radius: 18, y: 10)
+    }
+
+    /// Older Swift compilers do not expose Liquid Glass symbols, so they
+    /// compile only the Material implementation.
+    @ViewBuilder
+    private var translucentGlass: some View {
+#if compiler(>=6.2)
+        if #available(iOS 26.0, *) {
+            content
+                .glassEffect(
+                    .regular
+                        .tint(Color.white.opacity(0.035))
+                        .interactive(),
+                    in: Capsule(style: .continuous)
+                )
+        } else {
+            materialGlass
+        }
+#else
+        materialGlass
+#endif
+    }
+
+    private var materialGlass: some View {
+        content
+            .background(.ultraThinMaterial, in: Capsule(style: .continuous))
+            .overlay {
+                Capsule(style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.10), Color.white.opacity(0.025)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .allowsHitTesting(false)
+            }
+            .overlay {
+                Capsule(style: .continuous)
+                    .stroke(
+                        LinearGradient(
+                            colors: [Color.white.opacity(0.28), Color.white.opacity(0.07)],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        lineWidth: 1
+                    )
+                    .allowsHitTesting(false)
             }
     }
 }

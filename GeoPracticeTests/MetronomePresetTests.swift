@@ -22,13 +22,29 @@ final class MetronomePresetTests: XCTestCase {
 
     func testGroupingStartIndices() {
         var preset = MetronomePreset.standard
-        preset.beats = 8
-        preset.grouping = "3+3+2"
-        XCTAssertEqual(preset.groupStartIndices, [0, 3, 6])
+        preset.beats = 4
+        preset.grouping = "标准"
+        XCTAssertEqual(preset.groupStartIndices, [0, 2])
 
         preset.beats = 7
-        preset.grouping = "2+3+2"
-        XCTAssertEqual(preset.groupStartIndices, [0, 2, 5])
+        preset.grouping = "3+4"
+        XCTAssertEqual(preset.groupStartIndices, [0, 3])
+
+        preset.beats = 5
+        preset.grouping = "2+3"
+        XCTAssertEqual(preset.strongBeatIndices, [0])
+        XCTAssertEqual(preset.secondaryAccentIndices, [2])
+
+        preset.beats = 5
+        preset.grouping = "3+2"
+        XCTAssertEqual(preset.strongBeatIndices, [0])
+        XCTAssertEqual(preset.secondaryAccentIndices, [3])
+
+        preset.beats = 7
+        preset.grouping = "4+3"
+        XCTAssertEqual(preset.groupStartIndices, [0, 4])
+        XCTAssertEqual(preset.strongBeatIndices, [0, 4])
+        XCTAssertEqual(preset.secondaryAccentIndices, [2])
     }
 
     func testNormalizationClampsAndRepairsSettings() {
@@ -43,8 +59,39 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(invalid.bpm, 240)
         XCTAssertEqual(invalid.beats, 7)
         XCTAssertEqual(invalid.subdivision, 1)
-        XCTAssertEqual(invalid.grouping, "2+2+3")
+        XCTAssertEqual(invalid.grouping, "3+4")
         XCTAssertEqual(invalid.direction, .clockwise)
+    }
+
+    func testV4BeatRangeAndTrainingNoteValues() {
+        var belowRange = MetronomePreset.standard
+        belowRange.beats = 2
+        XCTAssertEqual(belowRange.normalized.beats, 3)
+
+        var aboveRange = MetronomePreset.standard
+        aboveRange.beats = 12
+        XCTAssertEqual(aboveRange.normalized.beats, 9)
+
+        XCTAssertEqual(MetronomePreset.supportedSubdivisions, [0, 1, 2, 4])
+
+        var halfNote = MetronomePreset.standard
+        halfNote.bpm = 120
+        halfNote.subdivision = 0
+        XCTAssertEqual(halfNote.subdivisionTitle, "二分音符")
+        XCTAssertEqual(halfNote.pulsesPerBeat, 1)
+        XCTAssertEqual(halfNote.eventDensity, 0.5)
+        XCTAssertEqual(halfNote.mainBeatDuration, 1, accuracy: 0.000_1)
+
+        var sixteenth = halfNote
+        sixteenth.subdivision = 4
+        XCTAssertEqual(sixteenth.pulsesPerBeat, 4)
+        XCTAssertEqual(sixteenth.eventDensity, 4)
+        XCTAssertEqual(sixteenth.mainBeatDuration, 0.5, accuracy: 0.000_1)
+    }
+
+    func testPracticeHandControlOrderAndSymbols() {
+        XCTAssertEqual(PracticeHand.controlOrder, [.left, .both, .right])
+        XCTAssertEqual(PracticeHand.controlOrder.map(\.shortTitle), ["L", "B", "R"])
     }
 
     func testPracticeEventStoresPresetSnapshotAndCounts() {
@@ -118,6 +165,38 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(first?.stats(for: .right), HandPracticeStats())
         XCTAssertEqual(first?.totalCount, 5)
         XCTAssertEqual(first?.totalDurationMilliseconds, 4_000)
+    }
+
+    func testQuickIncrementAffectsOnlyCurrentHand() {
+        let start = Date(timeIntervalSinceReferenceDate: 2_500)
+        var session = PracticeSession()
+        session.begin(at: start)
+
+        session.adjustCount(for: session.currentHand, by: 1)
+        session.switchHand(to: .left, at: start.addingTimeInterval(1))
+        session.adjustCount(for: session.currentHand, by: 1)
+        session.switchHand(to: .right, at: start.addingTimeInterval(2))
+        session.adjustCount(for: session.currentHand, by: 1)
+
+        XCTAssertEqual(session.stats(for: .left, at: start).count, 1)
+        XCTAssertEqual(session.stats(for: .both, at: start).count, 1)
+        XCTAssertEqual(session.stats(for: .right, at: start).count, 1)
+    }
+
+    func testSelectingCurrentHandDoesNotRestartSegment() {
+        let start = Date(timeIntervalSinceReferenceDate: 2_750)
+        var session = PracticeSession()
+        session.begin(at: start)
+        let originalSegmentStart = session.segmentStartedAt
+
+        session.switchHand(to: .both, at: start.addingTimeInterval(3))
+
+        XCTAssertEqual(session.currentHand, .both)
+        XCTAssertEqual(session.segmentStartedAt, originalSegmentStart)
+        XCTAssertEqual(
+            session.stats(for: .both, at: start.addingTimeInterval(4)).durationMilliseconds,
+            4_000
+        )
     }
 
     func testPracticeSessionPauseResumeAndPausedHandSwitch() {

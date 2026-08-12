@@ -20,9 +20,11 @@ enum PracticeHand: String, CaseIterable, Codable, Identifiable, Sendable {
         switch self {
         case .left: "L"
         case .right: "R"
-        case .both: "Both"
+        case .both: "B"
         }
     }
+
+    static let controlOrder: [PracticeHand] = [.left, .both, .right]
 }
 
 @Model

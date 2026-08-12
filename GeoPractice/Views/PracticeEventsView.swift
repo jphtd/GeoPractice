@@ -87,6 +87,7 @@ struct PracticeEventsView: View {
                 }
             }
         }
+        .toolbar(.visible, for: .tabBar)
         .sheet(isPresented: $showsNewEvent) {
             PracticeEventEditorView(currentPreset: metronome.preset)
         }
@@ -240,7 +241,7 @@ private struct PracticeEventDetailView: View {
         GeoCard {
             VStack(spacing: 16) {
                 CardTitle(title: "累计练习", subtitle: "STATISTICS")
-                ForEach(PracticeHand.allCases) { hand in
+                ForEach(PracticeHand.controlOrder) { hand in
                     HStack {
                         VStack(alignment: .leading, spacing: 3) {
                             Text(hand.title)

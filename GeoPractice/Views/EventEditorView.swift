@@ -97,7 +97,7 @@ struct PracticeEventEditorView: View {
                                 preset.grouping = MetronomePreset.groupings(for: newValue)[0]
                             }
                         )) {
-                            ForEach(2...8, id: \.self) { value in
+                            ForEach(3...9, id: \.self) { value in
                                 Text("\(value) 拍").tag(value)
                             }
                         }
@@ -112,6 +112,7 @@ struct PracticeEventEditorView: View {
                         }
 
                         Picker("细分", selection: $preset.subdivision) {
+                            Text("二分音符").tag(0)
                             Text("四分音符").tag(1)
                             Text("八分音符").tag(2)
                             Text("十六分音符").tag(4)

@@ -6,6 +6,8 @@ import Foundation
 @MainActor
 final class MetronomeEngine: ObservableObject {
     @Published private(set) var preset: MetronomePreset
+    private(set) var tempoSemantics: TempoSemantics
+    private(set) var tempoReferenceNote: TempoReferenceNote
     @Published private(set) var isPlaying = false
     @Published private(set) var currentBeat = 0
     @Published private(set) var currentSubdivision = 0
@@ -17,9 +19,22 @@ final class MetronomeEngine: ObservableObject {
     private var playbackToken = UUID()
     private var cancellables: Set<AnyCancellable> = []
 
-    init(preset: MetronomePreset = .standard) {
+    init(
+        preset: MetronomePreset = .standard,
+        tempoSemantics: TempoSemantics = .legacyQuarterReference,
+        tempoReferenceNote: TempoReferenceNote = .quarter
+    ) {
         self.preset = preset.normalized
+        self.tempoSemantics = tempoSemantics
+        self.tempoReferenceNote = tempoReferenceNote
         observeAudioSystem()
+    }
+
+    var playbackPlan: MetronomePlaybackPlan {
+        preset.playbackPlan(
+            semantics: tempoSemantics,
+            referenceNote: tempoReferenceNote
+        )
     }
 
     func apply(_ newPreset: MetronomePreset) {
@@ -79,6 +94,24 @@ final class MetronomeEngine: ObservableObject {
         apply(updated)
     }
 
+    /// Applies a customer-comparison tempo interpretation without changing the
+    /// saved metronome preset. A timing change restarts the scheduler exactly
+    /// once; changing an inactive T3 reference note does not disturb playback.
+    func setTempoExperiment(
+        semantics: TempoSemantics,
+        referenceNote: TempoReferenceNote
+    ) {
+        let previousPlan = playbackPlan
+        guard semantics != tempoSemantics || referenceNote != tempoReferenceNote else { return }
+        objectWillChange.send()
+        tempoSemantics = semantics
+        tempoReferenceNote = referenceNote
+        let updatedPlan = playbackPlan
+        if isPlaying, !updatedPlan.hasSameSchedule(as: previousPlan) {
+            restartPlayback()
+        }
+    }
+
     func toggle() {
         isPlaying ? stop() : start()
     }
@@ -124,7 +157,10 @@ final class MetronomeEngine: ObservableObject {
     }
 
     private func beginScheduledPlayback() throws {
-        playbackToken = try scheduler.start(preset: preset) { [weak self] token, beat, subdivision, cycle in
+        playbackToken = try scheduler.start(
+            preset: preset,
+            plan: playbackPlan
+        ) { [weak self] token, beat, subdivision, cycle in
             Task { @MainActor [weak self] in
                 guard let self, self.isPlaying, self.playbackToken == token else { return }
                 self.currentBeat = beat
@@ -206,6 +242,7 @@ private final class BeatAudioScheduler: @unchecked Sendable {
     private struct PlaybackSession {
         let token: UUID
         let preset: MetronomePreset
+        let plan: MetronomePlaybackPlan
         let startHostTime: UInt64
         let presentationLatency: TimeInterval
         let onTick: @Sendable (UUID, Int, Int, Int) -> Void
@@ -229,6 +266,7 @@ private final class BeatAudioScheduler: @unchecked Sendable {
 
     func start(
         preset: MetronomePreset,
+        plan: MetronomePlaybackPlan,
         onTick: @escaping @Sendable (UUID, Int, Int, Int) -> Void
     ) throws -> UUID {
         try schedulingQueue.sync {
@@ -248,6 +286,7 @@ private final class BeatAudioScheduler: @unchecked Sendable {
             playbackSession = PlaybackSession(
                 token: token,
                 preset: preset.normalized,
+                plan: plan,
                 startHostTime: startHostTime,
                 presentationLatency: audioEngine.outputNode.presentationLatency,
                 onTick: onTick,
@@ -303,13 +342,13 @@ private final class BeatAudioScheduler: @unchecked Sendable {
             elapsedSeconds = -AVAudioTime.seconds(forHostTime: session.startHostTime - nowHostTime)
         }
         let horizonFrame = max(0, elapsedSeconds + lookAheadSeconds) * sampleRate
-        let exactInterval = sampleRate * session.preset.eventInterval
-        let eventCount = session.preset.eventsPerMeasure
+        let exactInterval = sampleRate * session.plan.eventInterval
+        let eventCount = session.plan.eventsPerMeasure
 
         while session.nextExactFrame <= horizonFrame {
             let scheduledFrame = AVAudioFramePosition(session.nextExactFrame.rounded())
-            let beat = session.eventIndex / session.preset.pulsesPerBeat
-            let subdivision = session.eventIndex % session.preset.pulsesPerBeat
+            let beat = session.eventIndex / session.plan.pulsesPerBeat
+            let subdivision = session.eventIndex % session.plan.pulsesPerBeat
             let kind = clickKind(beat: beat, subdivision: subdivision, preset: session.preset)
 
             if let buffer = clickBuffers[kind], let playerNode = playerNodes[kind] {

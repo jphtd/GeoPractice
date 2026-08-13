@@ -32,6 +32,165 @@ enum RotationDirection: String, CaseIterable, Codable, Identifiable, Sendable {
     }
 }
 
+/// Runtime-only tempo interpretations used by the DEBUG customer comparison
+/// panel. These values deliberately are not stored inside `MetronomePreset`,
+/// so existing event snapshots and practice-session drafts remain compatible.
+enum TempoSemantics: String, CaseIterable, Identifiable, Sendable {
+    case legacyQuarterReference
+    case trainingNoteReference
+    case independentReference
+
+    var id: String { rawValue }
+
+    var code: String {
+        switch self {
+        case .legacyQuarterReference: "T1"
+        case .trainingNoteReference: "T2"
+        case .independentReference: "T3"
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .legacyQuarterReference: "四分音符固定基准"
+        case .trainingNoteReference: "训练音符就是 BPM 单位"
+        case .independentReference: "独立选择 BPM 基准音符"
+        }
+    }
+
+    var explanation: String {
+        switch self {
+        case .legacyQuarterReference:
+            "当前版本逻辑。BPM 始终表示四分音符速度，训练音符越细，实际脉冲越密。"
+        case .trainingNoteReference:
+            "BPM 表示当前训练音符的速度。八分音符 88 BPM 就是每分钟 88 次脉冲。"
+        case .independentReference:
+            "训练内容与 BPM 的计速单位分开选择，可同时表达“练八分音符、四分音符等于 88”。"
+        }
+    }
+}
+
+enum TempoReferenceNote: String, CaseIterable, Identifiable, Sendable {
+    case half
+    case quarter
+    case eighth
+    case sixteenth
+
+    var id: String { rawValue }
+
+    var density: Double {
+        switch self {
+        case .half: 0.5
+        case .quarter: 1
+        case .eighth: 2
+        case .sixteenth: 4
+        }
+    }
+
+    var title: String {
+        switch self {
+        case .half: "二分音符"
+        case .quarter: "四分音符"
+        case .eighth: "八分音符"
+        case .sixteenth: "十六分音符"
+        }
+    }
+
+    var shortTitle: String {
+        switch self {
+        case .half: "2 分"
+        case .quarter: "4 分"
+        case .eighth: "8 分"
+        case .sixteenth: "16 分"
+        }
+    }
+
+    var symbol: String {
+        switch self {
+        case .half: "𝅗𝅥"
+        case .quarter: "♩"
+        case .eighth: "♪"
+        case .sixteenth: "♬"
+        }
+    }
+
+    static func trainingNote(for subdivision: Int) -> TempoReferenceNote {
+        switch subdivision {
+        case 0: .half
+        case 2: .eighth
+        case 4: .sixteenth
+        default: .quarter
+        }
+    }
+}
+
+/// An immutable timing snapshot shared by audio scheduling and visual Hits.
+/// Beat topology always comes from the training note; tempo semantics only
+/// change the time between those events.
+struct MetronomePlaybackPlan: Hashable, Sendable {
+    let semantics: TempoSemantics
+    let referenceNote: TempoReferenceNote
+    let trainingNote: TempoReferenceNote
+    let bpm: Int
+    let pulsesPerBeat: Int
+    let eventsPerMeasure: Int
+    let eventInterval: TimeInterval
+
+    init(
+        preset: MetronomePreset,
+        semantics: TempoSemantics = .legacyQuarterReference,
+        referenceNote: TempoReferenceNote = .quarter
+    ) {
+        let normalized = preset.normalized
+        let trainingNote = TempoReferenceNote.trainingNote(for: normalized.subdivision)
+        let effectiveReference: TempoReferenceNote
+        switch semantics {
+        case .legacyQuarterReference:
+            effectiveReference = .quarter
+        case .trainingNoteReference:
+            effectiveReference = trainingNote
+        case .independentReference:
+            effectiveReference = referenceNote
+        }
+
+        let pulsesPerBeat = max(1, normalized.subdivision)
+        let trainingDensity = normalized.subdivision == 0
+            ? 0.5
+            : Double(normalized.subdivision)
+
+        self.semantics = semantics
+        self.referenceNote = effectiveReference
+        self.trainingNote = trainingNote
+        self.bpm = normalized.bpm
+        self.pulsesPerBeat = pulsesPerBeat
+        self.eventsPerMeasure = normalized.beats * pulsesPerBeat
+        self.eventInterval = 60 / Double(normalized.bpm)
+            * effectiveReference.density / trainingDensity
+    }
+
+    var mainBeatDuration: TimeInterval {
+        eventInterval * Double(pulsesPerBeat)
+    }
+
+    var measureDuration: TimeInterval {
+        eventInterval * Double(eventsPerMeasure)
+    }
+
+    var actualPulsesPerMinute: Double {
+        60 / eventInterval
+    }
+
+    var bpmMark: String {
+        "\(referenceNote.symbol) = \(bpm)"
+    }
+
+    func hasSameSchedule(as other: MetronomePlaybackPlan) -> Bool {
+        eventInterval == other.eventInterval
+            && eventsPerMeasure == other.eventsPerMeasure
+            && pulsesPerBeat == other.pulsesPerBeat
+    }
+}
+
 struct MetronomePreset: Codable, Hashable, Sendable {
     var bpm: Int
     var beats: Int
@@ -134,6 +293,17 @@ struct MetronomePreset: Codable, Hashable, Sendable {
 
     var mainBeatDuration: TimeInterval {
         eventInterval * Double(pulsesPerBeat)
+    }
+
+    func playbackPlan(
+        semantics: TempoSemantics = .legacyQuarterReference,
+        referenceNote: TempoReferenceNote = .quarter
+    ) -> MetronomePlaybackPlan {
+        MetronomePlaybackPlan(
+            preset: self,
+            semantics: semantics,
+            referenceNote: referenceNote
+        )
     }
 
     var compactSummary: String {

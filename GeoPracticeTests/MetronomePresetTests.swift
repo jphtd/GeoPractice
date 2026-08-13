@@ -235,6 +235,175 @@ final class MetronomePresetTests: XCTestCase {
         )
     }
 
+    func testCustomerTempoPlansKeepEightNoteTopologyButChangeTiming() {
+        var preset = MetronomePreset.standard
+        preset.bpm = 88
+        preset.beats = 4
+        preset.subdivision = 2
+
+        let legacy = preset.playbackPlan(semantics: .legacyQuarterReference)
+        let training = preset.playbackPlan(semantics: .trainingNoteReference)
+        let independentQuarter = preset.playbackPlan(
+            semantics: .independentReference,
+            referenceNote: .quarter
+        )
+        let independentEighth = preset.playbackPlan(
+            semantics: .independentReference,
+            referenceNote: .eighth
+        )
+
+        for plan in [legacy, training, independentQuarter, independentEighth] {
+            XCTAssertEqual(plan.pulsesPerBeat, 2)
+            XCTAssertEqual(plan.eventsPerMeasure, 8)
+            XCTAssertEqual(plan.trainingNote, .eighth)
+        }
+
+        XCTAssertEqual(legacy.referenceNote, .quarter)
+        XCTAssertEqual(legacy.bpmMark, "♩ = 88")
+        XCTAssertEqual(legacy.actualPulsesPerMinute, 176, accuracy: 0.000_001)
+        XCTAssertEqual(legacy.eventInterval, 60.0 / 176.0, accuracy: 0.000_001)
+        XCTAssertEqual(legacy.measureDuration, 240.0 / 88.0, accuracy: 0.000_001)
+
+        XCTAssertEqual(training.referenceNote, .eighth)
+        XCTAssertEqual(training.bpmMark, "♪ = 88")
+        XCTAssertEqual(training.actualPulsesPerMinute, 88, accuracy: 0.000_001)
+        XCTAssertEqual(training.eventInterval, 60.0 / 88.0, accuracy: 0.000_001)
+        XCTAssertEqual(training.measureDuration, 480.0 / 88.0, accuracy: 0.000_001)
+
+        XCTAssertEqual(independentQuarter.eventInterval, legacy.eventInterval, accuracy: 0.000_001)
+        XCTAssertEqual(independentEighth.eventInterval, training.eventInterval, accuracy: 0.000_001)
+        XCTAssertTrue(independentQuarter.hasSameSchedule(as: legacy))
+        XCTAssertTrue(independentEighth.hasSameSchedule(as: training))
+        XCTAssertFalse(training.hasSameSchedule(as: legacy))
+    }
+
+    func testIndependentTempoReferenceCoversAllCandidateInterpretations() {
+        var preset = MetronomePreset.standard
+        preset.bpm = 88
+        preset.beats = 4
+        preset.subdivision = 2
+
+        let expectedRates: [TempoReferenceNote: Double] = [
+            .half: 352,
+            .quarter: 176,
+            .eighth: 88,
+            .sixteenth: 44
+        ]
+
+        for note in TempoReferenceNote.allCases {
+            let plan = preset.playbackPlan(
+                semantics: .independentReference,
+                referenceNote: note
+            )
+            XCTAssertEqual(
+                plan.actualPulsesPerMinute,
+                expectedRates[note]!,
+                accuracy: 0.000_001
+            )
+            XCTAssertEqual(plan.eventsPerMeasure, 8)
+            XCTAssertEqual(plan.eventInterval, 60 / expectedRates[note]!, accuracy: 0.000_001)
+        }
+    }
+
+    func testTempoSemanticsDoNotChangeVisualPulseAddresses() throws {
+        var preset = MetronomePreset.standard
+        preset.bpm = 88
+        preset.beats = 4
+        preset.subdivision = 2
+
+        let plans = [
+            preset.playbackPlan(semantics: .legacyQuarterReference),
+            preset.playbackPlan(semantics: .trainingNoteReference),
+            preset.playbackPlan(semantics: .independentReference, referenceNote: .eighth)
+        ]
+
+        let phaseSets = try plans.map { plan in
+            try (0..<plan.eventsPerMeasure).map { eventIndex in
+                let beat = eventIndex / plan.pulsesPerBeat
+                let subdivision = eventIndex % plan.pulsesPerBeat
+                return try XCTUnwrap(BeatPulseVisualModel.address(
+                    beat: beat,
+                    subdivision: subdivision,
+                    beats: preset.beats,
+                    pulsesPerBeat: plan.pulsesPerBeat
+                )).phase
+            }
+        }
+
+        XCTAssertEqual(phaseSets[0], [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5])
+        XCTAssertEqual(phaseSets[1], phaseSets[0])
+        XCTAssertEqual(phaseSets[2], phaseSets[0])
+    }
+
+    func testLegacyFiveFieldPresetJSONStillDecodes() throws {
+        let json = """
+        {
+          "bpm": 88,
+          "beats": 4,
+          "subdivision": 2,
+          "direction": "counterclockwise",
+          "grouping": "标准"
+        }
+        """
+        let decoded = try JSONDecoder().decode(
+            MetronomePreset.self,
+            from: try XCTUnwrap(json.data(using: .utf8))
+        )
+
+        XCTAssertEqual(decoded.bpm, 88)
+        XCTAssertEqual(decoded.beats, 4)
+        XCTAssertEqual(decoded.subdivision, 2)
+        XCTAssertEqual(decoded.direction, .counterclockwise)
+        XCTAssertEqual(decoded.grouping, "标准")
+    }
+
+    func testLiquidSelectorRelativeMathClampsAndUsesGestureOrigin() {
+        XCTAssertEqual(
+            LiquidSelectorMath.relativeIndex(
+                startIndex: 3,
+                translation: -44,
+                pointsPerStep: 44,
+                optionCount: 7
+            ),
+            2
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.relativeIndex(
+                startIndex: 3,
+                translation: 44,
+                pointsPerStep: 44,
+                optionCount: 7
+            ),
+            4
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.relativeIndex(
+                startIndex: 0,
+                translation: 1_000,
+                pointsPerStep: 44,
+                optionCount: 7
+            ),
+            6
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.relativeIndex(
+                startIndex: 6,
+                translation: -1_000,
+                pointsPerStep: 44,
+                optionCount: 7
+            ),
+            0
+        )
+        XCTAssertNil(
+            LiquidSelectorMath.relativeIndex(
+                startIndex: 0,
+                translation: 44,
+                pointsPerStep: 0,
+                optionCount: 7
+            )
+        )
+    }
+
     func testBeatVisualLifecyclePauseDoesNotCollapseAndFinishIsExplicit() {
         var lifecycle = BeatVisualLifecycle(beats: 3)
         for beat in 0..<3 {

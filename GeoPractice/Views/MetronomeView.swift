@@ -5,6 +5,9 @@ private enum MetronomePanel: String, Identifiable {
     case session
     case structure
     case tempo
+#if DEBUG
+    case experiments
+#endif
 
     var id: String { rawValue }
 
@@ -13,6 +16,9 @@ private enum MetronomePanel: String, Identifiable {
         case .session: "本次练习"
         case .structure: "节拍设置"
         case .tempo: "速度设置"
+#if DEBUG
+        case .experiments: "客户方案实验台"
+#endif
         }
     }
 }
@@ -41,6 +47,14 @@ struct MetronomeView: View {
     let leaveMetronome: () -> Void
 
     @AppStorage("confirmBeforeHandSwitch") private var confirmBeforeHandSwitch = true
+#if DEBUG
+    @AppStorage("debug.customerLab.tempoMode.v1")
+    private var debugTempoModeRaw = TempoSemantics.legacyQuarterReference.rawValue
+    @AppStorage("debug.customerLab.referenceNote.v1")
+    private var debugReferenceNoteRaw = TempoReferenceNote.quarter.rawValue
+    @AppStorage("debug.customerLab.selectorStyle.v1")
+    private var debugSelectorStyleRaw = LiquidSelectorStyle.fullTrack.rawValue
+#endif
     @State private var pendingHandSwitch: PracticeHand?
     @State private var reviewSummary: PracticeSessionSummary?
     @State private var persistenceError: String?
@@ -134,13 +148,29 @@ struct MetronomeView: View {
             Text(engine.errorMessage ?? "")
         }
         .onAppear {
+#if DEBUG
+            synchronizeCustomerExperiment()
+#endif
             synchronizeVisualSession()
             if reviewSummary == nil, visualFinish == nil {
                 reviewSummary = practiceSession.session.reviewSummary
             }
         }
+#if DEBUG
+        .onChange(of: debugTempoModeRaw) { _, _ in
+            synchronizeCustomerExperiment()
+        }
+        .onChange(of: debugReferenceNoteRaw) { _, _ in
+            synchronizeCustomerExperiment()
+        }
+#endif
         .onChange(of: engine.preset) { _, preset in
             practiceSession.updatePreset(preset)
+        }
+        .onChange(of: engine.playbackPlan) { previousPlan, nextPlan in
+            if !nextPlan.hasSameSchedule(as: previousPlan) {
+                visualPulse = nil
+            }
         }
         .onChange(of: engine.preset.beats) { _, beats in
             visualLifecycle.reconfigure(beats: beats)
@@ -213,6 +243,17 @@ struct MetronomeView: View {
                         Label("完整节拍设置", systemImage: "slider.horizontal.3")
                     }
 
+#if DEBUG
+                    Button {
+                        activePanel = .experiments
+                    } label: {
+                        Label(
+                            "客户方案实验台 · \(customerExperimentCode)",
+                            systemImage: "flask"
+                        )
+                    }
+#endif
+
                     Divider()
 
                     Button {
@@ -241,7 +282,7 @@ struct MetronomeView: View {
                 Text("GeoBeat")
                     .font(.system(size: 24, weight: .bold, design: .rounded))
                     .tracking(-0.6)
-                Text(sourceEvent?.name ?? "自由练习")
+                Text(headerSubtitle)
                     .font(.system(size: 10, weight: .semibold))
                     .foregroundStyle(GeoTheme.muted)
                     .lineLimit(1)
@@ -273,6 +314,15 @@ struct MetronomeView: View {
         .frame(height: 54)
     }
 
+    private var headerSubtitle: String {
+        let practiceName = sourceEvent?.name ?? "自由练习"
+#if DEBUG
+        return "\(practiceName) · \(customerExperimentCode)"
+#else
+        return practiceName
+#endif
+    }
+
     private var v4Stage: some View {
         Button {
             toggleMetronome()
@@ -280,6 +330,7 @@ struct MetronomeView: View {
             ZStack {
                 MetronomeCanvas(
                     preset: engine.preset,
+                    playbackPlan: engine.playbackPlan,
                     lifecycle: visualLifecycle,
                     pulse: visualPulse,
                     finishAnimation: visualFinish,
@@ -357,9 +408,9 @@ struct MetronomeView: View {
                 beatLiquidControl
                     .frame(maxWidth: .infinity)
                 tempoLiquidControl
-                    .frame(width: 116)
+                    .frame(minWidth: 96, idealWidth: 116, maxWidth: 116)
                 subdivisionLiquidControl
-                    .frame(width: 102)
+                    .frame(minWidth: 88, idealWidth: 102, maxWidth: 102)
             }
 
             HStack(spacing: 6) {
@@ -369,6 +420,14 @@ struct MetronomeView: View {
                     .frame(width: 92)
             }
         }
+    }
+
+    private var activeSelectorStyle: LiquidSelectorStyle {
+#if DEBUG
+        debugSelectorStyle
+#else
+        .fullTrack
+#endif
     }
 
     private var beatLiquidControl: some View {
@@ -386,6 +445,7 @@ struct MetronomeView: View {
             LiquidScrubSelector(
                 options: Array(3...9),
                 selection: engine.preset.beats,
+                style: activeSelectorStyle,
                 accessibilityLabel: "拍子",
                 accessibilityValue: { "\($0) 拍" },
                 controlHeight: 44,
@@ -425,6 +485,7 @@ struct MetronomeView: View {
             LiquidScrubSelector(
                 options: MetronomePreset.supportedSubdivisions,
                 selection: engine.preset.subdivision,
+                style: activeSelectorStyle,
                 accessibilityLabel: "训练音符",
                 accessibilityValue: subdivisionTitle,
                 controlHeight: 44,
@@ -453,6 +514,7 @@ struct MetronomeView: View {
             LiquidScrubSelector(
                 options: PracticeHand.controlOrder,
                 selection: hand,
+                style: activeSelectorStyle,
                 accessibilityLabel: "练习手型",
                 accessibilityValue: { $0.title },
                 controlHeight: 44,
@@ -523,6 +585,10 @@ struct MetronomeView: View {
                             structureCard
                         case .tempo:
                             tempoCard
+#if DEBUG
+                        case .experiments:
+                            customerExperimentCard
+#endif
                         }
                     }
                     .frame(maxWidth: 560)
@@ -668,6 +734,277 @@ struct MetronomeView: View {
             }
         }
     }
+
+#if DEBUG
+    private var debugTempoMode: TempoSemantics {
+        TempoSemantics(rawValue: debugTempoModeRaw) ?? .legacyQuarterReference
+    }
+
+    private var debugReferenceNote: TempoReferenceNote {
+        TempoReferenceNote(rawValue: debugReferenceNoteRaw) ?? .quarter
+    }
+
+    private var debugSelectorStyle: LiquidSelectorStyle {
+        LiquidSelectorStyle(rawValue: debugSelectorStyleRaw) ?? .fullTrack
+    }
+
+    private var customerExperimentCode: String {
+        "\(debugTempoMode.code) · \(selectorStyleCode(debugSelectorStyle))"
+    }
+
+    private var customerExperimentCard: some View {
+        let plan = engine.playbackPlan
+
+        return VStack(spacing: 16) {
+            GeoCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    CardTitle(title: "客户方案实验台", subtitle: "DEBUG ONLY · \(customerExperimentCode)")
+
+                    Label(
+                        "仅本机 Debug 运行可见，不会进入 Release 或 TestFlight。播放中切换到不同速度时会立即从首拍重新开始；若两个方案速度相同，则保持当前节拍。",
+                        systemImage: "ladybug"
+                    )
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(GeoTheme.muted)
+
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("速度逻辑")
+                            .font(.system(size: 13, weight: .bold))
+
+                        ForEach(TempoSemantics.allCases) { mode in
+                            Button {
+                                debugTempoModeRaw = mode.rawValue
+                            } label: {
+                                experimentChoiceRow(
+                                    code: mode.code,
+                                    title: mode.title,
+                                    detail: mode.explanation,
+                                    isSelected: debugTempoMode == mode
+                                )
+                            }
+                            .buttonStyle(.plain)
+                            .accessibilityAddTraits(debugTempoMode == mode ? .isSelected : [])
+                        }
+                    }
+
+                    if debugTempoMode == .independentReference {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ControlLabel(
+                                title: "BPM 基准音符",
+                                value: "\(debugReferenceNote.symbol) · \(debugReferenceNote.title)"
+                            )
+                            GeoSegmentContainer {
+                                ForEach(TempoReferenceNote.allCases) { note in
+                                    GeoSegmentButton(
+                                        title: note.shortTitle,
+                                        isActive: debugReferenceNote == note
+                                    ) {
+                                        debugReferenceNoteRaw = note.rawValue
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            GeoCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    CardTitle(title: "底部选择器样式", subtitle: "SELECTOR UI")
+
+                    ForEach(LiquidSelectorStyle.allCases) { style in
+                        Button {
+                            debugSelectorStyleRaw = style.rawValue
+                        } label: {
+                            experimentChoiceRow(
+                                code: selectorStyleCode(style),
+                                title: selectorStyleTitle(style),
+                                detail: selectorStyleExplanation(style),
+                                isSelected: debugSelectorStyle == style
+                            )
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(debugSelectorStyle == style ? .isSelected : [])
+                    }
+
+                    Divider()
+                        .overlay(GeoTheme.line)
+
+                    VStack(alignment: .leading, spacing: 6) {
+                        ControlLabel(title: "即时预览", value: "当前 \(engine.preset.beats) 拍")
+                        LiquidScrubSelector(
+                            options: Array(3...9),
+                            selection: engine.preset.beats,
+                            style: debugSelectorStyle,
+                            accessibilityLabel: "实验台拍子预览",
+                            accessibilityValue: { "\($0) 拍" },
+                            controlHeight: 48,
+                            isEnabled: canEditLiquidControls,
+                            onCommit: setBeatCount
+                        ) { beats in
+                            Text("\(beats)")
+                                .font(.system(size: 13, weight: .bold, design: .rounded))
+                        }
+                        Text("这里与底部真实拍子控件同步，可直接试滑；松手后才提交一次。")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(GeoTheme.muted)
+                    }
+                }
+            }
+
+            GeoCard {
+                VStack(spacing: 12) {
+                    CardTitle(title: "当前组合的实际结果", subtitle: customerExperimentCode)
+                    experimentMetricRow(title: "BPM 标记", value: plan.bpmMark)
+                    experimentMetricRow(title: "训练内容", value: engine.preset.subdivisionTitle)
+                    experimentMetricRow(
+                        title: "实际脉冲速度",
+                        value: "\(formattedPulseRate(plan.actualPulsesPerMinute)) 次/分"
+                    )
+                    experimentMetricRow(
+                        title: "脉冲间隔",
+                        value: "\(plan.eventInterval.formatted(.number.precision(.fractionLength(3)))) 秒"
+                    )
+                    experimentMetricRow(title: "每小节", value: "\(plan.eventsPerMeasure) 次")
+                    experimentMetricRow(
+                        title: "小节时长",
+                        value: "\(plan.measureDuration.formatted(.number.precision(.fractionLength(3)))) 秒"
+                    )
+
+                    if engine.preset.subdivision == 0 {
+                        Text("提示：二分音符暂时沿用当前版本的事件结构；例如 4 拍仍有 4 次事件，只改变速度。是否改为传统 4/4 的 2 次，需要客户另行确认。")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundStyle(GeoTheme.muted)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    Button {
+                        restoreCustomerExperimentBaseline()
+                    } label: {
+                        Label("恢复当前版基线（T1 · S1）", systemImage: "arrow.counterclockwise")
+                            .font(.system(size: 13, weight: .bold))
+                            .frame(maxWidth: .infinity, minHeight: 48)
+                            .background(
+                                Color.white.opacity(0.08),
+                                in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func experimentChoiceRow(
+        code: String,
+        title: String,
+        detail: String,
+        isSelected: Bool
+    ) -> some View {
+        HStack(spacing: 11) {
+            Text(code)
+                .font(.system(size: 12, weight: .heavy, design: .rounded))
+                .frame(width: 32, height: 32)
+                .background(
+                    Color.white.opacity(isSelected ? 0.20 : 0.06),
+                    in: Circle()
+                )
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                Text(detail)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(GeoTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
+            Spacer(minLength: 6)
+            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(isSelected ? .white : GeoTheme.muted)
+        }
+        .padding(11)
+        .background(
+            Color.white.opacity(isSelected ? 0.09 : 0.025),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(Color.white.opacity(isSelected ? 0.30 : 0.07), lineWidth: 1)
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+    }
+
+    private func experimentMetricRow(title: String, value: String) -> some View {
+        HStack {
+            Text(title)
+                .foregroundStyle(GeoTheme.muted)
+            Spacer()
+            Text(value)
+                .fontWeight(.bold)
+                .monospacedDigit()
+        }
+        .font(.system(size: 12, weight: .semibold))
+    }
+
+    private func selectorStyleCode(_ style: LiquidSelectorStyle) -> String {
+        switch style {
+        case .fullTrack: "S1"
+        case .singleValue: "S2"
+        case .adjacentCarousel: "S3"
+        }
+    }
+
+    private func selectorStyleTitle(_ style: LiquidSelectorStyle) -> String {
+        switch style {
+        case .fullTrack: "平铺全部选项"
+        case .singleValue: "只显示当前值"
+        case .adjacentCarousel: "当前值与相邻预览"
+        }
+    }
+
+    private func selectorStyleExplanation(_ style: LiquidSelectorStyle) -> String {
+        switch style {
+        case .fullTrack: "当前版本。所有候选值同时出现，可点击或在整条轨道上滑动。"
+        case .singleValue: "框中永远只显示一个结果，左右滑动逐项切换。"
+        case .adjacentCarousel: "当前结果居中，前后选项淡化预览，左右滑动切换。"
+        }
+    }
+
+    private func formattedPulseRate(_ value: Double) -> String {
+        let rounded = value.rounded()
+        if abs(value - rounded) < 0.001 {
+            return Int(rounded).formatted()
+        }
+        return value.formatted(.number.precision(.fractionLength(1)))
+    }
+
+    private func synchronizeCustomerExperiment() {
+        let mode = debugTempoMode
+        let reference = debugReferenceNote
+        if debugTempoModeRaw != mode.rawValue {
+            debugTempoModeRaw = mode.rawValue
+        }
+        if debugReferenceNoteRaw != reference.rawValue {
+            debugReferenceNoteRaw = reference.rawValue
+        }
+        if debugSelectorStyleRaw != debugSelectorStyle.rawValue {
+            debugSelectorStyleRaw = LiquidSelectorStyle.fullTrack.rawValue
+        }
+        engine.setTempoExperiment(semantics: mode, referenceNote: reference)
+    }
+
+    private func restoreCustomerExperimentBaseline() {
+        debugTempoModeRaw = TempoSemantics.legacyQuarterReference.rawValue
+        debugReferenceNoteRaw = TempoReferenceNote.quarter.rawValue
+        debugSelectorStyleRaw = LiquidSelectorStyle.fullTrack.rawValue
+        engine.setTempoExperiment(
+            semantics: .legacyQuarterReference,
+            referenceNote: .quarter
+        )
+    }
+#endif
 
     private var practiceCard: some View {
         GeoCard {
@@ -1106,6 +1443,7 @@ private struct PracticeSessionSummaryView: View {
 
 private struct MetronomeCanvas: View {
     let preset: MetronomePreset
+    let playbackPlan: MetronomePlaybackPlan
     let lifecycle: BeatVisualLifecycle
     let pulse: BeatVisualPulseSnapshot?
     let finishAnimation: BeatVisualFinishAnimation?
@@ -1197,7 +1535,7 @@ private struct MetronomeCanvas: View {
                 beat: pulse.beat,
                 subdivision: pulse.subdivision,
                 beats: preset.beats,
-                pulsesPerBeat: preset.pulsesPerBeat
+                pulsesPerBeat: playbackPlan.pulsesPerBeat
               ),
               let position = pulsePosition(for: address, points: points)
         else { return }
@@ -1210,7 +1548,7 @@ private struct MetronomeCanvas: View {
         )
         let style = BeatPulseVisualModel.style(
             for: kind,
-            eventInterval: preset.eventInterval,
+            eventInterval: playbackPlan.eventInterval,
             dimFlashingLights: dimFlashingLights
         )
         let age = max(0, date.timeIntervalSince(pulse.pulseDate))

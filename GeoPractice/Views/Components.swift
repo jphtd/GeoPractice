@@ -165,6 +165,165 @@ struct ControlLabel: View {
     }
 }
 
+/// A number-first tempo control. Horizontal distance maps to exact BPM steps;
+/// the model is committed only when the gesture ends, so a playing metronome is
+/// rescheduled once instead of on every drag sample.
+struct TempoScrubber: View {
+    let bpm: Int
+    var compact = false
+    var onTap: (() -> Void)?
+    let onCommit: (Int) -> Void
+
+    @State private var draftBPM: Int?
+    @State private var dragStartBPM: Int?
+    @State private var dragAxis: ScrubAxis?
+    @State private var suppressTap = false
+
+    private enum ScrubAxis {
+        case horizontal
+        case vertical
+    }
+
+    private var displayedBPM: Int {
+        draftBPM ?? bpm
+    }
+
+    private var displayedTempoName: String {
+        var preset = MetronomePreset.standard
+        preset.bpm = displayedBPM
+        return preset.tempoName
+    }
+
+    var body: some View {
+        Group {
+            if compact {
+                VStack(spacing: 0) {
+                    Text(displayedTempoName)
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(.secondary)
+                    scrubTarget(compact: true)
+                }
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard !suppressTap else { return }
+                    onTap?()
+                }
+            } else {
+                VStack(spacing: 8) {
+                    Text(displayedTempoName)
+                        .font(.system(size: 13, weight: .bold, design: .rounded))
+                        .foregroundStyle(GeoTheme.muted)
+                    scrubTarget(compact: false)
+                    Text("左右滑动数字 · 逐点精调 1 BPM")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(GeoTheme.muted)
+                }
+                .frame(maxWidth: .infinity, minHeight: 128)
+                .background(
+                    Color(white: 0.04),
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.white.opacity(draftBPM == nil ? 0.08 : 0.26), lineWidth: 1)
+                }
+            }
+        }
+        .onDisappear {
+            cancelDraft()
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("速度")
+        .accessibilityValue("\(displayedTempoName)，\(displayedBPM) BPM")
+        .accessibilityHint("左右拖动数字调整；VoiceOver 上下轻扫每次调整 1 BPM")
+        .accessibilityAdjustableAction { direction in
+            let delta: Int
+            switch direction {
+            case .increment: delta = 1
+            case .decrement: delta = -1
+            @unknown default: return
+            }
+            let next = clamped(bpm + delta)
+            if next != bpm { onCommit(next) }
+        }
+    }
+
+    private func scrubTarget(compact: Bool) -> some View {
+        HStack(spacing: compact ? 7 : 18) {
+            Image(systemName: "chevron.left")
+            Text("\(displayedBPM)")
+                .font(.system(
+                    size: compact ? 23 : 58,
+                    weight: .bold,
+                    design: .rounded
+                ))
+                .monospacedDigit()
+                .contentTransition(.numericText())
+            Image(systemName: "chevron.right")
+        }
+        .foregroundStyle(GeoTheme.text)
+        .frame(minWidth: compact ? 116 : 220, minHeight: compact ? 42 : 76)
+        .contentShape(Rectangle())
+        .overlay(alignment: .bottom) {
+            if draftBPM != nil {
+                Capsule()
+                    .fill(Color.white.opacity(0.62))
+                    .frame(width: compact ? 26 : 48, height: 1.5)
+            }
+        }
+        .simultaneousGesture(scrubGesture)
+    }
+
+    private var scrubGesture: some Gesture {
+        DragGesture(minimumDistance: 8, coordinateSpace: .local)
+            .onChanged { value in
+                let horizontal = abs(value.translation.width)
+                let vertical = abs(value.translation.height)
+                if dragAxis == nil {
+                    if horizontal > vertical * 1.2 {
+                        dragAxis = .horizontal
+                        dragStartBPM = bpm
+                        draftBPM = bpm
+                    } else if vertical > horizontal * 1.2 {
+                        dragAxis = .vertical
+                    } else {
+                        return
+                    }
+                }
+                guard dragAxis == .horizontal, let dragStartBPM else { return }
+                suppressTap = true
+                draftBPM = TempoScrubModel.bpm(
+                    start: dragStartBPM,
+                    horizontalTranslation: value.translation.width
+                )
+            }
+            .onEnded { _ in
+                let committed = dragAxis == .horizontal ? draftBPM : nil
+                cancelDraft(keepTapSuppressed: suppressTap)
+                if let committed, committed != bpm {
+                    onCommit(committed)
+                }
+            }
+    }
+
+    private func clamped(_ value: Int) -> Int {
+        min(TempoScrubModel.maximumBPM, max(TempoScrubModel.minimumBPM, value))
+    }
+
+    private func cancelDraft(keepTapSuppressed: Bool = false) {
+        draftBPM = nil
+        dragStartBPM = nil
+        dragAxis = nil
+        if keepTapSuppressed {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 120_000_000)
+                suppressTap = false
+            }
+        } else {
+            suppressTap = false
+        }
+    }
+}
 struct GeoSegmentButton: View {
     let title: String
     var symbol: String?

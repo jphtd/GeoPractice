@@ -20,6 +20,14 @@ final class MetronomePresetTests: XCTestCase {
         }
     }
 
+    func testTempoScrubUsesExactStepsAndClamps() {
+        XCTAssertEqual(TempoScrubModel.bpm(start: 120, horizontalTranslation: 2.9), 120)
+        XCTAssertEqual(TempoScrubModel.bpm(start: 120, horizontalTranslation: 3), 121)
+        XCTAssertEqual(TempoScrubModel.bpm(start: 120, horizontalTranslation: -3), 119)
+        XCTAssertEqual(TempoScrubModel.bpm(start: 30, horizontalTranslation: -300), 30)
+        XCTAssertEqual(TempoScrubModel.bpm(start: 240, horizontalTranslation: 300), 240)
+    }
+
     func testGroupingStartIndices() {
         var preset = MetronomePreset.standard
         preset.beats = 4
@@ -86,10 +94,11 @@ final class MetronomePresetTests: XCTestCase {
         sixteenth.subdivision = 4
         XCTAssertEqual(sixteenth.pulsesPerBeat, 4)
         XCTAssertEqual(sixteenth.eventDensity, 4)
+        XCTAssertEqual(sixteenth.eventsPerMeasure, 16)
         XCTAssertEqual(sixteenth.mainBeatDuration, 0.5, accuracy: 0.000_1)
     }
 
-    func testBeatVisualLifecycleBuildsOnceAndKeepsGeometryAcrossCycles() {
+    func testFirstPulseEstablishesFixedGeometryAndKeepsItAcrossCycles() {
         var lifecycle = BeatVisualLifecycle(beats: 4)
 
         XCTAssertEqual(lifecycle.phase, .origin)
@@ -97,16 +106,7 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(lifecycle.visibleBeatIndices, [])
 
         lifecycle.resume()
-        lifecycle.record(beat: 0, subdivision: 0, cycle: 0, beats: 4)
         lifecycle.record(beat: 0, subdivision: 1, cycle: 0, beats: 4)
-        lifecycle.record(beat: 1, subdivision: 0, cycle: 0, beats: 4)
-        lifecycle.record(beat: 2, subdivision: 0, cycle: 0, beats: 4)
-
-        XCTAssertEqual(lifecycle.phase, .building)
-        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2])
-        XCTAssertFalse(lifecycle.hasEstablishedStructure)
-
-        lifecycle.record(beat: 3, subdivision: 0, cycle: 0, beats: 4)
         XCTAssertEqual(lifecycle.phase, .orbiting)
         XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3])
         XCTAssertTrue(lifecycle.hasEstablishedStructure)
@@ -118,6 +118,121 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(lifecycle.phase, .orbiting)
         XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3])
         XCTAssertTrue(lifecycle.hasEstablishedStructure)
+    }
+
+    func testFourBeatEighthNoteProducesEightFixedPulseAddresses() throws {
+        let addresses = try (0..<4).flatMap { beat in
+            try (0..<2).map { subdivision in
+                try XCTUnwrap(BeatPulseVisualModel.address(
+                    beat: beat,
+                    subdivision: subdivision,
+                    beats: 4,
+                    pulsesPerBeat: 2
+                ))
+            }
+        }
+
+        XCTAssertEqual(addresses.map(\.phase), [0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5])
+        XCTAssertEqual(Set(addresses.map(\.beat)), [0, 1, 2, 3])
+
+        let preset = MetronomePreset.standard
+        let kinds = addresses.map { address in
+            BeatPulseVisualModel.kind(
+                beat: address.beat,
+                subdivision: address.subdivision,
+                strongBeatIndices: preset.strongBeatIndices,
+                secondaryAccentIndices: preset.secondaryAccentIndices
+            )
+        }
+        XCTAssertEqual(
+            kinds,
+            [.strong, .subdivision, .weak, .subdivision,
+             .secondary, .subdivision, .weak, .subdivision]
+        )
+    }
+
+    func testSubdivisionHitNeverInheritsMainBeatAccent() {
+        let kind = BeatPulseVisualModel.kind(
+            beat: 0,
+            subdivision: 1,
+            strongBeatIndices: [0],
+            secondaryAccentIndices: []
+        )
+        XCTAssertEqual(kind, .subdivision)
+    }
+
+    func testPulseStylesAreOrderedAndDecayAfterShortPeakHold() {
+        let interval = 60.0 / 88.0 / 2.0
+        let strong = BeatPulseVisualModel.style(for: .strong, eventInterval: interval)
+        let secondary = BeatPulseVisualModel.style(for: .secondary, eventInterval: interval)
+        let weak = BeatPulseVisualModel.style(for: .weak, eventInterval: interval)
+        let subdivision = BeatPulseVisualModel.style(for: .subdivision, eventInterval: interval)
+
+        XCTAssertGreaterThan(strong.peakRadius, secondary.peakRadius)
+        XCTAssertGreaterThan(secondary.peakRadius, weak.peakRadius)
+        XCTAssertGreaterThan(weak.peakRadius, subdivision.peakRadius)
+        XCTAssertGreaterThan(strong.peakOpacity, secondary.peakOpacity)
+        XCTAssertGreaterThan(secondary.peakOpacity, weak.peakOpacity)
+        XCTAssertGreaterThan(weak.peakOpacity, subdivision.peakOpacity)
+        XCTAssertGreaterThan(strong.duration, secondary.duration)
+        XCTAssertGreaterThan(secondary.duration, weak.duration)
+        XCTAssertGreaterThan(weak.duration, subdivision.duration)
+
+        let start = BeatPulseVisualModel.envelope(age: 0, duration: strong.duration)
+        let middle = BeatPulseVisualModel.envelope(
+            age: strong.duration / 2,
+            duration: strong.duration
+        )
+        let end = BeatPulseVisualModel.envelope(
+            age: strong.duration,
+            duration: strong.duration
+        )
+        XCTAssertEqual(start, 1, accuracy: 0.000_1)
+        XCTAssertGreaterThan(start, middle)
+        XCTAssertGreaterThan(middle, end)
+        XCTAssertEqual(end, 0, accuracy: 0.000_1)
+
+        let fastestSubdivision = BeatPulseVisualModel.style(
+            for: .subdivision,
+            eventInterval: 60.0 / 240.0 / 4.0
+        )
+        XCTAssertGreaterThanOrEqual(fastestSubdivision.duration, 0.04)
+        XCTAssertEqual(
+            BeatPulseVisualModel.envelope(age: 0.01, duration: fastestSubdivision.duration),
+            1,
+            accuracy: 0.000_1
+        )
+        XCTAssertLessThan(fastestSubdivision.duration, 60.0 / 240.0 / 4.0)
+    }
+
+    func testBPMChangesTimingWithoutChangingPulseAddresses() throws {
+        var slow = MetronomePreset.standard
+        slow.bpm = 88
+        slow.subdivision = 2
+        var fast = slow
+        fast.bpm = 176
+
+        XCTAssertEqual(slow.eventsPerMeasure, 8)
+
+        let address = try XCTUnwrap(BeatPulseVisualModel.address(
+            beat: 2,
+            subdivision: 1,
+            beats: slow.beats,
+            pulsesPerBeat: slow.pulsesPerBeat
+        ))
+        let fastAddress = try XCTUnwrap(BeatPulseVisualModel.address(
+            beat: 2,
+            subdivision: 1,
+            beats: fast.beats,
+            pulsesPerBeat: fast.pulsesPerBeat
+        ))
+        XCTAssertEqual(address, fastAddress)
+        XCTAssertEqual(slow.eventInterval, 0.340_909, accuracy: 0.000_001)
+        XCTAssertEqual(
+            fast.eventInterval,
+            slow.eventInterval / 2,
+            accuracy: 0.000_001
+        )
     }
 
     func testBeatVisualLifecyclePauseDoesNotCollapseAndFinishIsExplicit() {

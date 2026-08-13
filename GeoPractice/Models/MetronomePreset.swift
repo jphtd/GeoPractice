@@ -1,5 +1,16 @@
 import Foundation
 
+enum TempoScrubModel {
+    static let minimumBPM = 30
+    static let maximumBPM = 240
+    static let pointsPerBPM: Double = 3
+
+    static func bpm(start: Int, horizontalTranslation: Double) -> Int {
+        let delta = Int(horizontalTranslation / pointsPerBPM)
+        return min(maximumBPM, max(minimumBPM, start + delta))
+    }
+}
+
 enum RotationDirection: String, CaseIterable, Codable, Identifiable, Sendable {
     case counterclockwise
     case clockwise
@@ -56,7 +67,7 @@ struct MetronomePreset: Codable, Hashable, Sendable {
 
     var normalized: MetronomePreset {
         var result = self
-        result.bpm = min(max(result.bpm, 30), 240)
+        result.bpm = min(max(result.bpm, TempoScrubModel.minimumBPM), TempoScrubModel.maximumBPM)
         result.beats = min(max(result.beats, 3), 9)
         if !Self.supportedSubdivisions.contains(result.subdivision) {
             result.subdivision = 1
@@ -113,8 +124,16 @@ struct MetronomePreset: Codable, Hashable, Sendable {
         subdivision == 0 ? 0.5 : Double(subdivision)
     }
 
+    var eventInterval: TimeInterval {
+        60 / Double(bpm) / eventDensity
+    }
+
+    var eventsPerMeasure: Int {
+        beats * pulsesPerBeat
+    }
+
     var mainBeatDuration: TimeInterval {
-        60 / Double(bpm) / min(1, eventDensity)
+        eventInterval * Double(pulsesPerBeat)
     }
 
     var compactSummary: String {

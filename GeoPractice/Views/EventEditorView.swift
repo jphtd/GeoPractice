@@ -71,22 +71,13 @@ struct PracticeEventEditorView: View {
                     }
 
                     Section("速度") {
-                        HStack {
-                            Text("BPM")
-                            Spacer()
-                            Text("\(preset.bpm)")
-                                .fontWeight(.bold)
-                                .monospacedDigit()
-                        }
-                        Slider(
-                            value: Binding(
-                                get: { Double(preset.bpm) },
-                                set: { preset.bpm = Int($0.rounded()) }
-                            ),
-                            in: 30...240,
-                            step: 1
+                        TempoScrubber(
+                            bpm: preset.bpm,
+                            onCommit: { bpm in
+                                preset.bpm = bpm
+                            }
                         )
-                        .tint(.white)
+                        .listRowInsets(EdgeInsets(top: 10, leading: 0, bottom: 10, trailing: 0))
                     }
 
                     Section("节拍结构") {
@@ -118,7 +109,7 @@ struct PracticeEventEditorView: View {
                             Text("十六分音符").tag(4)
                         }
 
-                        Picker("运行方向", selection: $preset.direction) {
+                        Picker("闪烁顺序", selection: $preset.direction) {
                             ForEach(RotationDirection.allCases) { direction in
                                 Label(direction.title, systemImage: direction.symbol)
                                     .tag(direction)

@@ -303,10 +303,8 @@ private final class BeatAudioScheduler: @unchecked Sendable {
             elapsedSeconds = -AVAudioTime.seconds(forHostTime: session.startHostTime - nowHostTime)
         }
         let horizonFrame = max(0, elapsedSeconds + lookAheadSeconds) * sampleRate
-        let exactInterval = sampleRate * 60
-            / Double(session.preset.bpm)
-            / session.preset.eventDensity
-        let eventCount = session.preset.beats * session.preset.pulsesPerBeat
+        let exactInterval = sampleRate * session.preset.eventInterval
+        let eventCount = session.preset.eventsPerMeasure
 
         while session.nextExactFrame <= horizonFrame {
             let scheduledFrame = AVAudioFramePosition(session.nextExactFrame.rounded())

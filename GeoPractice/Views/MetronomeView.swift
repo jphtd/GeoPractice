@@ -17,33 +17,17 @@ private enum MetronomePanel: String, Identifiable {
     }
 }
 
-private struct BeatVisualMotionSnapshot: Equatable {
+private struct BeatVisualPulseSnapshot: Equatable {
     let beat: Int
     let subdivision: Int
-    let cycle: Int
     let pulseDate: Date
-    let capturedAt: Date?
-
-    func frozen(at date: Date) -> BeatVisualMotionSnapshot {
-        BeatVisualMotionSnapshot(
-            beat: beat,
-            subdivision: subdivision,
-            cycle: cycle,
-            pulseDate: pulseDate,
-            // Calling freeze again (for example, finishing after a pause) must
-            // preserve the point the user is actually seeing on screen.
-            capturedAt: capturedAt ?? max(date, pulseDate)
-        )
-    }
 }
 
 private struct BeatVisualFinishAnimation: Equatable {
     let id: UUID
     let startedAt: Date
     let duration: TimeInterval
-    let motion: BeatVisualMotionSnapshot?
     let visibleBeatIndices: [Int]
-    let hasEstablishedStructure: Bool
 }
 
 struct MetronomeView: View {
@@ -63,9 +47,8 @@ struct MetronomeView: View {
     @State private var persistenceError: String?
     @State private var isSavingSummary = false
     @State private var activePanel: MetronomePanel?
-    @State private var tempoDraftBPM: Double?
     @State private var visualLifecycle = BeatVisualLifecycle()
-    @State private var visualMotion: BeatVisualMotionSnapshot?
+    @State private var visualPulse: BeatVisualPulseSnapshot?
     @State private var visualFinish: BeatVisualFinishAnimation?
     @State private var pendingReviewSummary: PracticeSessionSummary?
     @State private var visualSessionStartedAt: Date?
@@ -162,7 +145,7 @@ struct MetronomeView: View {
         }
         .onChange(of: engine.preset.beats) { _, beats in
             visualLifecycle.reconfigure(beats: beats)
-            visualMotion = nil
+            visualPulse = nil
         }
         .onChange(of: engine.lastPulseDate) { _, pulseDate in
             recordVisualTick(pulseDate: pulseDate)
@@ -172,7 +155,7 @@ struct MetronomeView: View {
             if isPlaying {
                 visualLifecycle.resume()
             } else if wasPlaying {
-                freezeVisualMotion(at: .now)
+                visualPulse = nil
                 visualLifecycle.pause()
             }
         }
@@ -314,7 +297,7 @@ struct MetronomeView: View {
                 MetronomeCanvas(
                     preset: engine.preset,
                     lifecycle: visualLifecycle,
-                    motion: visualMotion,
+                    pulse: visualPulse,
                     finishAnimation: visualFinish,
                     isPlaying: engine.isPlaying,
                     reduceMotion: reduceMotion,
@@ -393,22 +376,17 @@ struct MetronomeView: View {
                 .frame(width: 58)
 
                 GeoGlassCapsule {
-                    Button {
-                        activePanel = .tempo
-                    } label: {
-                        VStack(spacing: 0) {
-                            Text(engine.preset.tempoName)
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                            Text("\(engine.preset.bpm)")
-                                .font(.system(size: 23, weight: .bold, design: .rounded))
-                                .monospacedDigit()
+                    TempoScrubber(
+                        bpm: engine.preset.bpm,
+                        compact: true,
+                        onTap: {
+                            activePanel = .tempo
+                        },
+                        onCommit: { bpm in
+                            engine.setBPM(bpm)
                         }
-                        .frame(width: 136, height: 58)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("设置速度")
-                    .accessibilityValue(engine.preset.tempoDisplay)
+                    )
+                    .frame(width: 136, height: 58)
                 }
                 .frame(width: 136)
 
@@ -648,7 +626,7 @@ struct MetronomeView: View {
                         }
                     }
                     if visualLifecycle.phase != .origin {
-                        Text("几何形成后，本次练习的拍数会保持不变")
+                        Text("节拍运行后，本次练习的拍数会保持不变")
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(GeoTheme.muted)
                     }
@@ -686,7 +664,7 @@ struct MetronomeView: View {
                 }
 
                 VStack(spacing: 10) {
-                    ControlLabel(title: "运行方向", value: engine.preset.direction.title)
+                    ControlLabel(title: "闪烁顺序", value: engine.preset.direction.title)
                     GeoSegmentContainer {
                         ForEach(RotationDirection.allCases) { direction in
                             GeoSegmentButton(
@@ -707,31 +685,12 @@ struct MetronomeView: View {
         GeoCard {
             VStack(spacing: 18) {
                 CardTitle(title: "速度", subtitle: "TEMPO")
-                VStack(spacing: 10) {
-                    let displayedBPM = Int((tempoDraftBPM ?? Double(engine.preset.bpm)).rounded())
-                    ControlLabel(title: "每分钟节拍", value: "\(displayedBPM) BPM")
-                    Slider(
-                        value: Binding(
-                            get: { tempoDraftBPM ?? Double(engine.preset.bpm) },
-                            set: { tempoDraftBPM = $0 }
-                        ),
-                        in: 30...240,
-                        step: 1,
-                        onEditingChanged: { isEditing in
-                            if isEditing {
-                                if tempoDraftBPM == nil {
-                                    tempoDraftBPM = Double(engine.preset.bpm)
-                                }
-                            } else if let draft = tempoDraftBPM {
-                                tempoDraftBPM = nil
-                                engine.setBPM(Int(draft.rounded()))
-                            }
-                        }
-                    )
-                    .tint(Color(white: 0.93))
-                    .accessibilityLabel("每分钟节拍")
-                    .accessibilityValue("\(displayedBPM) BPM")
-                }
+                TempoScrubber(
+                    bpm: engine.preset.bpm,
+                    onCommit: { bpm in
+                        engine.setBPM(bpm)
+                    }
+                )
                 GeoSegmentContainer {
                     ForEach(MetronomePreset.builtIns, id: \.bpm) { item in
                         GeoSegmentButton(
@@ -928,7 +887,7 @@ struct MetronomeView: View {
         else { return }
 
         visualSessionStartedAt = startedAt
-        visualMotion = nil
+        visualPulse = nil
         visualFinish = nil
         pendingReviewSummary = nil
         visualLifecycle.reset(beats: engine.preset.beats)
@@ -939,25 +898,18 @@ struct MetronomeView: View {
 
     private func recordVisualTick(pulseDate: Date) {
         guard visualFinish == nil, pulseDate != .distantPast else { return }
-        let snapshot = BeatVisualMotionSnapshot(
+        let snapshot = BeatVisualPulseSnapshot(
             beat: engine.currentBeat,
             subdivision: engine.currentSubdivision,
-            cycle: engine.currentCycle,
-            pulseDate: pulseDate,
-            capturedAt: nil
+            pulseDate: pulseDate
         )
-        visualMotion = snapshot
+        visualPulse = snapshot
         visualLifecycle.record(
             beat: snapshot.beat,
             subdivision: snapshot.subdivision,
-            cycle: snapshot.cycle,
+            cycle: engine.currentCycle,
             beats: engine.preset.beats
         )
-    }
-
-    private func freezeVisualMotion(at date: Date) {
-        guard let visualMotion else { return }
-        self.visualMotion = visualMotion.frozen(at: date)
     }
 
     private func toggleMetronome() {
@@ -966,7 +918,7 @@ struct MetronomeView: View {
         else { return }
 
         if engine.isPlaying {
-            freezeVisualMotion(at: .now)
+            visualPulse = nil
             visualLifecycle.pause()
             engine.stop()
         } else {
@@ -985,18 +937,15 @@ struct MetronomeView: View {
         // beginning the visible collapse so the user can see it from frame one.
         let presentationDelay: TimeInterval = activePanel == nil ? 0 : 0.36
         activePanel = nil
-        let frozenMotion = visualMotion?.frozen(at: now)
         let duration: TimeInterval = reduceMotion ? 0.34 : 1.18
         let finish = BeatVisualFinishAnimation(
             id: UUID(),
             startedAt: now.addingTimeInterval(presentationDelay),
             duration: duration,
-            motion: frozenMotion,
-            visibleBeatIndices: visualLifecycle.visibleBeatIndices,
-            hasEstablishedStructure: visualLifecycle.hasEstablishedStructure
+            visibleBeatIndices: visualLifecycle.visibleBeatIndices
         )
 
-        visualMotion = frozenMotion
+        visualPulse = nil
         visualLifecycle.beginFinishing()
         visualFinish = finish
         pendingReviewSummary = summary
@@ -1048,7 +997,7 @@ struct MetronomeView: View {
         reviewSummary = nil
         pendingReviewSummary = nil
         visualFinish = nil
-        visualMotion = nil
+        visualPulse = nil
         practiceSession.continueAfterReview()
         visualSessionStartedAt = practiceSession.session.startedAt
         visualLifecycle.reset(beats: engine.preset.beats)
@@ -1194,16 +1143,26 @@ private struct PracticeSessionSummaryView: View {
 private struct MetronomeCanvas: View {
     let preset: MetronomePreset
     let lifecycle: BeatVisualLifecycle
-    let motion: BeatVisualMotionSnapshot?
+    let pulse: BeatVisualPulseSnapshot?
     let finishAnimation: BeatVisualFinishAnimation?
     let isPlaying: Bool
     let reduceMotion: Bool
     let dimFlashingLights: Bool
 
+    private var timelineIsPaused: Bool {
+        if finishAnimation != nil || isPlaying { return false }
+        switch lifecycle.phase {
+        case .origin, .settled:
+            return reduceMotion
+        case .orbiting, .finishing:
+            return true
+        }
+    }
+
     var body: some View {
         TimelineView(.animation(
-            minimumInterval: reduceMotion || dimFlashingLights ? 0.08 : nil,
-            paused: !isPlaying && finishAnimation == nil
+            minimumInterval: 1 / 60,
+            paused: timelineIsPaused
         )) { timeline in
             Canvas { context, size in
                 let center = CGPoint(x: size.width / 2, y: size.height / 2)
@@ -1221,20 +1180,17 @@ private struct MetronomeCanvas: View {
                         effectScale: effectScale,
                         in: &context
                     )
-                } else if lifecycle.phase == .origin
-                            || lifecycle.phase == .settled
-                            || motion == nil {
-                    drawOriginPoint(
+                } else if lifecycle.phase == .origin || lifecycle.phase == .settled {
+                    drawWaitingPoint(
                         at: center,
-                        opacity: 0.92,
-                        scale: effectScale,
+                        date: timeline.date,
+                        effectScale: effectScale,
                         in: &context
                     )
-                } else if let motion {
-                    drawActiveGeometry(
-                        motion: motion,
+                } else {
+                    drawPlayingGeometry(
+                        pulse: isPlaying ? pulse : nil,
                         at: timeline.date,
-                        center: center,
                         points: points,
                         effectScale: effectScale,
                         in: &context
@@ -1242,28 +1198,6 @@ private struct MetronomeCanvas: View {
                 }
             }
         }
-    }
-
-    private func accentStrength(for index: Int) -> Double {
-        if preset.strongBeatIndices.contains(index) { return 1 }
-        if preset.secondaryAccentIndices.contains(index) { return 0.72 }
-        return 0.46
-    }
-
-    private struct MotionFrame {
-        let position: CGPoint
-        let phase: CGFloat
-        let elapsed: TimeInterval
-        let mainBeatElapsed: TimeInterval
-        let mainBeatDuration: TimeInterval
-        let beat: Int
-        let initialLaunch: Bool
-    }
-
-    private struct TrailSample {
-        let point: CGPoint
-        let opacity: Double
-        let radius: CGFloat
     }
 
     private func polygonPoints(center: CGPoint, radius: CGFloat) -> [CGPoint] {
@@ -1278,62 +1212,124 @@ private struct MetronomeCanvas: View {
         }
     }
 
-    private func drawActiveGeometry(
-        motion: BeatVisualMotionSnapshot,
+    private func drawPlayingGeometry(
+        pulse: BeatVisualPulseSnapshot?,
         at date: Date,
-        center: CGPoint,
         points: [CGPoint],
         effectScale: CGFloat,
         in context: inout GraphicsContext
     ) {
-        guard !points.isEmpty else { return }
-        let frame = motionFrame(
-            for: motion,
-            at: date,
-            center: center,
-            points: points,
-            established: lifecycle.hasEstablishedStructure,
-            visibleBeatCount: lifecycle.visibleBeatIndices.count
-        )
-
-        let breathClock = date.timeIntervalSinceReferenceDate
         for index in lifecycle.visibleBeatIndices where points.indices.contains(index) {
-            if frame.initialLaunch, frame.phase < 0.18, index == 0 {
-                continue
-            }
-            let strength = accentStrength(for: index)
-            let breath = 0.5 + 0.5 * sin(breathClock * 1.55 + Double(index) * 0.72)
-            let breathAmount = dimFlashingLights ? breath * 0.02 : breath * 0.08
-            drawMemoryNode(
+            drawAnchor(
                 at: points[index],
-                strength: strength,
-                breath: breathAmount,
-                opacityMultiplier: 1,
+                opacity: 0.24,
                 scale: effectScale,
                 in: &context
             )
         }
 
-        if !reduceMotion {
-            for sample in trailSamples(
-                phase: frame.phase,
-                center: center,
-                points: points,
-                established: lifecycle.hasEstablishedStructure,
-                initialLaunch: frame.initialLaunch
-            ) {
-                drawTrailDot(sample, effectScale: effectScale, in: &context)
-            }
-        }
+        guard let pulse,
+              let address = BeatPulseVisualModel.address(
+                beat: pulse.beat,
+                subdivision: pulse.subdivision,
+                beats: preset.beats,
+                pulsesPerBeat: preset.pulsesPerBeat
+              ),
+              let position = pulsePosition(for: address, points: points)
+        else { return }
 
-        drawBeatPoint(
-            at: frame.position,
-            strength: accentStrength(for: frame.beat),
-            mainBeatElapsed: frame.mainBeatElapsed,
-            mainBeatDuration: frame.mainBeatDuration,
+        let kind = BeatPulseVisualModel.kind(
+            beat: pulse.beat,
+            subdivision: pulse.subdivision,
+            strongBeatIndices: preset.strongBeatIndices,
+            secondaryAccentIndices: preset.secondaryAccentIndices
+        )
+        let style = BeatPulseVisualModel.style(
+            for: kind,
+            eventInterval: preset.eventInterval,
+            dimFlashingLights: dimFlashingLights
+        )
+        let age = max(0, date.timeIntervalSince(pulse.pulseDate))
+        let envelope = BeatPulseVisualModel.envelope(age: age, duration: style.duration)
+        guard envelope > 0 else { return }
+
+        drawHit(
+            at: position,
+            style: style,
+            envelope: envelope,
             effectScale: effectScale,
             in: &context
         )
+    }
+
+    private func pulsePosition(
+        for address: BeatPulseAddress,
+        points: [CGPoint]
+    ) -> CGPoint? {
+        guard points.indices.contains(address.beat) else { return nil }
+        let next = (address.beat + 1) % points.count
+        let fraction = CGFloat(address.phase - Double(address.beat))
+        return interpolate(
+            from: points[address.beat],
+            to: points[next],
+            progress: fraction
+        )
+    }
+
+    private func drawAnchor(
+        at point: CGPoint,
+        opacity: Double,
+        scale: CGFloat,
+        in context: inout GraphicsContext
+    ) {
+        let radius = 3.5 * scale
+        let rect = CGRect(
+            x: point.x - radius,
+            y: point.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        )
+        context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(opacity)))
+    }
+
+    private func drawHit(
+        at point: CGPoint,
+        style: BeatPulseStyle,
+        envelope: Double,
+        effectScale: CGFloat,
+        in context: inout GraphicsContext
+    ) {
+        // A restrained drum-like Hit: immediate peak, then a fast monotonic
+        // falloff. There is no glow ring, travelling head, trail, or breath.
+        let radius = CGFloat(style.peakRadius * (0.58 + 0.42 * envelope)) * effectScale
+        let opacity = style.peakOpacity * envelope
+        let rect = CGRect(
+            x: point.x - radius,
+            y: point.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        )
+        context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(opacity)))
+    }
+
+    private func drawWaitingPoint(
+        at point: CGPoint,
+        date: Date,
+        effectScale: CGFloat,
+        in context: inout GraphicsContext
+    ) {
+        let wave = reduceMotion
+            ? 0.5
+            : 0.5 + 0.5 * sin(date.timeIntervalSinceReferenceDate * 2 * .pi / 2.8)
+        let radius = (7.4 + CGFloat(wave) * 0.9) * effectScale
+        let opacity = 0.52 + wave * 0.30
+        let rect = CGRect(
+            x: point.x - radius,
+            y: point.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        )
+        context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(opacity)))
     }
 
     private func drawFinishAnimation(
@@ -1344,74 +1340,40 @@ private struct MetronomeCanvas: View {
         effectScale: CGFloat,
         in context: inout GraphicsContext
     ) {
+        guard !finish.visibleBeatIndices.isEmpty else {
+            drawWaitingPoint(
+                at: center,
+                date: date,
+                effectScale: effectScale,
+                in: &context
+            )
+            return
+        }
+
         let rawProgress = min(1, max(0, date.timeIntervalSince(finish.startedAt) / finish.duration))
         let progress = CGFloat(rawProgress)
         let eased = progress * progress * (3 - 2 * progress)
         let remaining = Double(pow(max(0, 1 - eased), 1.35))
-        let shrinkingScale = max(0.08, 1 - eased * 0.88)
-        let visualScale = reduceMotion ? 1 : shrinkingScale
+        let visualScale = reduceMotion ? 1 : max(0.08, 1 - eased * 0.88)
 
         for index in finish.visibleBeatIndices where points.indices.contains(index) {
             let original = points[index]
-            let position = reduceMotion ? original : interpolate(from: original, to: center, progress: eased)
-            drawMemoryNode(
+            let position = reduceMotion
+                ? original
+                : interpolate(from: original, to: center, progress: eased)
+            drawAnchor(
                 at: position,
-                strength: accentStrength(for: index),
-                breath: 0,
-                opacityMultiplier: remaining,
-                scale: effectScale * visualScale,
-                in: &context
-            )
-        }
-
-        if let motion = finish.motion {
-            let frame = motionFrame(
-                for: motion,
-                at: motion.capturedAt ?? finish.startedAt,
-                center: center,
-                points: points,
-                established: finish.hasEstablishedStructure,
-                visibleBeatCount: finish.visibleBeatIndices.count
-            )
-
-            if !reduceMotion {
-                for sample in trailSamples(
-                    phase: frame.phase,
-                    center: center,
-                    points: points,
-                    established: finish.hasEstablishedStructure,
-                    initialLaunch: frame.initialLaunch
-                ) {
-                    let position = interpolate(from: sample.point, to: center, progress: eased)
-                    drawTrailDot(
-                        TrailSample(
-                            point: position,
-                            opacity: sample.opacity * remaining,
-                            radius: sample.radius * shrinkingScale
-                        ),
-                        effectScale: effectScale,
-                        in: &context
-                    )
-                }
-            }
-
-            let headPosition = reduceMotion
-                ? frame.position
-                : interpolate(from: frame.position, to: center, progress: eased)
-            drawFinishingHead(
-                at: headPosition,
-                strength: accentStrength(for: frame.beat),
-                opacity: remaining,
+                opacity: 0.24 * remaining,
                 scale: effectScale * visualScale,
                 in: &context
             )
         }
 
         let centerProgress = min(1, max(0, (progress - 0.72) / 0.28))
-        if centerProgress > 0 || finish.motion == nil {
-            drawOriginPoint(
+        if centerProgress > 0 {
+            drawOriginDisc(
                 at: center,
-                opacity: finish.motion == nil ? 0.92 : Double(centerProgress) * 0.92,
+                opacity: Double(centerProgress) * 0.72,
                 scale: reduceMotion
                     ? effectScale
                     : effectScale * (0.72 + centerProgress * 0.28),
@@ -1420,127 +1382,13 @@ private struct MetronomeCanvas: View {
         }
     }
 
-    private func motionFrame(
-        for motion: BeatVisualMotionSnapshot,
-        at date: Date,
-        center: CGPoint,
-        points: [CGPoint],
-        established: Bool,
-        visibleBeatCount: Int
-    ) -> MotionFrame {
-        let renderDate = motion.capturedAt ?? date
-        let elapsed = max(0, renderDate.timeIntervalSince(motion.pulseDate))
-        let eventInterval = 60 / Double(preset.bpm) / preset.eventDensity
-        let eventFraction = min(1, elapsed / eventInterval)
-        let liveProgress = (
-            Double(max(0, motion.subdivision)) + eventFraction
-        ) / Double(preset.pulsesPerBeat)
-        let progress = reduceMotion
-            ? CGFloat(max(0, motion.subdivision)) / CGFloat(preset.pulsesPerBeat)
-            : CGFloat(min(1, max(0, liveProgress)))
-        let safeBeat = min(max(0, motion.beat), points.count - 1)
-        let phase = CGFloat(safeBeat) + progress
-        let initialLaunch = !established
-            && motion.cycle == 0
-            && safeBeat == 0
-            && visibleBeatCount <= 1
-        let position = pointAlongGeometry(
-            phase: phase,
-            center: center,
-            points: points,
-            wraps: established,
-            initialLaunch: initialLaunch
-        ) ?? center
-        let mainBeatElapsed = Double(max(0, motion.subdivision)) * eventInterval
-            + min(eventInterval, elapsed)
-        let mainBeatDuration = eventInterval * Double(preset.pulsesPerBeat)
-
-        return MotionFrame(
-            position: position,
-            phase: phase,
-            elapsed: elapsed,
-            mainBeatElapsed: mainBeatElapsed,
-            mainBeatDuration: mainBeatDuration,
-            beat: safeBeat,
-            initialLaunch: initialLaunch
-        )
-    }
-
-    private func pointAlongGeometry(
-        phase: CGFloat,
-        center: CGPoint,
-        points: [CGPoint],
-        wraps: Bool,
-        initialLaunch: Bool
-    ) -> CGPoint? {
-        guard !points.isEmpty else { return nil }
-        let count = CGFloat(points.count)
-        if !wraps, phase < 0 || phase > count {
-            return nil
-        }
-
-        if initialLaunch, phase < 1 {
-            if reduceMotion { return points[0] }
-            let launchEnd: CGFloat = 0.18
-            if phase < launchEnd {
-                return interpolate(from: center, to: points[0], progress: phase / launchEnd)
-            }
-            return interpolate(
-                from: points[0],
-                to: points[1 % points.count],
-                progress: (phase - launchEnd) / (1 - launchEnd)
-            )
-        }
-
-        var normalized = phase.truncatingRemainder(dividingBy: count)
-        if normalized < 0 { normalized += count }
-        let index = min(points.count - 1, Int(floor(normalized)))
-        let fraction = normalized - CGFloat(index)
-        return interpolate(
-            from: points[index],
-            to: points[(index + 1) % points.count],
-            progress: fraction
-        )
-    }
-
-    private func trailSamples(
-        phase: CGFloat,
-        center: CGPoint,
-        points: [CGPoint],
-        established: Bool,
-        initialLaunch: Bool
-    ) -> [TrailSample] {
-        let count = dimFlashingLights ? 6 : 9
-        let span: CGFloat = dimFlashingLights ? 0.24 : 0.38
-        return (1...count).reversed().compactMap { index in
-            let fraction = CGFloat(index) / CGFloat(count)
-            let samplePhase = phase - span * fraction
-            guard let point = pointAlongGeometry(
-                phase: samplePhase,
-                center: center,
-                points: points,
-                wraps: established,
-                initialLaunch: initialLaunch
-            ) else { return nil }
-            let nearness = 1 - fraction
-            return TrailSample(
-                point: point,
-                opacity: Double(0.025 + nearness * nearness * 0.19),
-                radius: 0.8 + nearness * 1.6
-            )
-        }
-    }
-
-    private func drawMemoryNode(
+    private func drawOriginDisc(
         at point: CGPoint,
-        strength: Double,
-        breath: Double,
-        opacityMultiplier: Double,
+        opacity: Double,
         scale: CGFloat,
         in context: inout GraphicsContext
     ) {
-        let radius = (2.6 + CGFloat(strength) * 1.45 + CGFloat(breath)) * scale
-        let opacity = (0.095 + strength * 0.17 + breath * 0.35) * opacityMultiplier
+        let radius = 8.0 * scale
         let rect = CGRect(
             x: point.x - radius,
             y: point.y - radius,
@@ -1548,103 +1396,6 @@ private struct MetronomeCanvas: View {
             height: radius * 2
         )
         context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(opacity)))
-    }
-
-    private func drawTrailDot(
-        _ sample: TrailSample,
-        effectScale: CGFloat,
-        in context: inout GraphicsContext
-    ) {
-        let radius = sample.radius * effectScale
-        let rect = CGRect(
-            x: sample.point.x - radius,
-            y: sample.point.y - radius,
-            width: radius * 2,
-            height: radius * 2
-        )
-        context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(sample.opacity)))
-    }
-
-    private func drawBeatPoint(
-        at point: CGPoint,
-        strength: Double,
-        mainBeatElapsed: TimeInterval,
-        mainBeatDuration: TimeInterval,
-        effectScale: CGFloat,
-        in context: inout GraphicsContext
-    ) {
-        let attack = min(1, mainBeatElapsed / 0.05)
-        let decayDuration = max(0.10, mainBeatDuration * 0.34)
-        let decay = exp(-max(0, mainBeatElapsed - 0.05) / decayDuration)
-        let flashEnvelope = attack * decay
-        let beatProgress = min(1, max(0, mainBeatElapsed / max(0.001, mainBeatDuration)))
-        let breath = sin(beatProgress * .pi)
-        let restrained = reduceMotion || dimFlashingLights
-        let flash = restrained ? flashEnvelope * 0.14 : flashEnvelope
-        let breathAmount = restrained ? breath * 0.08 : breath * 0.42
-        let radius = (
-            4.8
-            + CGFloat(strength) * 2.2
-            + CGFloat(breathAmount)
-            + CGFloat(flash) * (2.6 + CGFloat(strength) * 3.8)
-        ) * effectScale
-        let opacity = min(
-            1,
-            0.52 + strength * 0.30 + breathAmount * 0.06 + flash * (0.10 + strength * 0.08)
-        )
-        let rect = CGRect(
-            x: point.x - radius,
-            y: point.y - radius,
-            width: radius * 2,
-            height: radius * 2
-        )
-        var layer = context
-        if !dimFlashingLights {
-            let shadowRadius = (8 + CGFloat(strength) * 8 + CGFloat(flash) * 15) * effectScale
-            layer.addFilter(.shadow(color: .white.opacity(opacity * 0.48), radius: shadowRadius))
-        }
-        layer.fill(Path(ellipseIn: rect), with: .color(.white.opacity(opacity)))
-    }
-
-    private func drawFinishingHead(
-        at point: CGPoint,
-        strength: Double,
-        opacity: Double,
-        scale: CGFloat,
-        in context: inout GraphicsContext
-    ) {
-        let radius = (5.2 + CGFloat(strength) * 2.4) * scale
-        let rect = CGRect(
-            x: point.x - radius,
-            y: point.y - radius,
-            width: radius * 2,
-            height: radius * 2
-        )
-        var layer = context
-        if !dimFlashingLights {
-            layer.addFilter(.shadow(color: .white.opacity(0.28 * opacity), radius: 10 * scale))
-        }
-        layer.fill(Path(ellipseIn: rect), with: .color(.white.opacity(0.88 * opacity)))
-    }
-
-    private func drawOriginPoint(
-        at point: CGPoint,
-        opacity: Double,
-        scale: CGFloat,
-        in context: inout GraphicsContext
-    ) {
-        let radius = 8.5 * scale
-        let rect = CGRect(
-            x: point.x - radius,
-            y: point.y - radius,
-            width: radius * 2,
-            height: radius * 2
-        )
-        var layer = context
-        if !dimFlashingLights {
-            layer.addFilter(.shadow(color: .white.opacity(0.34 * opacity), radius: 16 * scale))
-        }
-        layer.fill(Path(ellipseIn: rect), with: .color(.white.opacity(opacity)))
     }
 
     private func interpolate(from start: CGPoint, to end: CGPoint, progress: CGFloat) -> CGPoint {

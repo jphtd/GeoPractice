@@ -264,7 +264,7 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertTrue(lifecycle.isPaused)
     }
 
-    func testBeatVisualLifecycleOnlyTopologyChangeRegeneratesShape() {
+    func testBeatVisualLifecycleLiveTopologyChangeKeepsEstablishedShape() {
         var lifecycle = BeatVisualLifecycle(beats: 5)
         lifecycle.record(beat: 0, subdivision: 0, cycle: 1, beats: 5)
         XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3, 4])
@@ -273,14 +273,24 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(lifecycle.phase, .orbiting)
 
         lifecycle.reconfigure(beats: 7)
+        XCTAssertEqual(lifecycle.phase, .orbiting)
+        XCTAssertEqual(lifecycle.beatCount, 7)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3, 4, 5, 6])
+
+        lifecycle.record(beat: -1, subdivision: 0, cycle: 0, beats: 7)
+        lifecycle.record(beat: 9, subdivision: 0, cycle: 0, beats: 7)
+        XCTAssertEqual(lifecycle.phase, .orbiting)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3, 4, 5, 6])
+    }
+
+    func testBeatVisualLifecycleWaitingTopologyChangeStaysAtOrigin() {
+        var lifecycle = BeatVisualLifecycle(beats: 4)
+        lifecycle.reconfigure(beats: 7)
+
         XCTAssertEqual(lifecycle.phase, .origin)
         XCTAssertEqual(lifecycle.beatCount, 7)
         XCTAssertEqual(lifecycle.visibleBeatIndices, [])
         XCTAssertTrue(lifecycle.isPaused)
-
-        lifecycle.record(beat: -1, subdivision: 0, cycle: 0, beats: 7)
-        lifecycle.record(beat: 9, subdivision: 0, cycle: 0, beats: 7)
-        XCTAssertEqual(lifecycle.phase, .origin)
     }
 
     func testPracticeHandControlOrderAndSymbols() {

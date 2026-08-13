@@ -131,7 +131,16 @@ struct BeatVisualLifecycle: Equatable, Sendable {
     mutating func reconfigure(beats: Int) {
         let normalized = Self.normalizedBeatCount(beats)
         guard normalized != beatCount else { return }
-        reset(beats: normalized)
+
+        // A live topology change swaps one fixed geometry for another without
+        // collapsing the stage to the waiting point. A session that has not
+        // started still remains in its single-point waiting state.
+        if phase == .orbiting {
+            beatCount = normalized
+            revealedBeats = Set(0..<normalized)
+        } else {
+            reset(beats: normalized)
+        }
     }
 
     mutating func resume() {

@@ -34,7 +34,6 @@ struct MetronomeView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.accessibilityDimFlashingLights) private var dimFlashingLights
-    @Environment(\.verticalSizeClass) private var verticalSizeClass
     @Query(sort: \PracticeEvent.updatedAt, order: .reverse) private var events: [PracticeEvent]
 
     @ObservedObject var engine: MetronomeEngine
@@ -67,8 +66,8 @@ struct MetronomeView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            practiceQuickDock
-                .padding(.top, 8)
+            liquidBottomControlPanel
+                .padding(.top, 6)
                 .padding(.bottom, 8)
         }
         .toolbar(.hidden, for: .tabBar)
@@ -166,27 +165,12 @@ struct MetronomeView: View {
 
     private func v4Interface(size: CGSize) -> some View {
         let compactHeight = size.height < 720
-        let landscape = size.width > size.height && compactHeight
 
-        return Group {
-            if landscape {
-                HStack(spacing: 14) {
-                    VStack(spacing: 4) {
-                        v4Header
-                        v4Stage
-                            .frame(maxHeight: .infinity)
-                    }
-                    v4PrimaryControls
-                        .frame(width: 282)
-                }
-            } else {
-                VStack(spacing: compactHeight ? 6 : 12) {
-                    v4Header
-                    v4Stage
-                        .frame(maxHeight: .infinity)
-                    v4PrimaryControls
-                }
-            }
+        return VStack(spacing: compactHeight ? 4 : 10) {
+            v4Header
+            v4Stage
+                .frame(maxHeight: .infinity)
+                .layoutPriority(1)
         }
         .frame(maxWidth: min(880, max(0, size.width - 24)), maxHeight: .infinity)
         .padding(.horizontal, 12)
@@ -336,206 +320,194 @@ struct MetronomeView: View {
         .accessibilityValue("\(engine.preset.beats) 拍，\(engine.preset.tempoDisplay)，\(engine.preset.subdivisionTitle)")
     }
 
-    private var v4PrimaryControls: some View {
-        let canChangeTopology = visualLifecycle.phase == .origin
-
-        return VStack(spacing: 8) {
-            HStack(spacing: 12) {
-                GeoGlassCapsule {
-                    Menu {
-                        ForEach(3...9, id: \.self) { beats in
-                            Button {
-                                setBeatCountIfAllowed(beats)
-                            } label: {
-                                if engine.preset.beats == beats {
-                                    Label("\(beats) 拍", systemImage: "checkmark")
-                                } else {
-                                    Text("\(beats) 拍")
-                                }
-                            }
-                        }
-                    } label: {
-                        VStack(spacing: 0) {
-                            Text("\(engine.preset.beats)")
-                                .font(.system(size: 23, weight: .bold, design: .rounded))
-                            Text("拍")
-                                .font(.system(size: 9, weight: .semibold))
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(width: 58, height: 58)
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canChangeTopology)
-                    .accessibilityLabel("选择拍数")
-                    .accessibilityValue(
-                        canChangeTopology
-                            ? "\(engine.preset.beats) 拍"
-                            : "\(engine.preset.beats) 拍，本次练习已锁定"
-                    )
-                }
-                .frame(width: 58)
-
-                GeoGlassCapsule {
-                    TempoScrubber(
-                        bpm: engine.preset.bpm,
-                        compact: true,
-                        onTap: {
-                            activePanel = .tempo
-                        },
-                        onCommit: { bpm in
-                            engine.setBPM(bpm)
-                        }
-                    )
-                    .frame(width: 136, height: 58)
-                }
-                .frame(width: 136)
-
-                GeoGlassCapsule {
-                    Menu {
-                        ForEach(MetronomePreset.supportedSubdivisions, id: \.self) { subdivision in
-                            Button {
-                                engine.setSubdivision(subdivision)
-                            } label: {
-                                let title = subdivisionTitle(for: subdivision)
-                                if engine.preset.subdivision == subdivision {
-                                    Label(title, systemImage: "checkmark")
-                                } else {
-                                    Text(title)
-                                }
-                            }
-                        }
-                    } label: {
-                        VStack(spacing: 1) {
-                            Image(systemName: "music.note")
-                                .font(.system(size: 20, weight: .semibold))
-                            Text(engine.preset.subdivisionShortTitle)
-                                .font(.system(size: 8, weight: .bold))
-                                .foregroundStyle(.secondary)
-                        }
-                        .frame(width: 58, height: 58)
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityLabel("选择训练音符")
-                    .accessibilityValue(engine.preset.subdivisionTitle)
-                }
-                .frame(width: 58)
-            }
-
-            let groupings = MetronomePreset.groupings(for: engine.preset.beats)
-            if groupings.count > 1 {
-                GeoGlassCapsule {
-                    HStack(spacing: 4) {
-                        ForEach(groupings, id: \.self) { grouping in
-                            Button(grouping) {
-                                engine.setGrouping(grouping)
-                            }
-                            .font(.system(size: 12, weight: .bold, design: .rounded))
-                            .frame(maxWidth: .infinity, minHeight: 38)
-                            .background {
-                                if engine.preset.grouping == grouping {
-                                    Capsule(style: .continuous)
-                                        .fill(Color.white.opacity(0.16))
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .accessibilityLabel("\(grouping) 分组")
-                            .accessibilityAddTraits(
-                                engine.preset.grouping == grouping ? .isSelected : []
-                            )
-                        }
-                    }
-                    .padding(4)
-                    .frame(width: 210)
-                }
-                .transition(.move(edge: .bottom).combined(with: .opacity))
+    private var liquidBottomControlPanel: some View {
+        LiquidControlPanel(contentPadding: 8, spacing: 6, cornerRadius: 26) {
+            ViewThatFits(in: .horizontal) {
+                wideLiquidControlLayout
+                    .frame(minWidth: 608)
+                compactLiquidControlLayout
             }
         }
-        .animation(.easeInOut(duration: 0.22), value: engine.preset.beats)
-        .disabled(visualFinish != nil || practiceSession.session.phase == .finished)
+        .frame(maxWidth: 820)
+        .padding(.horizontal, 12)
+        .frame(maxWidth: .infinity)
     }
 
-    private var practiceQuickDock: some View {
+    private var wideLiquidControlLayout: some View {
+        HStack(spacing: 8) {
+            beatLiquidControl
+                .frame(minWidth: 150, maxWidth: 190)
+            liquidDivider
+            tempoLiquidControl
+                .frame(minWidth: 112, maxWidth: 132)
+            liquidDivider
+            subdivisionLiquidControl
+                .frame(minWidth: 104, maxWidth: 154)
+            liquidDivider
+            handLiquidControl
+                .frame(minWidth: 110, maxWidth: 150)
+            incrementLiquidControl
+                .frame(minWidth: 74, maxWidth: 82)
+        }
+    }
+
+    private var compactLiquidControlLayout: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                beatLiquidControl
+                    .frame(maxWidth: .infinity)
+                tempoLiquidControl
+                    .frame(width: 116)
+                subdivisionLiquidControl
+                    .frame(width: 102)
+            }
+
+            HStack(spacing: 6) {
+                handLiquidControl
+                    .frame(maxWidth: .infinity)
+                incrementLiquidControl
+                    .frame(width: 92)
+            }
+        }
+    }
+
+    private var beatLiquidControl: some View {
+        let groupings = MetronomePreset.groupings(for: engine.preset.beats)
+        let title = groupings.count > 1
+            ? "拍子 · \(engine.preset.grouping)"
+            : "拍子"
+
+        return VStack(spacing: 2) {
+            Text(title)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(GeoTheme.muted)
+                .lineLimit(1)
+
+            LiquidScrubSelector(
+                options: Array(3...9),
+                selection: engine.preset.beats,
+                accessibilityLabel: "拍子",
+                accessibilityValue: { "\($0) 拍" },
+                controlHeight: 44,
+                isEnabled: canEditLiquidControls,
+                onCommit: setBeatCount
+            ) { beats in
+                Text("\(beats)")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+            }
+        }
+    }
+
+    private var tempoLiquidControl: some View {
+        TempoScrubber(
+            bpm: engine.preset.bpm,
+            compact: true,
+            onTap: {
+                activePanel = .tempo
+            },
+            onCommit: { bpm in
+                guard canEditLiquidControls else { return }
+                engine.setBPM(bpm)
+            }
+        )
+        .frame(height: 52)
+        .opacity(canEditLiquidControls ? 1 : 0.48)
+        .disabled(!canEditLiquidControls)
+        .allowsHitTesting(canEditLiquidControls)
+    }
+
+    private var subdivisionLiquidControl: some View {
+        VStack(spacing: 2) {
+            Text("训练音符")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(GeoTheme.muted)
+
+            LiquidScrubSelector(
+                options: MetronomePreset.supportedSubdivisions,
+                selection: engine.preset.subdivision,
+                accessibilityLabel: "训练音符",
+                accessibilityValue: subdivisionTitle,
+                controlHeight: 44,
+                isEnabled: canEditLiquidControls,
+                onCommit: { subdivision in
+                    guard canEditLiquidControls else { return }
+                    engine.setSubdivision(subdivision)
+                }
+            ) { subdivision in
+                Text(subdivision == 0 ? "2" : "\(subdivision * 4)")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+            }
+        }
+    }
+
+    private var handLiquidControl: some View {
+        let session = practiceSession.session
+        let hand = session.currentHand
+        let canEdit = session.phase == .running || session.phase == .paused
+
+        return VStack(spacing: 2) {
+            Text("手型 · \(hand.title)")
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(GeoTheme.muted)
+
+            LiquidScrubSelector(
+                options: PracticeHand.controlOrder,
+                selection: hand,
+                accessibilityLabel: "练习手型",
+                accessibilityValue: { $0.title },
+                controlHeight: 44,
+                isEnabled: canEdit && visualFinish == nil,
+                onCommit: requestHandSwitch
+            ) { item in
+                Text(item.shortTitle)
+                    .font(.system(size: 15, weight: .bold, design: .rounded))
+            }
+        }
+    }
+
+    private var incrementLiquidControl: some View {
         let session = practiceSession.session
         let hand = session.currentHand
         let count = session.stats(for: hand, at: .now).count
         let canEdit = session.phase == .running || session.phase == .paused
 
-        let incrementControl = GeoGlassCapsule {
-            Button {
-                practiceSession.adjustCount(for: hand, by: 1)
-            } label: {
-                ZStack {
-                    Text("+1")
-                        .font(.system(size: 20, weight: .bold, design: .rounded))
-                    HStack {
-                        Spacer()
-                        Text("\(hand.shortTitle) · \(count)")
-                            .font(.system(size: 10, weight: .bold, design: .rounded))
-                            .foregroundStyle(.secondary)
-                            .monospacedDigit()
-                            .padding(.trailing, 18)
+        return Button {
+            practiceSession.adjustCount(for: hand, by: 1)
+        } label: {
+            VStack(spacing: 1) {
+                Text("+1")
+                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                Text("\(hand.shortTitle) · \(count)")
+                    .font(.system(size: 9, weight: .bold, design: .rounded))
+                    .foregroundStyle(GeoTheme.muted)
+                    .monospacedDigit()
+            }
+            .frame(maxWidth: .infinity, minHeight: 52)
+            .background {
+                RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    .fill(Color.white.opacity(0.035))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 0.8)
                     }
-                }
-                .frame(maxWidth: .infinity, minHeight: 54)
-                .contentShape(Capsule(style: .continuous))
             }
-            .buttonStyle(.plain)
-            .disabled(!canEdit)
-            .accessibilityLabel("为当前\(hand.title)增加一次")
-            .accessibilityValue("当前 \(count) 次")
+            .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
+        .buttonStyle(LiquidPressButtonStyle())
+        .disabled(!canEdit || visualFinish != nil)
+        .accessibilityLabel("为当前\(hand.title)增加一次")
+        .accessibilityValue("当前 \(count) 次")
+    }
 
-        let handControl = GeoGlassCapsule {
-            HStack(spacing: 4) {
-                ForEach(PracticeHand.controlOrder) { item in
-                    Button {
-                        requestHandSwitch(to: item)
-                    } label: {
-                        Text(item.shortTitle)
-                            .font(.system(size: 18, weight: .bold, design: .rounded))
-                            .frame(maxWidth: .infinity, minHeight: 46)
-                            .background {
-                                if hand == item {
-                                    Capsule(style: .continuous)
-                                        .fill(Color.white.opacity(0.17))
-                                        .overlay {
-                                            Capsule(style: .continuous)
-                                                .stroke(Color.white.opacity(0.30), lineWidth: 1)
-                                        }
-                                }
-                            }
-                            .contentShape(Capsule(style: .continuous))
-                    }
-                    .buttonStyle(.plain)
-                    .disabled(!canEdit)
-                    .accessibilityLabel(item.title)
-                    .accessibilityValue(hand == item ? "已选择" : "")
-                    .accessibilityAddTraits(hand == item ? .isSelected : [])
-                }
-            }
-            .padding(5)
-            .accessibilityElement(children: .contain)
-            .accessibilityLabel("练习手型")
-        }
+    private var canEditLiquidControls: Bool {
+        visualFinish == nil && practiceSession.session.phase != .finished
+    }
 
-        return Group {
-            if verticalSizeClass == .compact {
-                HStack(spacing: 10) {
-                    incrementControl
-                    handControl
-                }
-                .frame(maxWidth: 620)
-            } else {
-                VStack(spacing: 10) {
-                    incrementControl
-                    handControl
-                }
-                .frame(maxWidth: 460)
-            }
-        }
-        .padding(.horizontal, 16)
-        .frame(maxWidth: .infinity)
-        .animation(.easeInOut(duration: 0.18), value: hand)
+    private var liquidDivider: some View {
+        Rectangle()
+            .fill(Color.white.opacity(0.08))
+            .frame(width: 0.8, height: 38)
+            .accessibilityHidden(true)
     }
 
     private func settingsSheet(for panel: MetronomePanel) -> some View {
@@ -587,11 +559,8 @@ struct MetronomeView: View {
         return preset.normalized.subdivisionTitle
     }
 
-    private func setBeatCountIfAllowed(_ beats: Int) {
-        guard visualLifecycle.phase == .origin,
-              visualFinish == nil,
-              practiceSession.session.phase != .finished
-        else { return }
+    private func setBeatCount(_ beats: Int) {
+        guard canEditLiquidControls else { return }
         engine.setBeats(beats)
     }
 
@@ -605,7 +574,7 @@ struct MetronomeView: View {
                     HStack(spacing: 5) {
                         ForEach(3...9, id: \.self) { beats in
                             Button {
-                                setBeatCountIfAllowed(beats)
+                                setBeatCount(beats)
                             } label: {
                                 Text("\(beats)")
                                     .font(.system(size: 12, weight: .bold))
@@ -621,14 +590,9 @@ struct MetronomeView: View {
                                     }
                             }
                             .buttonStyle(.plain)
-                            .disabled(visualLifecycle.phase != .origin)
+                            .disabled(!canEditLiquidControls)
                             .accessibilityAddTraits(engine.preset.beats == beats ? .isSelected : [])
                         }
-                    }
-                    if visualLifecycle.phase != .origin {
-                        Text("节拍运行后，本次练习的拍数会保持不变")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(GeoTheme.muted)
                     }
                 }
 

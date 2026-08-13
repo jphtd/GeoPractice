@@ -179,7 +179,7 @@ struct RootView: View {
             MetronomeView(
                 engine: metronome,
                 practiceSession: practiceSession,
-                finishPractice: {
+                leaveMetronome: {
                     selectedTab = .practice
                 }
             )

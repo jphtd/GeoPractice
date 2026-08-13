@@ -89,6 +89,85 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(sixteenth.mainBeatDuration, 0.5, accuracy: 0.000_1)
     }
 
+    func testBeatVisualLifecycleBuildsOnceAndKeepsGeometryAcrossCycles() {
+        var lifecycle = BeatVisualLifecycle(beats: 4)
+
+        XCTAssertEqual(lifecycle.phase, .origin)
+        XCTAssertTrue(lifecycle.isPaused)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [])
+
+        lifecycle.resume()
+        lifecycle.record(beat: 0, subdivision: 0, cycle: 0, beats: 4)
+        lifecycle.record(beat: 0, subdivision: 1, cycle: 0, beats: 4)
+        lifecycle.record(beat: 1, subdivision: 0, cycle: 0, beats: 4)
+        lifecycle.record(beat: 2, subdivision: 0, cycle: 0, beats: 4)
+
+        XCTAssertEqual(lifecycle.phase, .building)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2])
+        XCTAssertFalse(lifecycle.hasEstablishedStructure)
+
+        lifecycle.record(beat: 3, subdivision: 0, cycle: 0, beats: 4)
+        XCTAssertEqual(lifecycle.phase, .orbiting)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3])
+        XCTAssertTrue(lifecycle.hasEstablishedStructure)
+
+        lifecycle.record(beat: 0, subdivision: 0, cycle: 1, beats: 4)
+        lifecycle.record(beat: 2, subdivision: 0, cycle: 100, beats: 4)
+        lifecycle.record(beat: 0, subdivision: 0, cycle: 0, beats: 4)
+
+        XCTAssertEqual(lifecycle.phase, .orbiting)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3])
+        XCTAssertTrue(lifecycle.hasEstablishedStructure)
+    }
+
+    func testBeatVisualLifecyclePauseDoesNotCollapseAndFinishIsExplicit() {
+        var lifecycle = BeatVisualLifecycle(beats: 3)
+        for beat in 0..<3 {
+            lifecycle.record(beat: beat, subdivision: 0, cycle: 0, beats: 3)
+        }
+
+        lifecycle.pause()
+        XCTAssertTrue(lifecycle.isPaused)
+        XCTAssertEqual(lifecycle.phase, .orbiting)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2])
+
+        lifecycle.resume()
+        XCTAssertFalse(lifecycle.isPaused)
+        XCTAssertEqual(lifecycle.phase, .orbiting)
+
+        lifecycle.beginFinishing()
+        XCTAssertEqual(lifecycle.phase, .finishing)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2])
+        XCTAssertTrue(lifecycle.hasEstablishedStructure)
+
+        lifecycle.record(beat: 1, subdivision: 0, cycle: 22, beats: 3)
+        XCTAssertEqual(lifecycle.phase, .finishing)
+
+        lifecycle.settle()
+        XCTAssertEqual(lifecycle.phase, .settled)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [])
+        XCTAssertTrue(lifecycle.isPaused)
+    }
+
+    func testBeatVisualLifecycleOnlyTopologyChangeRegeneratesShape() {
+        var lifecycle = BeatVisualLifecycle(beats: 5)
+        lifecycle.record(beat: 0, subdivision: 0, cycle: 1, beats: 5)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3, 4])
+
+        lifecycle.reconfigure(beats: 5)
+        XCTAssertEqual(lifecycle.phase, .orbiting)
+
+        lifecycle.reconfigure(beats: 7)
+        XCTAssertEqual(lifecycle.phase, .origin)
+        XCTAssertEqual(lifecycle.beatCount, 7)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [])
+        XCTAssertTrue(lifecycle.isPaused)
+
+        lifecycle.record(beat: -1, subdivision: 0, cycle: 0, beats: 7)
+        lifecycle.record(beat: 9, subdivision: 0, cycle: 0, beats: 7)
+        XCTAssertEqual(lifecycle.phase, .origin)
+    }
+
     func testPracticeHandControlOrderAndSymbols() {
         XCTAssertEqual(PracticeHand.controlOrder, [.left, .both, .right])
         XCTAssertEqual(PracticeHand.controlOrder.map(\.shortTitle), ["L", "B", "R"])

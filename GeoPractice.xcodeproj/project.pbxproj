@@ -20,6 +20,7 @@
 		A0000000000000000000000B /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000D /* Assets.xcassets */; };
 		A0000000000000000000000C /* PracticeSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000E /* PracticeSession.swift */; };
 		A0000000000000000000000D /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000F /* PrivacyInfo.xcprivacy */; };
+		A0000000000000000000000E /* BeatVisualLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000010 /* BeatVisualLifecycle.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -48,6 +49,7 @@
 		B0000000000000000000000D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		B0000000000000000000000E /* PracticeSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeSession.swift; sourceTree = "<group>"; };
 		B0000000000000000000000F /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
+		B00000000000000000000010 /* BeatVisualLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BeatVisualLifecycle.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -93,6 +95,7 @@
 		C00000000000000000000002 /* Models */ = {
 			isa = PBXGroup;
 			children = (
+				B00000000000000000000010 /* BeatVisualLifecycle.swift */,
 				B00000000000000000000002 /* MetronomePreset.swift */,
 				B00000000000000000000003 /* PracticeEvent.swift */,
 				B0000000000000000000000E /* PracticeSession.swift */,
@@ -253,6 +256,7 @@
 				A00000000000000000000008 /* PracticeEventsView.swift in Sources */,
 				A00000000000000000000009 /* EventEditorView.swift in Sources */,
 				A0000000000000000000000C /* PracticeSession.swift in Sources */,
+				A0000000000000000000000E /* BeatVisualLifecycle.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -393,7 +397,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = XKY44WW2XC;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "节拍打卡";
@@ -421,7 +425,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = XKY44WW2XC;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "节拍打卡";

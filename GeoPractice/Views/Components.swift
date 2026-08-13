@@ -2,20 +2,20 @@ import Foundation
 import SwiftUI
 
 enum GeoTheme {
-    static let background = Color(red: 8 / 255, green: 10 / 255, blue: 15 / 255)
-    static let backgroundEnd = Color(red: 5 / 255, green: 5 / 255, blue: 5 / 255)
-    static let panel = Color(red: 17 / 255, green: 20 / 255, blue: 28 / 255)
-    static let panelRaised = Color(red: 23 / 255, green: 27 / 255, blue: 37 / 255)
-    static let line = Color(red: 43 / 255, green: 49 / 255, blue: 64 / 255)
-    static let text = Color(red: 247 / 255, green: 247 / 255, blue: 247 / 255)
-    static let muted = Color(red: 133 / 255, green: 133 / 255, blue: 133 / 255)
+    static let background = Color(white: 0.025)
+    static let backgroundEnd = Color(white: 0.012)
+    static let panel = Color(white: 0.065)
+    static let panelRaised = Color(white: 0.10)
+    static let line = Color(white: 0.22)
+    static let text = Color(white: 0.97)
+    static let muted = Color(white: 0.54)
 }
 
 struct GeoBackground: View {
     var body: some View {
         ZStack {
             LinearGradient(
-                colors: [Color(red: 11 / 255, green: 11 / 255, blue: 12 / 255), GeoTheme.backgroundEnd],
+                colors: [Color(white: 0.045), GeoTheme.backgroundEnd],
                 startPoint: .top,
                 endPoint: .bottom
             )
@@ -137,7 +137,7 @@ struct CardTitle: View {
             Text(title)
                 .font(.system(size: 13, weight: .bold))
                 .tracking(1)
-                .foregroundStyle(Color(red: 220 / 255, green: 225 / 255, blue: 235 / 255))
+                .foregroundStyle(Color(white: 0.88))
             Spacer()
             Text(subtitle)
                 .font(.system(size: 9, weight: .semibold))
@@ -211,7 +211,7 @@ struct GeoSegmentContainer<Content: View>: View {
         .padding(4)
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
-                .fill(Color(red: 11 / 255, green: 14 / 255, blue: 20 / 255))
+                .fill(Color(white: 0.04))
                 .overlay {
                     RoundedRectangle(cornerRadius: 12, style: .continuous)
                         .stroke(Color.white.opacity(0.06), lineWidth: 1)
@@ -237,7 +237,7 @@ struct CountBadge: View {
         .padding(.vertical, 9)
         .background(
             RoundedRectangle(cornerRadius: 11, style: .continuous)
-                .fill(Color(red: 11 / 255, green: 14 / 255, blue: 20 / 255))
+                .fill(Color(white: 0.04))
                 .overlay {
                     RoundedRectangle(cornerRadius: 11, style: .continuous)
                         .stroke(Color.white.opacity(0.055), lineWidth: 1)

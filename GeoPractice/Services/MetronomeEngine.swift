@@ -94,8 +94,8 @@ final class MetronomeEngine: ObservableObject {
         apply(updated)
     }
 
-    /// Applies a customer-comparison tempo interpretation without changing the
-    /// saved metronome preset. A timing change restarts the scheduler exactly
+    /// Applies a temporary tempo interpretation without changing the saved
+    /// metronome preset. A timing change restarts the scheduler exactly
     /// once; changing an inactive T3 reference note does not disturb playback.
     func setTempoExperiment(
         semantics: TempoSemantics,

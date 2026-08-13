@@ -32,23 +32,15 @@ enum RotationDirection: String, CaseIterable, Codable, Identifiable, Sendable {
     }
 }
 
-/// Runtime-only tempo interpretations used by the DEBUG customer comparison
-/// panel. These values deliberately are not stored inside `MetronomePreset`,
-/// so existing event snapshots and practice-session drafts remain compatible.
+/// Runtime-only tempo interpretations used by the DEBUG experience settings.
+/// These values deliberately are not stored inside `MetronomePreset`, so
+/// existing event snapshots and practice-session drafts remain compatible.
 enum TempoSemantics: String, CaseIterable, Identifiable, Sendable {
     case legacyQuarterReference
     case trainingNoteReference
     case independentReference
 
     var id: String { rawValue }
-
-    var code: String {
-        switch self {
-        case .legacyQuarterReference: "T1"
-        case .trainingNoteReference: "T2"
-        case .independentReference: "T3"
-        }
-    }
 
     var title: String {
         switch self {

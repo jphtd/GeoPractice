@@ -36,25 +36,21 @@ enum LiquidSelectorMath {
 }
 
 /// A single restrained glass surface for a group of related controls.
-/// On iOS 26 its container also lets descendant glass effects blend as one
-/// system; iOS 17–25 use one continuous Material panel instead.
+/// The panel owns the only glass layer so labels and selectors stay crisp;
+/// iOS 17–25 use one continuous Material panel instead.
 struct LiquidControlPanel<Content: View>: View {
     private let contentPadding: CGFloat
-    private let spacing: CGFloat
     private let cornerRadius: CGFloat
     private let content: Content
 
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
-    @Namespace private var glassNamespace
 
     init(
         contentPadding: CGFloat = 8,
-        spacing: CGFloat = 8,
         cornerRadius: CGFloat = 26,
         @ViewBuilder content: () -> Content
     ) {
         self.contentPadding = contentPadding
-        self.spacing = spacing
         self.cornerRadius = cornerRadius
         self.content = content()
     }
@@ -75,7 +71,7 @@ struct LiquidControlPanel<Content: View>: View {
 #endif
             }
         }
-        .shadow(color: .black.opacity(0.20), radius: 18, y: 9)
+        .shadow(color: .black.opacity(0.18), radius: 10, y: 6)
     }
 
     private var opaquePanel: some View {
@@ -119,19 +115,18 @@ struct LiquidControlPanel<Content: View>: View {
 #if compiler(>=6.2)
     @available(iOS 26.0, *)
     private var liquidGlassPanel: some View {
-        GlassEffectContainer(spacing: spacing) {
-            content
-                .padding(contentPadding)
-                .background {
-                    panelShape
-                        .fill(Color.white.opacity(0.012))
-                        .glassEffect(
-                            .regular.tint(Color.white.opacity(0.018)),
-                            in: panelShape
-                        )
-                        .glassEffectID("liquid-control-panel", in: glassNamespace)
-                }
-        }
+        content
+            .padding(contentPadding)
+            .background(Color.black.opacity(0.18), in: panelShape)
+            .glassEffect(
+                .regular.tint(Color.white.opacity(0.025)),
+                in: panelShape
+            )
+            .overlay {
+                panelShape
+                    .stroke(Color.white.opacity(0.18), lineWidth: 0.9)
+                    .allowsHitTesting(false)
+            }
     }
 #endif
 
@@ -162,7 +157,6 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
     @Environment(\.accessibilityReduceTransparency) private var reduceTransparency
     @Environment(\.isEnabled) private var environmentEnabled
 
-    @Namespace private var glassNamespace
     @State private var dragAxis: DragAxis?
     @State private var dragLocationX: CGFloat?
     @State private var dragTranslationX: CGFloat?
@@ -340,14 +334,17 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
                 }
 
             Capsule(style: .continuous)
-                .fill(Color.white.opacity(0.055))
-                .glassEffect(
-                    .regular
-                        .tint(Color.white.opacity(0.095))
-                        .interactive(),
-                    in: Capsule(style: .continuous)
+                .fill(
+                    LinearGradient(
+                        colors: [Color.white.opacity(0.20), Color.white.opacity(0.09)],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    )
                 )
-                .glassEffectID("liquid-scrub-cursor", in: glassNamespace)
+                .overlay {
+                    Capsule(style: .continuous)
+                        .stroke(Color.white.opacity(0.28), lineWidth: 0.8)
+                }
                 .frame(width: cursorWidth(for: size), height: cursorHeight(for: size))
                 .offset(x: cursorOffset(for: size))
                 .animation(cursorAnimation, value: committedIndex)

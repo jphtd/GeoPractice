@@ -17,7 +17,7 @@ private enum MetronomePanel: String, Identifiable {
         case .structure: "节拍设置"
         case .tempo: "速度设置"
 #if DEBUG
-        case .experiments: "客户方案实验台"
+        case .experiments: "体验设置"
 #endif
         }
     }
@@ -48,11 +48,11 @@ struct MetronomeView: View {
 
     @AppStorage("confirmBeforeHandSwitch") private var confirmBeforeHandSwitch = true
 #if DEBUG
-    @AppStorage("debug.customerLab.tempoMode.v1")
+    @AppStorage("debug.experience.tempoMode.v1")
     private var debugTempoModeRaw = TempoSemantics.legacyQuarterReference.rawValue
-    @AppStorage("debug.customerLab.referenceNote.v1")
+    @AppStorage("debug.experience.referenceNote.v1")
     private var debugReferenceNoteRaw = TempoReferenceNote.quarter.rawValue
-    @AppStorage("debug.customerLab.selectorStyle.v1")
+    @AppStorage("debug.experience.selectorStyle.v1")
     private var debugSelectorStyleRaw = LiquidSelectorStyle.fullTrack.rawValue
 #endif
     @State private var pendingHandSwitch: PracticeHand?
@@ -79,7 +79,7 @@ struct MetronomeView: View {
                 v4Interface(size: geometry.size)
             }
         }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+        .safeAreaInset(edge: .bottom, spacing: 12) {
             liquidBottomControlPanel
                 .padding(.top, 6)
                 .padding(.bottom, 8)
@@ -149,7 +149,7 @@ struct MetronomeView: View {
         }
         .onAppear {
 #if DEBUG
-            synchronizeCustomerExperiment()
+            synchronizeExperienceSettings()
 #endif
             synchronizeVisualSession()
             if reviewSummary == nil, visualFinish == nil {
@@ -158,10 +158,10 @@ struct MetronomeView: View {
         }
 #if DEBUG
         .onChange(of: debugTempoModeRaw) { _, _ in
-            synchronizeCustomerExperiment()
+            synchronizeExperienceSettings()
         }
         .onChange(of: debugReferenceNoteRaw) { _, _ in
-            synchronizeCustomerExperiment()
+            synchronizeExperienceSettings()
         }
 #endif
         .onChange(of: engine.preset) { _, preset in
@@ -248,8 +248,8 @@ struct MetronomeView: View {
                         activePanel = .experiments
                     } label: {
                         Label(
-                            "客户方案实验台 · \(customerExperimentCode)",
-                            systemImage: "flask"
+                            "体验设置 · \(experienceSummary)",
+                            systemImage: "slider.horizontal.3"
                         )
                     }
 #endif
@@ -278,16 +278,7 @@ struct MetronomeView: View {
 
             Spacer(minLength: 0)
 
-            VStack(spacing: 2) {
-                Text("GeoBeat")
-                    .font(.system(size: 24, weight: .bold, design: .rounded))
-                    .tracking(-0.6)
-                Text(headerSubtitle)
-                    .font(.system(size: 10, weight: .semibold))
-                    .foregroundStyle(GeoTheme.muted)
-                    .lineLimit(1)
-            }
-            .accessibilityElement(children: .combine)
+            headerIdentity
 
             Spacer(minLength: 0)
 
@@ -311,16 +302,52 @@ struct MetronomeView: View {
                 ))
             }
         }
-        .frame(height: 54)
+        .frame(height: 60)
     }
 
-    private var headerSubtitle: String {
-        let practiceName = sourceEvent?.name ?? "自由练习"
+    private var headerIdentity: some View {
+        VStack(spacing: 3) {
+            Text("GeoBeat")
+                .font(.system(size: 24, weight: .bold, design: .rounded))
+                .tracking(-0.6)
 #if DEBUG
-        return "\(practiceName) · \(customerExperimentCode)"
+            Button {
+                activePanel = .experiments
+            } label: {
+                HStack(spacing: 4) {
+                    Image(systemName: "slider.horizontal.3")
+                    Text("\(practiceDisplayName) · 体验设置：\(experienceSummary)")
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.68)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 7, weight: .bold))
+                }
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.90))
+                .padding(.horizontal, 8)
+                .frame(minHeight: 24)
+                .background(Color.white.opacity(0.085), in: Capsule())
+                .overlay {
+                    Capsule()
+                        .stroke(Color.white.opacity(0.20), lineWidth: 0.8)
+                }
+                .contentShape(Capsule())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("打开体验设置")
+            .accessibilityValue(experienceSummary)
 #else
-        return practiceName
+            Text(practiceDisplayName)
+                .font(.system(size: 10, weight: .semibold))
+                .foregroundStyle(GeoTheme.muted)
+                .lineLimit(1)
 #endif
+        }
+        .frame(maxWidth: 220)
+    }
+
+    private var practiceDisplayName: String {
+        sourceEvent?.name ?? "自由练习"
     }
 
     private var v4Stage: some View {
@@ -355,7 +382,7 @@ struct MetronomeView: View {
                             .font(.system(size: 10, weight: .semibold))
                             .foregroundStyle(GeoTheme.muted)
                     }
-                    .padding(.bottom, 2)
+                    .padding(.bottom, 12)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -372,7 +399,7 @@ struct MetronomeView: View {
     }
 
     private var liquidBottomControlPanel: some View {
-        LiquidControlPanel(contentPadding: 8, spacing: 6, cornerRadius: 26) {
+        LiquidControlPanel(contentPadding: 8, cornerRadius: 26) {
             ViewThatFits(in: .horizontal) {
                 wideLiquidControlLayout
                     .frame(minWidth: 608)
@@ -587,7 +614,7 @@ struct MetronomeView: View {
                             tempoCard
 #if DEBUG
                         case .experiments:
-                            customerExperimentCard
+                            experienceSettingsCard
 #endif
                         }
                     }
@@ -607,7 +634,11 @@ struct MetronomeView: View {
             }
         }
         .preferredColorScheme(.dark)
+#if DEBUG
+        .presentationDetents(panel == .experiments ? [.large] : [.medium, .large])
+#else
         .presentationDetents([.medium, .large])
+#endif
         .presentationDragIndicator(.visible)
     }
 
@@ -748,35 +779,55 @@ struct MetronomeView: View {
         LiquidSelectorStyle(rawValue: debugSelectorStyleRaw) ?? .fullTrack
     }
 
-    private var customerExperimentCode: String {
-        "\(debugTempoMode.code) · \(selectorStyleCode(debugSelectorStyle))"
+    private var experienceSummary: String {
+        "\(tempoModeShortTitle(debugTempoMode)) · \(selectorStyleShortTitle(debugSelectorStyle))"
     }
 
-    private var customerExperimentCard: some View {
+    private var experienceSettingsCard: some View {
         let plan = engine.playbackPlan
 
         return VStack(spacing: 16) {
             GeoCard {
                 VStack(alignment: .leading, spacing: 12) {
-                    CardTitle(title: "客户方案实验台", subtitle: "DEBUG ONLY · \(customerExperimentCode)")
+                    CardTitle(title: "节拍体验设置", subtitle: "选择后立即生效")
+
+                    VStack(spacing: 8) {
+                        experienceCurrentRow(
+                            title: "BPM 含义",
+                            value: tempoModeShortTitle(debugTempoMode)
+                        )
+                        experienceCurrentRow(
+                            title: "控件样式",
+                            value: selectorStyleShortTitle(debugSelectorStyle)
+                        )
+                    }
+                    .padding(11)
+                    .background(
+                        Color.white.opacity(0.075),
+                        in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                    )
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            .stroke(Color.white.opacity(0.18), lineWidth: 0.8)
+                    }
 
                     Label(
-                        "仅本机 Debug 运行可见，不会进入 Release 或 TestFlight。播放中切换到不同速度时会立即从首拍重新开始；若两个方案速度相同，则保持当前节拍。",
-                        systemImage: "ladybug"
+                        "点选任意设置即可直接试听。播放中若实际速度发生变化，会从首拍重新开始；速度相同时保持当前节拍。",
+                        systemImage: "ear"
                     )
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(GeoTheme.muted)
 
                     VStack(alignment: .leading, spacing: 8) {
-                        Text("速度逻辑")
+                        Text("BPM 如何解释")
                             .font(.system(size: 13, weight: .bold))
 
                         ForEach(TempoSemantics.allCases) { mode in
                             Button {
                                 debugTempoModeRaw = mode.rawValue
                             } label: {
-                                experimentChoiceRow(
-                                    code: mode.code,
+                                experienceChoiceRow(
+                                    symbol: tempoModeSymbol(mode),
                                     title: mode.title,
                                     detail: mode.explanation,
                                     isSelected: debugTempoMode == mode
@@ -810,14 +861,14 @@ struct MetronomeView: View {
 
             GeoCard {
                 VStack(alignment: .leading, spacing: 12) {
-                    CardTitle(title: "底部选择器样式", subtitle: "SELECTOR UI")
+                    CardTitle(title: "底部控件样式", subtitle: "左右滑动即可切换")
 
                     ForEach(LiquidSelectorStyle.allCases) { style in
                         Button {
                             debugSelectorStyleRaw = style.rawValue
                         } label: {
-                            experimentChoiceRow(
-                                code: selectorStyleCode(style),
+                            experienceChoiceRow(
+                                symbol: selectorStyleSymbol(style),
                                 title: selectorStyleTitle(style),
                                 detail: selectorStyleExplanation(style),
                                 isSelected: debugSelectorStyle == style
@@ -836,7 +887,7 @@ struct MetronomeView: View {
                             options: Array(3...9),
                             selection: engine.preset.beats,
                             style: debugSelectorStyle,
-                            accessibilityLabel: "实验台拍子预览",
+                            accessibilityLabel: "拍子样式预览",
                             accessibilityValue: { "\($0) 拍" },
                             controlHeight: 48,
                             isEnabled: canEditLiquidControls,
@@ -854,7 +905,7 @@ struct MetronomeView: View {
 
             GeoCard {
                 VStack(spacing: 12) {
-                    CardTitle(title: "当前组合的实际结果", subtitle: customerExperimentCode)
+                    CardTitle(title: "当前效果", subtitle: experienceSummary)
                     experimentMetricRow(title: "BPM 标记", value: plan.bpmMark)
                     experimentMetricRow(title: "训练内容", value: engine.preset.subdivisionTitle)
                     experimentMetricRow(
@@ -872,16 +923,16 @@ struct MetronomeView: View {
                     )
 
                     if engine.preset.subdivision == 0 {
-                        Text("提示：二分音符暂时沿用当前版本的事件结构；例如 4 拍仍有 4 次事件，只改变速度。是否改为传统 4/4 的 2 次，需要客户另行确认。")
+                        Text("提示：二分音符暂时沿用当前事件结构；例如 4 拍仍有 4 次事件，只改变速度。传统 4/4 是否调整为每小节 2 次，可在试听后再确定。")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(GeoTheme.muted)
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
                     Button {
-                        restoreCustomerExperimentBaseline()
+                        restoreDefaultExperienceSettings()
                     } label: {
-                        Label("恢复当前版基线（T1 · S1）", systemImage: "arrow.counterclockwise")
+                        Label("恢复默认设置", systemImage: "arrow.counterclockwise")
                             .font(.system(size: 13, weight: .bold))
                             .frame(maxWidth: .infinity, minHeight: 48)
                             .background(
@@ -895,18 +946,18 @@ struct MetronomeView: View {
         }
     }
 
-    private func experimentChoiceRow(
-        code: String,
+    private func experienceChoiceRow(
+        symbol: String,
         title: String,
         detail: String,
         isSelected: Bool
     ) -> some View {
         HStack(spacing: 11) {
-            Text(code)
+            Text(symbol)
                 .font(.system(size: 12, weight: .heavy, design: .rounded))
-                .frame(width: 32, height: 32)
+                .frame(width: 36, height: 36)
                 .background(
-                    Color.white.opacity(isSelected ? 0.20 : 0.06),
+                    Color.white.opacity(isSelected ? 0.26 : 0.07),
                     in: Circle()
                 )
 
@@ -921,19 +972,42 @@ struct MetronomeView: View {
             }
 
             Spacer(minLength: 6)
-            Image(systemName: isSelected ? "checkmark.circle.fill" : "circle")
-                .foregroundStyle(isSelected ? .white : GeoTheme.muted)
+            if isSelected {
+                Text("当前")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.black)
+                    .padding(.horizontal, 8)
+                    .frame(minHeight: 24)
+                    .background(Color.white, in: Capsule())
+            } else {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(GeoTheme.muted)
+            }
         }
         .padding(11)
         .background(
-            Color.white.opacity(isSelected ? 0.09 : 0.025),
+            Color.white.opacity(isSelected ? 0.16 : 0.025),
             in: RoundedRectangle(cornerRadius: 14, style: .continuous)
         )
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .stroke(Color.white.opacity(isSelected ? 0.30 : 0.07), lineWidth: 1)
+                .stroke(Color.white.opacity(isSelected ? 0.62 : 0.09), lineWidth: 1)
         }
         .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+        .animation(.easeOut(duration: 0.14), value: isSelected)
+    }
+
+    private func experienceCurrentRow(title: String, value: String) -> some View {
+        HStack {
+            Text(title)
+                .foregroundStyle(GeoTheme.muted)
+            Spacer()
+            Text(value)
+                .fontWeight(.bold)
+                .foregroundStyle(.white)
+        }
+        .font(.system(size: 12, weight: .semibold))
     }
 
     private func experimentMetricRow(title: String, value: String) -> some View {
@@ -948,11 +1022,35 @@ struct MetronomeView: View {
         .font(.system(size: 12, weight: .semibold))
     }
 
-    private func selectorStyleCode(_ style: LiquidSelectorStyle) -> String {
+    private func tempoModeSymbol(_ mode: TempoSemantics) -> String {
+        switch mode {
+        case .legacyQuarterReference: "♩"
+        case .trainingNoteReference: "♪"
+        case .independentReference: "双"
+        }
+    }
+
+    private func tempoModeShortTitle(_ mode: TempoSemantics) -> String {
+        switch mode {
+        case .legacyQuarterReference: "四分基准"
+        case .trainingNoteReference: "训练音符基准"
+        case .independentReference: "独立基准"
+        }
+    }
+
+    private func selectorStyleSymbol(_ style: LiquidSelectorStyle) -> String {
         switch style {
-        case .fullTrack: "S1"
-        case .singleValue: "S2"
-        case .adjacentCarousel: "S3"
+        case .fullTrack: "全"
+        case .singleValue: "单"
+        case .adjacentCarousel: "邻"
+        }
+    }
+
+    private func selectorStyleShortTitle(_ style: LiquidSelectorStyle) -> String {
+        switch style {
+        case .fullTrack: "全部平铺"
+        case .singleValue: "只看当前"
+        case .adjacentCarousel: "相邻预览"
         }
     }
 
@@ -980,7 +1078,7 @@ struct MetronomeView: View {
         return value.formatted(.number.precision(.fractionLength(1)))
     }
 
-    private func synchronizeCustomerExperiment() {
+    private func synchronizeExperienceSettings() {
         let mode = debugTempoMode
         let reference = debugReferenceNote
         if debugTempoModeRaw != mode.rawValue {
@@ -995,7 +1093,7 @@ struct MetronomeView: View {
         engine.setTempoExperiment(semantics: mode, referenceNote: reference)
     }
 
-    private func restoreCustomerExperimentBaseline() {
+    private func restoreDefaultExperienceSettings() {
         debugTempoModeRaw = TempoSemantics.legacyQuarterReference.rawValue
         debugReferenceNoteRaw = TempoReferenceNote.quarter.rawValue
         debugSelectorStyleRaw = LiquidSelectorStyle.fullTrack.rawValue

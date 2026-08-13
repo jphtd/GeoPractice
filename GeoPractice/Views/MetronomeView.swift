@@ -5,7 +5,7 @@ private enum MetronomePanel: String, Identifiable {
     case session
     case structure
     case tempo
-#if DEBUG
+#if DEBUG || CUSTOMER_PREVIEW
     case experiments
 #endif
 
@@ -16,7 +16,7 @@ private enum MetronomePanel: String, Identifiable {
         case .session: "本次练习"
         case .structure: "节拍设置"
         case .tempo: "速度设置"
-#if DEBUG
+#if DEBUG || CUSTOMER_PREVIEW
         case .experiments: "体验设置"
 #endif
         }
@@ -47,7 +47,7 @@ struct MetronomeView: View {
     let leaveMetronome: () -> Void
 
     @AppStorage("confirmBeforeHandSwitch") private var confirmBeforeHandSwitch = true
-#if DEBUG
+#if DEBUG || CUSTOMER_PREVIEW
     @AppStorage("debug.experience.tempoMode.v1")
     private var debugTempoModeRaw = TempoSemantics.legacyQuarterReference.rawValue
     @AppStorage("debug.experience.referenceNote.v1")
@@ -148,7 +148,7 @@ struct MetronomeView: View {
             Text(engine.errorMessage ?? "")
         }
         .onAppear {
-#if DEBUG
+#if DEBUG || CUSTOMER_PREVIEW
             synchronizeExperienceSettings()
 #endif
             synchronizeVisualSession()
@@ -156,7 +156,7 @@ struct MetronomeView: View {
                 reviewSummary = practiceSession.session.reviewSummary
             }
         }
-#if DEBUG
+#if DEBUG || CUSTOMER_PREVIEW
         .onChange(of: debugTempoModeRaw) { _, _ in
             synchronizeExperienceSettings()
         }
@@ -243,7 +243,7 @@ struct MetronomeView: View {
                         Label("完整节拍设置", systemImage: "slider.horizontal.3")
                     }
 
-#if DEBUG
+#if DEBUG || CUSTOMER_PREVIEW
                     Button {
                         activePanel = .experiments
                     } label: {
@@ -310,7 +310,7 @@ struct MetronomeView: View {
             Text("GeoBeat")
                 .font(.system(size: 24, weight: .bold, design: .rounded))
                 .tracking(-0.6)
-#if DEBUG
+#if DEBUG || CUSTOMER_PREVIEW
             Button {
                 activePanel = .experiments
             } label: {
@@ -450,7 +450,7 @@ struct MetronomeView: View {
     }
 
     private var activeSelectorStyle: LiquidSelectorStyle {
-#if DEBUG
+#if DEBUG || CUSTOMER_PREVIEW
         debugSelectorStyle
 #else
         .fullTrack
@@ -612,7 +612,7 @@ struct MetronomeView: View {
                             structureCard
                         case .tempo:
                             tempoCard
-#if DEBUG
+#if DEBUG || CUSTOMER_PREVIEW
                         case .experiments:
                             experienceSettingsCard
 #endif
@@ -634,7 +634,7 @@ struct MetronomeView: View {
             }
         }
         .preferredColorScheme(.dark)
-#if DEBUG
+#if DEBUG || CUSTOMER_PREVIEW
         .presentationDetents(panel == .experiments ? [.large] : [.medium, .large])
 #else
         .presentationDetents([.medium, .large])
@@ -766,7 +766,7 @@ struct MetronomeView: View {
         }
     }
 
-#if DEBUG
+#if DEBUG || CUSTOMER_PREVIEW
     private var debugTempoMode: TempoSemantics {
         TempoSemantics(rawValue: debugTempoModeRaw) ?? .legacyQuarterReference
     }

@@ -23,6 +23,7 @@
 		A0000000000000000000000E /* BeatVisualLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000010 /* BeatVisualLifecycle.swift */; };
 		A0000000000000000000000F /* LiquidControlComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000011 /* LiquidControlComponents.swift */; };
 		A00000000000000000000010 /* BravuraText.otf in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000012 /* BravuraText.otf */; };
+		A00000000000000000000011 /* P0_3_BPMContinuationAcceptanceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000013 /* P0_3_BPMContinuationAcceptanceTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -54,6 +55,7 @@
 		B00000000000000000000010 /* BeatVisualLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BeatVisualLifecycle.swift; sourceTree = "<group>"; };
 		B00000000000000000000011 /* LiquidControlComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidControlComponents.swift; sourceTree = "<group>"; };
 		B00000000000000000000012 /* BravuraText.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/Fonts/BravuraText.otf; sourceTree = "<group>"; };
+		B00000000000000000000013 /* P0_3_BPMContinuationAcceptanceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = P0_3_BPMContinuationAcceptanceTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -79,6 +81,7 @@
 			children = (
 				C00000000000000000000001 /* GeoPractice */,
 				C00000000000000000000005 /* GeoPracticeTests */,
+				C00000000000000000000007 /* aitest */,
 				C00000000000000000000006 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -144,6 +147,14 @@
 				B0000000000000000000000C /* GeoPracticeTests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		C00000000000000000000007 /* aitest */ = {
+			isa = PBXGroup;
+			children = (
+				B00000000000000000000013 /* P0_3_BPMContinuationAcceptanceTests.swift */,
+			);
+			path = aitest;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -273,6 +284,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A0000000000000000000000A /* MetronomePresetTests.swift in Sources */,
+				A00000000000000000000011 /* P0_3_BPMContinuationAcceptanceTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

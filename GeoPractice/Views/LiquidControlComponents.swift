@@ -33,6 +33,57 @@ enum LiquidSelectorMath {
         )
         return clampedIndex(startIndex + stepDelta, optionCount: optionCount)
     }
+
+    static func continuousIndex(
+        startIndex: Int,
+        translation: CGFloat,
+        pointsPerStep: CGFloat,
+        optionCount: Int
+    ) -> CGFloat? {
+        guard optionCount > 0, pointsPerStep > 0 else { return nil }
+        return min(
+            CGFloat(optionCount - 1),
+            max(0, CGFloat(startIndex) + translation / pointsPerStep)
+        )
+    }
+
+    /// Offset of an all-options strip inside a three-slot viewport. The first
+    /// and last triplets pin to their respective edges; interior options pass
+    /// continuously through the center slot.
+    static func edgePinnedStripOffset(
+        continuousIndex: CGFloat,
+        optionCount: Int,
+        slotWidth: CGFloat
+    ) -> CGFloat {
+        guard optionCount > 3, slotWidth > 0 else { return 0 }
+        let lastIndex = CGFloat(optionCount - 1)
+        let position = min(lastIndex, max(0, continuousIndex))
+        let anchor: CGFloat
+        if position < 1 {
+            anchor = slotWidth / 2 + position * slotWidth
+        } else if position > lastIndex - 1 {
+            anchor = slotWidth * 1.5
+                + (position - (lastIndex - 1)) * slotWidth
+        } else {
+            anchor = slotWidth * 1.5
+        }
+        return anchor - (position + 0.5) * slotWidth
+    }
+
+    static func clampedCenter(
+        proposedCenter: CGFloat,
+        scaledCursorWidth: CGFloat,
+        lowerBound: CGFloat,
+        upperBound: CGFloat
+    ) -> CGFloat {
+        let halfWidth = max(0, scaledCursorWidth) / 2
+        let minimum = lowerBound + halfWidth
+        let maximum = upperBound - halfWidth
+        guard minimum <= maximum else {
+            return (lowerBound + upperBound) / 2
+        }
+        return min(maximum, max(minimum, proposedCenter))
+    }
 }
 
 /// A single restrained glass surface for a group of related controls.
@@ -137,9 +188,9 @@ struct LiquidControlPanel<Content: View>: View {
 
 /// A horizontally scrubbable selector for a small set of discrete values.
 ///
-/// During a drag the nearest option is previewed locally; the full-track cursor
-/// follows the finger while compact styles move their displayed labels. The
-/// model is updated only when the gesture ends.
+/// During a drag the nearest option is previewed locally while one continuous
+/// glass cursor follows the finger. Carousel content scrolls beneath that
+/// cursor, and every style commits to the model only when the gesture ends.
 struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
     let options: [Option]
     let selection: Option
@@ -158,16 +209,25 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
     @Environment(\.isEnabled) private var environmentEnabled
 
     @State private var dragAxis: DragAxis?
-    @State private var dragLocationX: CGFloat?
     @State private var dragTranslationX: CGFloat?
     @State private var dragStartIndex: Int?
     @State private var previewIndex: Int?
+    /// Keeps the released value visually stable until the parent binding has
+    /// acknowledged it. This is deliberately short-lived: hand changes can
+    /// open a confirmation alert and may never update `selection`.
+    @State private var settlingIndex: Int?
+    @State private var settlingResetID: UUID?
     @State private var suppressTap = false
     @State private var suppressTapResetID: UUID?
 
     private enum DragAxis {
         case horizontal
         case vertical
+    }
+
+    private struct CursorAnimationState: Equatable {
+        let offset: CGFloat
+        let horizontalScale: CGFloat
     }
 
     init(
@@ -210,8 +270,8 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
         .onChange(of: options) { _, _ in
             cancelInteraction()
         }
-        .onChange(of: selection) { _, _ in
-            cancelInteraction()
+        .onChange(of: selection) { _, newSelection in
+            reconcileExternalSelection(newSelection)
         }
         .onChange(of: style) { _, _ in
             cancelInteraction()
@@ -241,7 +301,10 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
 
     private var displayedIndex: Int {
         guard !options.isEmpty else { return 0 }
-        return min(options.count - 1, max(0, previewIndex ?? committedIndex))
+        return min(
+            options.count - 1,
+            max(0, previewIndex ?? settlingIndex ?? committedIndex)
+        )
     }
 
     private var accessibilityValueDescription: String {
@@ -287,8 +350,12 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
                     .stroke(Color.white.opacity(0.24), lineWidth: 1)
             }
             .frame(width: cursorWidth(for: size), height: cursorHeight(for: size))
+            .scaleEffect(
+                x: cursorHorizontalScale(for: size),
+                y: 1
+            )
             .offset(x: cursorOffset(for: size))
-            .animation(cursorAnimation, value: committedIndex)
+            .animation(cursorAnimation, value: cursorAnimationState(for: size))
     }
 
     private func materialSurface(size: CGSize) -> some View {
@@ -315,8 +382,12 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
                 }
                 .shadow(color: .black.opacity(0.10), radius: 5, y: 2)
                 .frame(width: cursorWidth(for: size), height: cursorHeight(for: size))
+                .scaleEffect(
+                    x: cursorHorizontalScale(for: size),
+                    y: 1
+                )
                 .offset(x: cursorOffset(for: size))
-                .animation(cursorAnimation, value: committedIndex)
+                .animation(cursorAnimation, value: cursorAnimationState(for: size))
 
             labelsLayer(size: size)
         }
@@ -346,8 +417,12 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
                         .stroke(Color.white.opacity(0.28), lineWidth: 0.8)
                 }
                 .frame(width: cursorWidth(for: size), height: cursorHeight(for: size))
+                .scaleEffect(
+                    x: cursorHorizontalScale(for: size),
+                    y: 1
+                )
                 .offset(x: cursorOffset(for: size))
-                .animation(cursorAnimation, value: committedIndex)
+                .animation(cursorAnimation, value: cursorAnimationState(for: size))
 
             labelsLayer(size: size)
         }
@@ -404,7 +479,6 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
                     .fontWeight(.semibold)
                     .foregroundStyle(Color.white.opacity(0.96))
                     .scaleEffect(1.035)
-                    .offset(x: relativeContentOffset(for: size, visualStep: 42))
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     .animation(compactLabelAnimation, value: displayedIndex)
 
@@ -422,37 +496,33 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
     }
 
     private func adjacentCarouselLabels(size: CGSize) -> some View {
-        HStack(spacing: 0) {
-            carouselLabel(at: displayedIndex - 1, isCurrent: false)
-            carouselLabel(at: displayedIndex, isCurrent: true)
-            carouselLabel(at: displayedIndex + 1, isCurrent: false)
-        }
-        .offset(
-            x: relativeContentOffset(
-                for: size,
-                visualStep: max(0, size.width - (trackInset * 2)) / 3
+        let slotWidth = adjacentSlotWidth(for: size)
+        return ZStack(alignment: .leading) {
+            HStack(spacing: 0) {
+                ForEach(Array(options.enumerated()), id: \.element) { index, option in
+                    label(option)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                        .fontWeight(index == displayedIndex ? .semibold : .medium)
+                        .foregroundStyle(
+                            Color.white.opacity(index == displayedIndex ? 0.96 : 0.52)
+                        )
+                        .scaleEffect(index == displayedIndex ? 1.035 : 0.92)
+                        .frame(width: slotWidth)
+                        .frame(maxHeight: .infinity)
+                        .animation(compactLabelAnimation, value: displayedIndex)
+                }
+            }
+            .frame(
+                width: slotWidth * CGFloat(options.count),
+                alignment: .leading
             )
-        )
-        .padding(trackInset)
+            .offset(x: trackInset + adjacentContentOffset(for: size))
+            .animation(cursorAnimation, value: adjacentContentOffset(for: size))
+        }
+        .frame(width: size.width, height: size.height, alignment: .leading)
         .clipped()
         .allowsHitTesting(false)
-        .animation(compactLabelAnimation, value: displayedIndex)
-    }
-
-    @ViewBuilder
-    private func carouselLabel(at index: Int, isCurrent: Bool) -> some View {
-        if options.indices.contains(index) {
-            label(options[index])
-                .lineLimit(1)
-                .minimumScaleFactor(0.72)
-                .fontWeight(isCurrent ? .semibold : .medium)
-                .foregroundStyle(Color.white.opacity(isCurrent ? 0.96 : 0.30))
-                .scaleEffect(isCurrent ? 1.035 : 0.92)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        } else {
-            Color.clear
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-        }
     }
 
     private var trackInset: CGFloat {
@@ -461,17 +531,33 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
 
     private func segmentWidth(for size: CGSize) -> CGFloat {
         guard !options.isEmpty else { return 0 }
-        return max(0, size.width - (trackInset * 2)) / CGFloat(options.count)
+        return availableTrackWidth(for: size) / CGFloat(options.count)
+    }
+
+    private func availableTrackWidth(for size: CGSize) -> CGFloat {
+        max(0, size.width - (trackInset * 2))
+    }
+
+    private func adjacentSlotCount() -> Int {
+        min(3, max(1, options.count))
+    }
+
+    private func adjacentSlotWidth(for size: CGSize) -> CGFloat {
+        availableTrackWidth(for: size) / CGFloat(adjacentSlotCount())
     }
 
     private func cursorWidth(for size: CGSize) -> CGFloat {
+        guard !options.isEmpty else { return 0 }
+        let availableWidth = availableTrackWidth(for: size)
         switch style {
         case .fullTrack:
-            return max(0, segmentWidth(for: size) - 4)
+            let segment = segmentWidth(for: size)
+            return min(segment, max(4, segment - 4))
         case .singleValue:
-            return max(0, size.width - (trackInset * 2) - 60)
+            return min(availableWidth, max(18, availableWidth - 60))
         case .adjacentCarousel:
-            return max(0, (size.width - (trackInset * 2)) / 3 - 4)
+            let slot = adjacentSlotWidth(for: size)
+            return min(slot, max(8, slot - 4))
         }
     }
 
@@ -481,24 +567,76 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
 
     private func cursorOffset(for size: CGSize) -> CGFloat {
         let width = cursorWidth(for: size)
-        let center: CGFloat
-        switch style {
-        case .fullTrack:
-            center = dragLocationX ?? centerX(for: displayedIndex, size: size)
-        case .singleValue, .adjacentCarousel:
-            center = size.width / 2
+        return cursorCenter(for: size) - (width / 2)
+    }
+
+    private func cursorCenter(for size: CGSize) -> CGFloat {
+        let width = cursorWidth(for: size)
+        let scale = cursorHorizontalScale(for: size)
+        let restingIndex = dragStartIndex ?? displayedIndex
+        let restingCenter = cursorRestingCenter(for: restingIndex, size: size)
+        let proposedCenter: CGFloat
+        if dragAxis == .horizontal, let translation = dragTranslationX {
+            proposedCenter = restingCenter + translation
+        } else {
+            proposedCenter = cursorRestingCenter(for: displayedIndex, size: size)
         }
-        return center - (width / 2)
+        let center = LiquidSelectorMath.clampedCenter(
+            proposedCenter: proposedCenter,
+            scaledCursorWidth: width * scale,
+            lowerBound: trackInset,
+            upperBound: size.width - trackInset
+        )
+        return center
     }
 
     private func centerX(for index: Int, size: CGSize) -> CGFloat {
         trackInset + (segmentWidth(for: size) * (CGFloat(index) + 0.5))
     }
 
-    private func clampedCenterX(_ x: CGFloat, size: CGSize) -> CGFloat {
+    private func cursorRestingCenter(for index: Int, size: CGSize) -> CGFloat {
         guard !options.isEmpty else { return size.width / 2 }
-        let halfSegment = segmentWidth(for: size) / 2
-        return min(size.width - trackInset - halfSegment, max(trackInset + halfSegment, x))
+        let safeIndex = LiquidSelectorMath.clampedIndex(index, optionCount: options.count)
+        switch style {
+        case .fullTrack:
+            return centerX(for: safeIndex, size: size)
+        case .singleValue:
+            return size.width / 2
+        case .adjacentCarousel:
+            if options.count <= 3 {
+                return trackInset
+                    + adjacentSlotWidth(for: size) * (CGFloat(safeIndex) + 0.5)
+            }
+            if safeIndex == 0 {
+                return trackInset + adjacentSlotWidth(for: size) / 2
+            }
+            if safeIndex == options.count - 1 {
+                return size.width - trackInset - adjacentSlotWidth(for: size) / 2
+            }
+            return size.width / 2
+        }
+    }
+
+    private func cursorHorizontalScale(for size: CGSize) -> CGFloat {
+        let desiredScale = 1 + cursorStretchPhase(for: size) * 0.08
+        let width = cursorWidth(for: size)
+        guard width > 0 else { return 1 }
+        let boundarySafeScale = max(1, availableTrackWidth(for: size) / width)
+        return min(desiredScale, boundarySafeScale)
+    }
+
+    private func cursorStretchPhase(for size: CGSize) -> CGFloat {
+        guard !reduceMotion, dragAxis == .horizontal else { return 0 }
+        let position = continuousOptionPosition(for: size)
+        let distanceFromOptionCenter = abs(position - position.rounded())
+        return min(1, distanceFromOptionCenter * 2)
+    }
+
+    private func cursorAnimationState(for size: CGSize) -> CursorAnimationState {
+        CursorAnimationState(
+            offset: cursorOffset(for: size),
+            horizontalScale: cursorHorizontalScale(for: size)
+        )
     }
 
     private func optionIndex(at x: CGFloat, size: CGSize) -> Int? {
@@ -519,7 +657,9 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
         case .singleValue:
             return max(36, min(64, size.width * 0.30))
         case .adjacentCarousel:
-            return max(32, min(64, size.width / 3))
+            // One logical step is exactly one visible option slot, so the
+            // preview changes only as the cursor crosses the next center.
+            return max(1, adjacentSlotWidth(for: size))
         }
     }
 
@@ -532,27 +672,45 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
         )
     }
 
-    private func relativeContentOffset(for size: CGSize, visualStep: CGFloat) -> CGFloat {
-        guard style != .fullTrack,
-              dragAxis == .horizontal,
-              let translation = dragTranslationX,
-              let startIndex = dragStartIndex else { return 0 }
+    private func continuousOptionPosition(for size: CGSize) -> CGFloat {
+        guard !options.isEmpty else { return 0 }
+        if dragAxis == .horizontal,
+           let translation = dragTranslationX,
+           let startIndex = dragStartIndex {
+            return LiquidSelectorMath.continuousIndex(
+                startIndex: startIndex,
+                translation: translation,
+                pointsPerStep: relativeStepDistance(for: size),
+                optionCount: options.count
+            ) ?? CGFloat(displayedIndex)
+        }
+        return CGFloat(displayedIndex)
+    }
 
-        let interactionStep = relativeStepDistance(for: size)
-        guard interactionStep > 0 else { return 0 }
-        let selectedDelta = displayedIndex - startIndex
-        let residual = translation - (CGFloat(selectedDelta) * interactionStep)
-        let normalizedResidual = min(0.5, max(-0.5, residual / interactionStep))
-        // The labels travel against the finger so the next value on the
-        // right slides into the centered selection as the user drags right.
-        return -normalizedResidual * visualStep
+    /// Offset for a virtual strip containing every option. At the first and
+    /// last values the strip is pinned to the corresponding edge; throughout
+    /// the middle range the active value occupies the center slot. Rendering
+    /// the real options instead of placeholder slots keeps edge transitions
+    /// continuous and guarantees there is never a blank carousel cell.
+    private func adjacentContentOffset(for size: CGSize) -> CGFloat {
+        guard options.count > 3 else { return 0 }
+        let slot = adjacentSlotWidth(for: size)
+        let position = continuousOptionPosition(for: size)
+        // Keep the continuous option position directly beneath the glass
+        // cursor. The strip stays still while the cursor has room to travel;
+        // once the cursor reaches an edge, further dragging scrolls the real
+        // option strip instead. This avoids the cursor and labels moving away
+        // from one another during a long scrub.
+        return cursorCenter(for: size)
+            - trackInset
+            - (position + 0.5) * slot
     }
 
     private func tapOptionIndex(at x: CGFloat, size: CGSize) -> Int? {
         switch style {
         case .fullTrack:
             return optionIndex(at: x, size: size)
-        case .singleValue, .adjacentCarousel:
+        case .singleValue:
             let delta: Int
             if x < size.width / 3 {
                 delta = -1
@@ -565,7 +723,31 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
                 committedIndex + delta,
                 optionCount: options.count
             )
+        case .adjacentCarousel:
+            guard !options.isEmpty else { return nil }
+            let slot = adjacentSlotWidth(for: size)
+            guard slot > 0 else { return nil }
+            let stripOffset = adjacentContentOffsetAtRest(
+                index: committedIndex,
+                size: size
+            )
+            let localX = x - trackInset - stripOffset
+            return LiquidSelectorMath.clampedIndex(
+                Int(floor(localX / slot)),
+                optionCount: options.count
+            )
         }
+    }
+
+    private func adjacentContentOffsetAtRest(index: Int, size: CGSize) -> CGFloat {
+        guard options.count > 3 else { return 0 }
+        let slot = adjacentSlotWidth(for: size)
+        let safeIndex = LiquidSelectorMath.clampedIndex(index, optionCount: options.count)
+        return LiquidSelectorMath.edgePinnedStripOffset(
+            continuousIndex: CGFloat(safeIndex),
+            optionCount: options.count,
+            slotWidth: slot
+        )
     }
 
     private func scrubGesture(size: CGSize) -> some Gesture {
@@ -579,6 +761,13 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
                 let verticalDistance = abs(value.translation.height)
 
                 if dragAxis == nil {
+                    // Once the drag recognizer becomes active, suppress the
+                    // simultaneous SpatialTap even if the gesture ultimately
+                    // locks vertically or remains diagonal. Otherwise a short
+                    // scroll can be misread as a selector tap on release.
+                    suppressTapResetID = nil
+                    suppressTap = true
+
                     if horizontalDistance > verticalDistance * 1.15 {
                         dragAxis = .horizontal
                     } else if verticalDistance > horizontalDistance * 1.15 {
@@ -589,26 +778,19 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
                 }
 
                 guard dragAxis == .horizontal else { return }
-                suppressTap = true
                 if dragStartIndex == nil {
                     // A new drag supersedes any delayed reset left by the
                     // previous gesture. Invalidate it before tracking starts.
                     suppressTapResetID = nil
+                    settlingResetID = nil
+                    settlingIndex = nil
                     dragStartIndex = committedIndex
                 }
                 dragTranslationX = value.translation.width
-
-                switch style {
-                case .fullTrack:
-                    dragLocationX = clampedCenterX(value.location.x, size: size)
-                    previewIndex = optionIndex(at: value.location.x, size: size)
-                case .singleValue, .adjacentCarousel:
-                    dragLocationX = nil
-                    previewIndex = relativeOptionIndex(
-                        translation: value.translation.width,
-                        size: size
-                    )
-                }
+                previewIndex = relativeOptionIndex(
+                    translation: value.translation.width,
+                    size: size
+                )
             }
             .onEnded { _ in
                 guard isInteractive, dragAxis == .horizontal else {
@@ -619,10 +801,15 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
                 let option = previewIndex.flatMap { index in
                     options.indices.contains(index) ? options[index] : nil
                 }
-                if let option, option != selection {
-                    onCommit(option)
+                if let option,
+                   let index = options.firstIndex(of: option) {
+                    settleInteraction(to: index)
+                    if option != selection {
+                        onCommit(option)
+                    }
+                } else {
+                    settleInteraction(to: committedIndex)
                 }
-                finishHorizontalInteraction()
             }
     }
 
@@ -635,18 +822,36 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
                       options.indices.contains(index) else { return }
                 let option = options[index]
                 if option != selection {
+                    settleInteraction(to: index)
                     onCommit(option)
                 }
             }
     }
 
-    private func finishHorizontalInteraction() {
+    private func settleInteraction(to index: Int) {
         dragAxis = nil
-        dragLocationX = nil
         dragTranslationX = nil
         dragStartIndex = nil
         previewIndex = nil
-        scheduleTapSuppressionReset()
+        settlingIndex = LiquidSelectorMath.clampedIndex(
+            index,
+            optionCount: options.count
+        )
+        if suppressTap {
+            scheduleTapSuppressionReset()
+        }
+        scheduleSettlementReset()
+    }
+
+    private func scheduleSettlementReset() {
+        let interactionID = UUID()
+        settlingResetID = interactionID
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 320_000_000)
+            guard settlingResetID == interactionID else { return }
+            settlingIndex = nil
+            settlingResetID = nil
+        }
     }
 
     private func scheduleTapSuppressionReset() {
@@ -662,13 +867,29 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
 
     private func cancelInteraction() {
         dragAxis = nil
-        dragLocationX = nil
         dragTranslationX = nil
         dragStartIndex = nil
         previewIndex = nil
+        settlingIndex = nil
+        settlingResetID = nil
         if suppressTap {
             // Keep the synthetic tap generated at the end of a drag suppressed
             // even when the committed selection immediately invalidates state.
+            scheduleTapSuppressionReset()
+        } else {
+            suppressTapResetID = nil
+        }
+    }
+
+    private func reconcileExternalSelection(_: Option) {
+        dragAxis = nil
+        dragTranslationX = nil
+        dragStartIndex = nil
+        previewIndex = nil
+        settlingResetID = nil
+        settlingIndex = nil
+
+        if suppressTap {
             scheduleTapSuppressionReset()
         } else {
             suppressTapResetID = nil
@@ -691,24 +912,31 @@ struct LiquidScrubSelector<Option: Hashable, Label: View>: View {
         let nextIndex = min(options.count - 1, max(0, committedIndex + delta))
         let option = options[nextIndex]
         if option != selection {
+            settleInteraction(to: nextIndex)
             onCommit(option)
         }
     }
 
     private var cursorAnimation: Animation? {
-        reduceMotion ? nil : .snappy(duration: 0.20, extraBounce: 0.02)
+        reduceMotion || dragAxis == .horizontal
+            ? nil
+            : .snappy(duration: 0.22, extraBounce: 0.055)
     }
 
     private var labelAnimation: Animation? {
-        reduceMotion ? nil : .easeOut(duration: 0.12)
+        reduceMotion || dragAxis == .horizontal
+            ? nil
+            : .easeOut(duration: 0.12)
     }
 
-    /// While scrubbing, the compact labels are already positioned directly
+    /// While scrubbing, the carousel strip and cursor are positioned directly
     /// from finger translation. Animating an index threshold change on top of
     /// that would briefly move them against the gesture. Snap animation is
     /// retained for taps and external selection changes.
     private var compactLabelAnimation: Animation? {
-        dragAxis == .horizontal ? nil : labelAnimation
+        reduceMotion || dragAxis == .horizontal
+            ? nil
+            : .snappy(duration: 0.22, extraBounce: 0.035)
     }
 }
 

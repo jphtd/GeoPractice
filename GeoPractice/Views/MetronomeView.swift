@@ -27,6 +27,8 @@ private struct BeatVisualPulseSnapshot: Equatable {
     let beat: Int
     let subdivision: Int
     let pulseDate: Date
+    let kind: BeatPulseKind
+    let eventInterval: TimeInterval
 }
 
 private struct BeatVisualFinishAnimation: Equatable {
@@ -48,12 +50,12 @@ struct MetronomeView: View {
 
     @AppStorage("confirmBeforeHandSwitch") private var confirmBeforeHandSwitch = true
 #if DEBUG || CUSTOMER_PREVIEW
-    @AppStorage("debug.experience.tempoMode.v1")
-    private var debugTempoModeRaw = TempoSemantics.legacyQuarterReference.rawValue
-    @AppStorage("debug.experience.referenceNote.v1")
+    @AppStorage("debug.experience.tempoMode.v2")
+    private var debugTempoModeRaw = TempoSemantics.independentReference.rawValue
+    @AppStorage("debug.experience.referenceNote.v2")
     private var debugReferenceNoteRaw = TempoReferenceNote.quarter.rawValue
-    @AppStorage("debug.experience.selectorStyle.v1")
-    private var debugSelectorStyleRaw = LiquidSelectorStyle.fullTrack.rawValue
+    @AppStorage("debug.experience.selectorStyle.v2")
+    private var debugSelectorStyleRaw = LiquidSelectorStyle.adjacentCarousel.rawValue
 #endif
     @State private var pendingHandSwitch: PracticeHand?
     @State private var reviewSummary: PracticeSessionSummary?
@@ -168,8 +170,13 @@ struct MetronomeView: View {
             practiceSession.updatePreset(preset)
         }
         .onChange(of: engine.playbackPlan) { previousPlan, nextPlan in
-            if !nextPlan.hasSameSchedule(as: previousPlan) {
+            // An interval-only tempo change must not make the visible Hit or
+            // the persistent current-beat locator blink out. Clear only when
+            // the number/placement of events changes.
+            if nextPlan.pulsesPerBeat != previousPlan.pulsesPerBeat
+                || nextPlan.eventsPerMeasure != previousPlan.eventsPerMeasure {
                 visualPulse = nil
+                visualLifecycle.clearCurrentBeatLocation()
             }
         }
         .onChange(of: engine.preset.beats) { _, beats in
@@ -195,10 +202,11 @@ struct MetronomeView: View {
 
     private func v4Interface(size: CGSize) -> some View {
         let compactHeight = size.height < 720
+        let showsSupplementaryStageStatus = size.height >= 360
 
         return VStack(spacing: compactHeight ? 4 : 10) {
             v4Header
-            v4Stage
+            v4Stage(showsSupplementaryStatus: showsSupplementaryStageStatus)
                 .frame(maxHeight: .infinity)
                 .layoutPriority(1)
         }
@@ -310,38 +318,10 @@ struct MetronomeView: View {
             Text("GeoBeat")
                 .font(.system(size: 24, weight: .bold, design: .rounded))
                 .tracking(-0.6)
-#if DEBUG || CUSTOMER_PREVIEW
-            Button {
-                activePanel = .experiments
-            } label: {
-                HStack(spacing: 4) {
-                    Image(systemName: "slider.horizontal.3")
-                    Text("\(practiceDisplayName) · 体验设置：\(experienceSummary)")
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.68)
-                    Image(systemName: "chevron.down")
-                        .font(.system(size: 7, weight: .bold))
-                }
-                .font(.system(size: 9, weight: .bold))
-                .foregroundStyle(Color.white.opacity(0.90))
-                .padding(.horizontal, 8)
-                .frame(minHeight: 24)
-                .background(Color.white.opacity(0.085), in: Capsule())
-                .overlay {
-                    Capsule()
-                        .stroke(Color.white.opacity(0.20), lineWidth: 0.8)
-                }
-                .contentShape(Capsule())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("打开体验设置")
-            .accessibilityValue(experienceSummary)
-#else
             Text(practiceDisplayName)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(GeoTheme.muted)
                 .lineLimit(1)
-#endif
         }
         .frame(maxWidth: 220)
     }
@@ -350,7 +330,7 @@ struct MetronomeView: View {
         sourceEvent?.name ?? "自由练习"
     }
 
-    private var v4Stage: some View {
+    private func v4Stage(showsSupplementaryStatus: Bool) -> some View {
         Button {
             toggleMetronome()
         } label: {
@@ -368,21 +348,25 @@ struct MetronomeView: View {
                 .aspectRatio(1, contentMode: .fit)
                 .frame(maxWidth: 680, maxHeight: 680)
 
-                VStack {
-                    Spacer()
-                    HStack(spacing: 6) {
-                        Circle()
-                            .fill(visualFinish != nil || engine.isPlaying ? Color.white : GeoTheme.muted)
-                            .frame(width: 5, height: 5)
-                        Text(
-                            visualFinish != nil
-                                ? "正在结束练习"
-                                : (engine.isPlaying ? "轻点暂停" : "轻点开始")
-                        )
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(GeoTheme.muted)
+                if showsSupplementaryStatus {
+                    VStack {
+                        stageTempoStatus
+                            .padding(.top, 4)
+                        Spacer()
+                        HStack(spacing: 6) {
+                            Circle()
+                                .fill(visualFinish != nil || engine.isPlaying ? Color.white : GeoTheme.muted)
+                                .frame(width: 5, height: 5)
+                            Text(
+                                visualFinish != nil
+                                    ? "正在结束练习"
+                                    : (engine.isPlaying ? "轻点暂停" : "轻点开始")
+                            )
+                                .font(.system(size: 10, weight: .semibold))
+                                .foregroundStyle(GeoTheme.muted)
+                        }
+                        .padding(.bottom, 12)
                     }
-                    .padding(.bottom, 12)
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -398,12 +382,36 @@ struct MetronomeView: View {
         .accessibilityValue("\(engine.preset.beats) 拍，\(engine.preset.tempoDisplay)，\(engine.preset.subdivisionTitle)")
     }
 
+    /// The geometry remains the primary visual object; this unboxed, compact
+    /// readout gives tempo a stable second-level position outside the dense
+    /// control panel.
+    private var stageTempoStatus: some View {
+        VStack(spacing: 0) {
+            Text("BPM")
+                .font(.system(size: 8, weight: .bold, design: .rounded))
+                .tracking(1.3)
+                .foregroundStyle(Color.white.opacity(0.42))
+            Text("\(engine.preset.bpm)")
+                .font(.system(size: 19, weight: .bold, design: .rounded))
+                .monospacedDigit()
+                .contentTransition(.numericText())
+                .foregroundStyle(Color.white.opacity(0.86))
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("当前速度")
+        .accessibilityValue("\(engine.preset.bpm) BPM")
+    }
+
     private var liquidBottomControlPanel: some View {
         LiquidControlPanel(contentPadding: 8, cornerRadius: 26) {
             ViewThatFits(in: .horizontal) {
                 wideLiquidControlLayout
-                    .frame(minWidth: 608)
+                    .frame(minWidth: 660)
+                shortWideLiquidControlLayout
+                    .frame(minWidth: 570)
                 compactLiquidControlLayout
+                    .frame(minWidth: 330)
+                ultraCompactLiquidControlLayout
             }
         }
         .frame(maxWidth: 820)
@@ -414,16 +422,16 @@ struct MetronomeView: View {
     private var wideLiquidControlLayout: some View {
         HStack(spacing: 8) {
             beatLiquidControl
-                .frame(minWidth: 150, maxWidth: 190)
+                .frame(minWidth: 120, maxWidth: 142)
             liquidDivider
             tempoLiquidControl
-                .frame(minWidth: 112, maxWidth: 132)
+                .frame(minWidth: 204, maxWidth: 230)
             liquidDivider
             subdivisionLiquidControl
-                .frame(minWidth: 104, maxWidth: 154)
+                .frame(minWidth: 84, maxWidth: 108)
             liquidDivider
             handLiquidControl
-                .frame(minWidth: 110, maxWidth: 150)
+                .frame(minWidth: 108, maxWidth: 142)
             incrementLiquidControl
                 .frame(minWidth: 74, maxWidth: 82)
         }
@@ -435,17 +443,59 @@ struct MetronomeView: View {
                 beatLiquidControl
                     .frame(maxWidth: .infinity)
                 tempoLiquidControl
-                    .frame(minWidth: 96, idealWidth: 116, maxWidth: 116)
-                subdivisionLiquidControl
-                    .frame(minWidth: 88, idealWidth: 102, maxWidth: 102)
+                    .frame(width: 204)
             }
 
             HStack(spacing: 6) {
+                subdivisionLiquidControl
+                    .frame(minWidth: 76, idealWidth: 88, maxWidth: 96)
                 handLiquidControl
                     .frame(maxWidth: .infinity)
                 incrementLiquidControl
                     .frame(width: 92)
             }
+        }
+    }
+
+    /// A compressed single row for short iPhone landscape layouts. Removing
+    /// decorative dividers keeps the panel shallow without hiding any control.
+    private var shortWideLiquidControlLayout: some View {
+        HStack(spacing: 4) {
+            beatLiquidControl
+                .frame(width: 132)
+            tempoLiquidControl
+                .frame(width: 190)
+            subdivisionLiquidControl
+                .frame(width: 72)
+            handLiquidControl
+                .frame(width: 90)
+            incrementLiquidControl
+                .frame(width: 64)
+        }
+    }
+
+    /// At roughly 320 pt window width (for example an iPad narrow split or an
+    /// iPhone SE portrait), fixed-width tempo content cannot share a row with
+    /// the beat selector. Three compact rows prevent clipping or zero-width
+    /// selectors while preserving every direct manipulation target.
+    private var ultraCompactLiquidControlLayout: some View {
+        VStack(spacing: 6) {
+            HStack(spacing: 6) {
+                beatLiquidControl
+                    .frame(maxWidth: .infinity)
+                subdivisionLiquidControl
+                    .frame(width: 78)
+            }
+
+            HStack(spacing: 6) {
+                tempoLiquidControl
+                    .frame(width: 204)
+                incrementLiquidControl
+                    .frame(maxWidth: .infinity)
+            }
+
+            handLiquidControl
+                .frame(maxWidth: .infinity)
         }
     }
 
@@ -459,45 +509,87 @@ struct MetronomeView: View {
 
     private var beatLiquidControl: some View {
         let groupings = MetronomePreset.groupings(for: engine.preset.beats)
-        let title = groupings.count > 1
-            ? "拍子 · \(engine.preset.grouping)"
-            : "拍子"
 
         return VStack(spacing: 2) {
-            Text(title)
+            Text("拍子")
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(GeoTheme.muted)
                 .lineLimit(1)
+                .frame(maxWidth: .infinity, alignment: .leading)
 
-            LiquidScrubSelector(
-                options: Array(3...9),
-                selection: engine.preset.beats,
-                style: activeSelectorStyle,
-                accessibilityLabel: "拍子",
-                accessibilityValue: { "\($0) 拍" },
-                controlHeight: 44,
-                isEnabled: canEditLiquidControls,
-                onCommit: setBeatCount
-            ) { beats in
-                Text("\(beats)")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
+            HStack(spacing: 4) {
+                LiquidScrubSelector(
+                    options: Array(3...9),
+                    selection: engine.preset.beats,
+                    style: .adjacentCarousel,
+                    accessibilityLabel: "拍子",
+                    accessibilityValue: { "\($0) 拍" },
+                    controlHeight: 44,
+                    isEnabled: canEditLiquidControls,
+                    onCommit: setBeatCount
+                ) { beats in
+                    Text("\(beats)")
+                        .font(.system(size: 11, weight: .bold, design: .rounded))
+                }
+
+                if groupings.count > 1 {
+                    BeatGroupingSwitch(
+                        options: groupings,
+                        selection: engine.preset.grouping,
+                        isEnabled: canEditLiquidControls,
+                        onCommit: { grouping in
+                            guard canEditLiquidControls else { return }
+                            engine.setGrouping(grouping)
+                        }
+                    )
+                }
             }
         }
     }
 
     private var tempoLiquidControl: some View {
-        TempoScrubber(
-            bpm: engine.preset.bpm,
-            compact: true,
-            onTap: {
-                activePanel = .tempo
-            },
-            onCommit: { bpm in
-                guard canEditLiquidControls else { return }
-                engine.setBPM(bpm)
+        HStack(alignment: .bottom, spacing: 3) {
+            VStack(spacing: 2) {
+                Text("基准音符")
+                    .font(.system(size: 9, weight: .semibold))
+                    .foregroundStyle(GeoTheme.muted)
+                    .lineLimit(1)
+
+                LiquidScrubSelector(
+                    options: TempoReferenceNote.tempoReferenceOptions,
+                    selection: engine.preset.referenceNote,
+                    style: .adjacentCarousel,
+                    accessibilityLabel: "BPM 基准音符",
+                    accessibilityValue: { $0.title },
+                    controlHeight: 44,
+                    isEnabled: canEditLiquidControls,
+                    onCommit: { note in
+                        setTempoReferenceNote(note)
+                    }
+                ) { note in
+                    SMuFLNoteGlyph(note: note)
+                }
             }
-        )
-        .frame(height: 52)
+
+            Text("=")
+                .font(.system(size: 15, weight: .bold, design: .rounded))
+                .foregroundStyle(GeoTheme.muted)
+                .frame(width: 10, height: 44)
+                .accessibilityHidden(true)
+
+            TempoScrubber(
+                bpm: engine.preset.bpm,
+                compact: true,
+                onTap: {
+                    activePanel = .tempo
+                },
+                onCommit: { bpm in
+                    guard canEditLiquidControls else { return }
+                    engine.setBPM(bpm)
+                }
+            )
+            .frame(width: 116, height: 52)
+        }
         .opacity(canEditLiquidControls ? 1 : 0.48)
         .disabled(!canEditLiquidControls)
         .allowsHitTesting(canEditLiquidControls)
@@ -512,7 +604,7 @@ struct MetronomeView: View {
             LiquidScrubSelector(
                 options: MetronomePreset.supportedSubdivisions,
                 selection: engine.preset.subdivision,
-                style: activeSelectorStyle,
+                style: .adjacentCarousel,
                 accessibilityLabel: "训练音符",
                 accessibilityValue: subdivisionTitle,
                 controlHeight: 44,
@@ -522,8 +614,9 @@ struct MetronomeView: View {
                     engine.setSubdivision(subdivision)
                 }
             ) { subdivision in
-                Text(subdivision == 0 ? "2" : "\(subdivision * 4)")
-                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                SMuFLNoteGlyph(
+                    note: TempoReferenceNote.trainingNote(for: subdivision)
+                )
             }
         }
     }
@@ -565,7 +658,8 @@ struct MetronomeView: View {
         } label: {
             VStack(spacing: 1) {
                 Text("+1")
-                    .font(.system(size: 19, weight: .bold, design: .rounded))
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.82))
                 Text("\(hand.shortTitle) · \(count)")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
                     .foregroundStyle(GeoTheme.muted)
@@ -574,10 +668,10 @@ struct MetronomeView: View {
             .frame(maxWidth: .infinity, minHeight: 52)
             .background {
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.white.opacity(0.035))
+                    .fill(Color.white.opacity(0.018))
                     .overlay {
                         RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .stroke(Color.white.opacity(0.08), lineWidth: 0.8)
+                            .stroke(Color.white.opacity(0.055), lineWidth: 0.8)
                     }
             }
             .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -659,6 +753,15 @@ struct MetronomeView: View {
     private func setBeatCount(_ beats: Int) {
         guard canEditLiquidControls else { return }
         engine.setBeats(beats)
+    }
+
+    private func setTempoReferenceNote(_ note: TempoReferenceNote) {
+        guard canEditLiquidControls else { return }
+#if DEBUG || CUSTOMER_PREVIEW
+        debugTempoModeRaw = TempoSemantics.independentReference.rawValue
+        debugReferenceNoteRaw = note.rawValue
+#endif
+        engine.setTempoReferenceNote(note)
     }
 
     private var structureCard: some View {
@@ -768,7 +871,7 @@ struct MetronomeView: View {
 
 #if DEBUG || CUSTOMER_PREVIEW
     private var debugTempoMode: TempoSemantics {
-        TempoSemantics(rawValue: debugTempoModeRaw) ?? .legacyQuarterReference
+        TempoSemantics(rawValue: debugTempoModeRaw) ?? .independentReference
     }
 
     private var debugReferenceNote: TempoReferenceNote {
@@ -776,7 +879,7 @@ struct MetronomeView: View {
     }
 
     private var debugSelectorStyle: LiquidSelectorStyle {
-        LiquidSelectorStyle(rawValue: debugSelectorStyleRaw) ?? .fullTrack
+        LiquidSelectorStyle(rawValue: debugSelectorStyleRaw) ?? .adjacentCarousel
     }
 
     private var experienceSummary: String {
@@ -842,15 +945,16 @@ struct MetronomeView: View {
                         VStack(alignment: .leading, spacing: 8) {
                             ControlLabel(
                                 title: "BPM 基准音符",
-                                value: "\(debugReferenceNote.symbol) · \(debugReferenceNote.title)"
+                                value: debugReferenceNote.title
                             )
                             GeoSegmentContainer {
-                                ForEach(TempoReferenceNote.allCases) { note in
+                                ForEach(TempoReferenceNote.tempoReferenceOptions) { note in
                                     GeoSegmentButton(
                                         title: note.shortTitle,
                                         isActive: debugReferenceNote == note
                                     ) {
                                         debugReferenceNoteRaw = note.rawValue
+                                        engine.setTempoReferenceNote(note)
                                     }
                                 }
                             }
@@ -906,7 +1010,10 @@ struct MetronomeView: View {
             GeoCard {
                 VStack(spacing: 12) {
                     CardTitle(title: "当前效果", subtitle: experienceSummary)
-                    experimentMetricRow(title: "BPM 标记", value: plan.bpmMark)
+                    experimentMetricRow(
+                        title: "BPM 标记",
+                        value: "\(plan.referenceNote.title) = \(plan.bpm)"
+                    )
                     experimentMetricRow(title: "训练内容", value: engine.preset.subdivisionTitle)
                     experimentMetricRow(
                         title: "实际脉冲速度",
@@ -923,7 +1030,7 @@ struct MetronomeView: View {
                     )
 
                     if engine.preset.subdivision == 0 {
-                        Text("提示：二分音符暂时沿用当前事件结构；例如 4 拍仍有 4 次事件，只改变速度。传统 4/4 是否调整为每小节 2 次，可在试听后再确定。")
+                        Text("二分音符沿用既有事件结构：每个主拍触发一次，音符时值用于计算事件间隔。")
                             .font(.system(size: 10, weight: .medium))
                             .foregroundStyle(GeoTheme.muted)
                             .fixedSize(horizontal: false, vertical: true)
@@ -1064,7 +1171,7 @@ struct MetronomeView: View {
 
     private func selectorStyleExplanation(_ style: LiquidSelectorStyle) -> String {
         switch style {
-        case .fullTrack: "当前版本。所有候选值同时出现，可点击或在整条轨道上滑动。"
+        case .fullTrack: "所有候选值同时出现，可点击或在整条轨道上滑动。"
         case .singleValue: "框中永远只显示一个结果，左右滑动逐项切换。"
         case .adjacentCarousel: "当前结果居中，前后选项淡化预览，左右滑动切换。"
         }
@@ -1080,7 +1187,9 @@ struct MetronomeView: View {
 
     private func synchronizeExperienceSettings() {
         let mode = debugTempoMode
-        let reference = debugReferenceNote
+        let reference = mode == .independentReference
+            ? engine.preset.referenceNote
+            : debugReferenceNote
         if debugTempoModeRaw != mode.rawValue {
             debugTempoModeRaw = mode.rawValue
         }
@@ -1088,19 +1197,16 @@ struct MetronomeView: View {
             debugReferenceNoteRaw = reference.rawValue
         }
         if debugSelectorStyleRaw != debugSelectorStyle.rawValue {
-            debugSelectorStyleRaw = LiquidSelectorStyle.fullTrack.rawValue
+            debugSelectorStyleRaw = LiquidSelectorStyle.adjacentCarousel.rawValue
         }
         engine.setTempoExperiment(semantics: mode, referenceNote: reference)
     }
 
     private func restoreDefaultExperienceSettings() {
-        debugTempoModeRaw = TempoSemantics.legacyQuarterReference.rawValue
+        debugTempoModeRaw = TempoSemantics.independentReference.rawValue
         debugReferenceNoteRaw = TempoReferenceNote.quarter.rawValue
-        debugSelectorStyleRaw = LiquidSelectorStyle.fullTrack.rawValue
-        engine.setTempoExperiment(
-            semantics: .legacyQuarterReference,
-            referenceNote: .quarter
-        )
+        debugSelectorStyleRaw = LiquidSelectorStyle.adjacentCarousel.rawValue
+        engine.setTempoReferenceNote(.quarter)
     }
 #endif
 
@@ -1300,7 +1406,14 @@ struct MetronomeView: View {
         let snapshot = BeatVisualPulseSnapshot(
             beat: engine.currentBeat,
             subdivision: engine.currentSubdivision,
-            pulseDate: pulseDate
+            pulseDate: pulseDate,
+            kind: BeatPulseVisualModel.kind(
+                beat: engine.currentBeat,
+                subdivision: engine.currentSubdivision,
+                strongBeatIndices: engine.preset.strongBeatIndices,
+                secondaryAccentIndices: engine.preset.secondaryAccentIndices
+            ),
+            eventInterval: engine.playbackPlan.eventInterval
         )
         visualPulse = snapshot
         visualLifecycle.record(
@@ -1539,6 +1652,345 @@ private struct PracticeSessionSummaryView: View {
     }
 }
 
+/// A deliberately small two-choice liquid switch for asymmetric meters. Both
+/// values stay visible, can be tapped directly, and share the same continuous
+/// horizontal scrub behavior as the larger selectors below it.
+private struct BeatGroupingSwitch: View {
+    let options: [String]
+    let selection: String
+    let isEnabled: Bool
+    let onCommit: (String) -> Void
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var dragAxis: DragAxis?
+    @State private var dragStartIndex: Int?
+    @State private var dragTranslationX: CGFloat?
+    @State private var previewIndex: Int?
+    @State private var settlingIndex: Int?
+    @State private var suppressTap = false
+    @State private var tapSuppressionResetID: UUID?
+    @State private var settlingResetID: UUID?
+
+    private enum DragAxis {
+        case horizontal
+        case vertical
+    }
+
+    private var selectedIndex: Int {
+        options.firstIndex(of: selection) ?? 0
+    }
+
+    private var restingIndex: Int {
+        guard !options.isEmpty else { return 0 }
+        return clampedIndex(settlingIndex ?? selectedIndex)
+    }
+
+    private var displayedIndex: Int {
+        guard !options.isEmpty else { return 0 }
+        return clampedIndex(previewIndex ?? restingIndex)
+    }
+
+    var body: some View {
+        GeometryReader { proxy in
+            let inset: CGFloat = 2
+            let visualHeight: CGFloat = 20
+            let availableWidth = max(0, proxy.size.width - inset * 2)
+            let segmentWidth = options.isEmpty
+                ? availableWidth
+                : availableWidth / CGFloat(options.count)
+
+            ZStack(alignment: .leading) {
+                Capsule(style: .continuous)
+                    .fill(Color.white.opacity(0.025))
+                    .overlay {
+                        Capsule(style: .continuous)
+                            .stroke(Color.white.opacity(0.08), lineWidth: 0.7)
+                    }
+                    .frame(height: visualHeight)
+
+                if !options.isEmpty {
+                    Capsule(style: .continuous)
+                        .fill(Color.white.opacity(0.15))
+                        .overlay {
+                            Capsule(style: .continuous)
+                                .stroke(Color.white.opacity(0.24), lineWidth: 0.7)
+                        }
+                        .frame(width: segmentWidth, height: visualHeight - inset * 2)
+                        .scaleEffect(
+                            x: cursorStretchScale(width: proxy.size.width),
+                            y: 1,
+                            anchor: cursorStretchAnchor
+                        )
+                        .offset(
+                            x: inset
+                                + segmentWidth * continuousPosition(width: proxy.size.width)
+                                + directionalOffset(width: proxy.size.width)
+                        )
+                        .animation(
+                            reduceMotion ? nil : settleAnimation,
+                            value: selectedIndex
+                        )
+                }
+
+                HStack(spacing: 0) {
+                    ForEach(Array(options.enumerated()), id: \.element) { index, grouping in
+                        Text(grouping)
+                            .font(.system(
+                                size: 9,
+                                weight: index == displayedIndex ? .bold : .semibold,
+                                design: .rounded
+                            ))
+                            .foregroundStyle(
+                                Color.white.opacity(index == displayedIndex ? 0.94 : 0.46)
+                            )
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    }
+                }
+                .allowsHitTesting(false)
+            }
+            .frame(height: proxy.size.height)
+            .contentShape(Rectangle())
+            .simultaneousGesture(groupingDragGesture(width: proxy.size.width))
+            .simultaneousGesture(groupingTapGesture(width: proxy.size.width))
+        }
+        .frame(width: 72, height: 44)
+        .opacity(isEnabled ? 1 : 0.46)
+        .allowsHitTesting(isEnabled && !options.isEmpty)
+        .onDisappear {
+            cancelInteraction(preserveTapSuppression: false)
+        }
+        .onChange(of: options) { _, _ in
+            cancelInteraction()
+        }
+        .onChange(of: selection) { _, _ in
+            cancelInteraction()
+        }
+        .onChange(of: isEnabled) { _, _ in
+            cancelInteraction()
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("重音分组")
+        .accessibilityValue(
+            options.indices.contains(selectedIndex) ? options[selectedIndex] : ""
+        )
+        .accessibilityHint("点按或左右滑动选择；VoiceOver 上下轻扫调整")
+        .accessibilityRespondsToUserInteraction(isEnabled && !options.isEmpty)
+        .accessibilityAdjustableAction(adjustAccessibilitySelection)
+    }
+
+    private func groupingDragGesture(width: CGFloat) -> some Gesture {
+        DragGesture(minimumDistance: 4, coordinateSpace: .local)
+            .onChanged { value in
+                guard isEnabled, !options.isEmpty else {
+                    cancelInteraction()
+                    return
+                }
+
+                let horizontal = abs(value.translation.width)
+                let vertical = abs(value.translation.height)
+                if dragAxis == nil {
+                    // `SpatialTapGesture` can still recognize a short drag.
+                    // Suppress it as soon as the drag gesture becomes active,
+                    // including when the persistent lock resolves vertically.
+                    tapSuppressionResetID = nil
+                    suppressTap = true
+
+                    if horizontal > vertical * 1.08 {
+                        dragAxis = .horizontal
+                        dragStartIndex = selectedIndex
+                        settlingIndex = nil
+                        settlingResetID = nil
+                    } else if vertical > horizontal * 1.08 {
+                        dragAxis = .vertical
+                    } else {
+                        return
+                    }
+                }
+
+                guard dragAxis == .horizontal else { return }
+
+                dragTranslationX = value.translation.width
+                previewIndex = clampedIndex(
+                    Int(
+                        continuousPosition(width: width)
+                            .rounded(.toNearestOrAwayFromZero)
+                    )
+                )
+            }
+            .onEnded { _ in
+                guard isEnabled, dragAxis == .horizontal, !options.isEmpty else {
+                    cancelInteraction()
+                    return
+                }
+
+                let targetIndex = clampedIndex(previewIndex ?? selectedIndex)
+                scheduleTapSuppressionReset()
+                settleAndCommit(to: targetIndex)
+            }
+    }
+
+    private func groupingTapGesture(width: CGFloat) -> some Gesture {
+        SpatialTapGesture()
+            .onEnded { value in
+                guard isEnabled,
+                      !options.isEmpty,
+                      !suppressTap,
+                      let targetIndex = tapIndex(at: value.location.x, width: width)
+                else { return }
+                settleAndCommit(to: targetIndex)
+            }
+    }
+
+    private func continuousPosition(width: CGFloat) -> CGFloat {
+        guard !options.isEmpty else { return 0 }
+        let baseIndex = CGFloat(dragStartIndex ?? restingIndex)
+        guard dragAxis == .horizontal, let dragTranslationX else {
+            return CGFloat(restingIndex)
+        }
+        let rawPosition = baseIndex + dragTranslationX / pointsPerStep(width: width)
+        return min(CGFloat(options.count - 1), max(0, rawPosition))
+    }
+
+    private func pointsPerStep(width: CGFloat) -> CGFloat {
+        guard !options.isEmpty else { return 1 }
+        let visualWidth = max(0, width - 4)
+        return max(22, visualWidth / CGFloat(options.count))
+    }
+
+    private func cursorStretchPhase(width: CGFloat) -> CGFloat {
+        guard !reduceMotion, dragAxis == .horizontal else { return 0 }
+        let position = continuousPosition(width: width)
+        let distanceFromRest = abs(position - position.rounded())
+        return min(1, distanceFromRest * 2)
+    }
+
+    private func cursorStretchScale(width: CGFloat) -> CGFloat {
+        1 + cursorStretchPhase(width: width) * 0.08
+    }
+
+    private var cursorStretchAnchor: UnitPoint {
+        guard !reduceMotion,
+              dragAxis == .horizontal,
+              let dragTranslationX,
+              abs(dragTranslationX) > 0.5
+        else { return .center }
+        return dragTranslationX > 0 ? .leading : .trailing
+    }
+
+    private func directionalOffset(width: CGFloat) -> CGFloat {
+        guard !reduceMotion,
+              let dragTranslationX,
+              dragAxis == .horizontal
+        else { return 0 }
+        let direction: CGFloat = dragTranslationX >= 0 ? 1 : -1
+        return direction * cursorStretchPhase(width: width) * 1.2
+    }
+
+    private func tapIndex(at x: CGFloat, width: CGFloat) -> Int? {
+        guard !options.isEmpty else { return nil }
+        let inset: CGFloat = 2
+        let availableWidth = max(0, width - inset * 2)
+        guard availableWidth > 0 else { return selectedIndex }
+        let segmentWidth = availableWidth / CGFloat(options.count)
+        let localX = min(availableWidth, max(0, x - inset))
+        return clampedIndex(Int(localX / max(1, segmentWidth)))
+    }
+
+    private func settleAndCommit(to index: Int) {
+        guard options.indices.contains(index) else { return }
+        let applySettledState = {
+            settlingIndex = index
+            clearDragTracking()
+        }
+
+        if reduceMotion {
+            applySettledState()
+        } else {
+            withAnimation(settleAnimation) {
+                applySettledState()
+            }
+        }
+
+        scheduleSettlingReset()
+        if index != selectedIndex {
+            onCommit(options[index])
+        }
+    }
+
+    private func clearDragTracking() {
+        dragAxis = nil
+        dragStartIndex = nil
+        dragTranslationX = nil
+        previewIndex = nil
+    }
+
+    private func cancelInteraction(preserveTapSuppression: Bool = true) {
+        clearDragTracking()
+        settlingIndex = nil
+        settlingResetID = nil
+
+        if preserveTapSuppression, suppressTap {
+            scheduleTapSuppressionReset()
+        } else {
+            suppressTap = false
+            tapSuppressionResetID = nil
+        }
+    }
+
+    private func scheduleTapSuppressionReset() {
+        let interactionID = UUID()
+        tapSuppressionResetID = interactionID
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 140_000_000)
+            guard tapSuppressionResetID == interactionID else { return }
+            suppressTap = false
+            tapSuppressionResetID = nil
+        }
+    }
+
+    private func scheduleSettlingReset() {
+        let interactionID = UUID()
+        settlingResetID = interactionID
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 420_000_000)
+            guard settlingResetID == interactionID else { return }
+            settlingResetID = nil
+            if reduceMotion {
+                settlingIndex = nil
+            } else {
+                withAnimation(settleAnimation) {
+                    settlingIndex = nil
+                }
+            }
+        }
+    }
+
+    private func adjustAccessibilitySelection(
+        _ direction: AccessibilityAdjustmentDirection
+    ) {
+        guard isEnabled, !options.isEmpty else { return }
+        let delta: Int
+        switch direction {
+        case .increment:
+            delta = 1
+        case .decrement:
+            delta = -1
+        @unknown default:
+            return
+        }
+        settleAndCommit(to: clampedIndex(selectedIndex + delta))
+    }
+
+    private func clampedIndex(_ index: Int) -> Int {
+        guard !options.isEmpty else { return 0 }
+        return min(options.count - 1, max(0, index))
+    }
+
+    private var settleAnimation: Animation {
+        .spring(response: 0.28, dampingFraction: 0.78, blendDuration: 0.08)
+    }
+}
+
 private struct MetronomeCanvas: View {
     let preset: MetronomePreset
     let playbackPlan: MetronomePlaybackPlan
@@ -1620,10 +2072,12 @@ private struct MetronomeCanvas: View {
         in context: inout GraphicsContext
     ) {
         for index in lifecycle.visibleBeatIndices where points.indices.contains(index) {
+            let isCurrentMainBeat = lifecycle.currentBeatIndex == index
             drawAnchor(
                 at: points[index],
-                opacity: 0.24,
+                opacity: isCurrentMainBeat ? 0.42 : 0.20,
                 scale: effectScale,
+                radiusMultiplier: isCurrentMainBeat ? 1.18 : 1,
                 in: &context
             )
         }
@@ -1638,15 +2092,9 @@ private struct MetronomeCanvas: View {
               let position = pulsePosition(for: address, points: points)
         else { return }
 
-        let kind = BeatPulseVisualModel.kind(
-            beat: pulse.beat,
-            subdivision: pulse.subdivision,
-            strongBeatIndices: preset.strongBeatIndices,
-            secondaryAccentIndices: preset.secondaryAccentIndices
-        )
         let style = BeatPulseVisualModel.style(
-            for: kind,
-            eventInterval: playbackPlan.eventInterval,
+            for: pulse.kind,
+            eventInterval: pulse.eventInterval,
             dimFlashingLights: dimFlashingLights
         )
         let age = max(0, date.timeIntervalSince(pulse.pulseDate))
@@ -1680,9 +2128,10 @@ private struct MetronomeCanvas: View {
         at point: CGPoint,
         opacity: Double,
         scale: CGFloat,
+        radiusMultiplier: CGFloat = 1,
         in context: inout GraphicsContext
     ) {
-        let radius = 3.5 * scale
+        let radius = 3.5 * scale * radiusMultiplier
         let rect = CGRect(
             x: point.x - radius,
             y: point.y - radius,

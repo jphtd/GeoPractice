@@ -165,6 +165,27 @@ struct ControlLabel: View {
     }
 }
 
+/// A compact SMuFL note value. Bravura Text's augmentation dot is intentionally
+/// tiny at selector sizes, so it is kept as a real SMuFL glyph but rendered at
+/// a larger size and with explicit spacing from the note.
+struct SMuFLNoteGlyph: View {
+    let note: TempoReferenceNote
+    var size: CGFloat = 28
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: note.isDotted ? 1.5 : 0) {
+            Text(note.undottedNote.symbol)
+                .font(.custom("BravuraText", fixedSize: size))
+
+            if note.isDotted {
+                Text(TempoReferenceNote.augmentationDotSymbol)
+                    .font(.custom("BravuraText", fixedSize: size * 1.29))
+            }
+        }
+        .fixedSize()
+    }
+}
+
 /// A number-first tempo control. Horizontal distance maps to exact BPM steps;
 /// the model is committed only when the gesture ends, so a playing metronome is
 /// rescheduled once instead of on every drag sample.
@@ -178,6 +199,7 @@ struct TempoScrubber: View {
     @State private var dragStartBPM: Int?
     @State private var dragAxis: ScrubAxis?
     @State private var suppressTap = false
+    @State private var tapResetTask: Task<Void, Never>?
 
     private enum ScrubAxis {
         case horizontal
@@ -198,15 +220,12 @@ struct TempoScrubber: View {
         Group {
             if compact {
                 VStack(spacing: 0) {
-                    Text(displayedTempoName)
-                        .font(.system(size: 10, weight: .semibold))
+                    Text("BPM · \(displayedTempoName)")
+                        .font(.system(size: 9, weight: .semibold))
                         .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
                     scrubTarget(compact: true)
-                }
-                .contentShape(Rectangle())
-                .onTapGesture {
-                    guard !suppressTap else { return }
-                    onTap?()
                 }
             } else {
                 VStack(spacing: 8) {
@@ -230,6 +249,7 @@ struct TempoScrubber: View {
             }
         }
         .onDisappear {
+            tapResetTask?.cancel()
             cancelDraft()
         }
         .accessibilityElement(children: .ignore)
@@ -249,8 +269,9 @@ struct TempoScrubber: View {
     }
 
     private func scrubTarget(compact: Bool) -> some View {
-        HStack(spacing: compact ? 7 : 18) {
-            Image(systemName: "chevron.left")
+        HStack(spacing: compact ? 2 : 8) {
+            tempoStepButton(delta: -1, compact: compact)
+
             Text("\(displayedBPM)")
                 .font(.system(
                     size: compact ? 23 : 58,
@@ -259,7 +280,15 @@ struct TempoScrubber: View {
                 ))
                 .monospacedDigit()
                 .contentTransition(.numericText())
-            Image(systemName: "chevron.right")
+                .frame(minWidth: compact ? 48 : 96, minHeight: compact ? 44 : 76)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard !suppressTap else { return }
+                    onTap?()
+                }
+                .simultaneousGesture(scrubGesture)
+
+            tempoStepButton(delta: 1, compact: compact)
         }
         .foregroundStyle(GeoTheme.text)
         .frame(minWidth: compact ? 116 : 220, minHeight: compact ? 42 : 76)
@@ -271,20 +300,39 @@ struct TempoScrubber: View {
                     .frame(width: compact ? 26 : 48, height: 1.5)
             }
         }
-        .simultaneousGesture(scrubGesture)
+    }
+
+    private func tempoStepButton(delta: Int, compact: Bool) -> some View {
+        let isAvailable = delta < 0
+            ? displayedBPM > TempoScrubModel.minimumBPM
+            : displayedBPM < TempoScrubModel.maximumBPM
+
+        return Button {
+            nudge(by: delta)
+        } label: {
+            Image(systemName: delta < 0 ? "chevron.left" : "chevron.right")
+                .font(.system(size: compact ? 10 : 15, weight: .bold))
+                .frame(width: compact ? 28 : 44)
+                .frame(minHeight: compact ? 44 : 76)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .opacity(isAvailable ? 0.72 : 0.16)
+        .disabled(!isAvailable)
+        .accessibilityLabel(delta < 0 ? "速度减一" : "速度加一")
     }
 
     private var scrubGesture: some Gesture {
-        DragGesture(minimumDistance: 8, coordinateSpace: .local)
+        DragGesture(minimumDistance: 4, coordinateSpace: .local)
             .onChanged { value in
                 let horizontal = abs(value.translation.width)
                 let vertical = abs(value.translation.height)
                 if dragAxis == nil {
-                    if horizontal > vertical * 1.2 {
+                    if horizontal > vertical * 1.05 {
                         dragAxis = .horizontal
                         dragStartBPM = bpm
                         draftBPM = bpm
-                    } else if vertical > horizontal * 1.2 {
+                    } else if vertical > horizontal * 1.05 {
                         dragAxis = .vertical
                     } else {
                         return
@@ -306,18 +354,30 @@ struct TempoScrubber: View {
             }
     }
 
+    private func nudge(by delta: Int) {
+        cancelDraft()
+        let next = clamped(bpm + delta)
+        if next != bpm {
+            onCommit(next)
+        }
+    }
+
     private func clamped(_ value: Int) -> Int {
         min(TempoScrubModel.maximumBPM, max(TempoScrubModel.minimumBPM, value))
     }
 
     private func cancelDraft(keepTapSuppressed: Bool = false) {
+        tapResetTask?.cancel()
+        tapResetTask = nil
         draftBPM = nil
         dragStartBPM = nil
         dragAxis = nil
         if keepTapSuppressed {
-            Task { @MainActor in
+            tapResetTask = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 120_000_000)
+                guard !Task.isCancelled else { return }
                 suppressTap = false
+                tapResetTask = nil
             }
         } else {
             suppressTap = false

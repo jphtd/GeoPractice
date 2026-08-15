@@ -22,6 +22,7 @@
 		A0000000000000000000000D /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000000F /* PrivacyInfo.xcprivacy */; };
 		A0000000000000000000000E /* BeatVisualLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000010 /* BeatVisualLifecycle.swift */; };
 		A0000000000000000000000F /* LiquidControlComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000011 /* LiquidControlComponents.swift */; };
+		A00000000000000000000010 /* BravuraText.otf in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000012 /* BravuraText.otf */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -52,6 +53,7 @@
 		B0000000000000000000000F /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 		B00000000000000000000010 /* BeatVisualLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BeatVisualLifecycle.swift; sourceTree = "<group>"; };
 		B00000000000000000000011 /* LiquidControlComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidControlComponents.swift; sourceTree = "<group>"; };
+		B00000000000000000000012 /* BravuraText.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/Fonts/BravuraText.otf; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -87,6 +89,7 @@
 				B00000000000000000000001 /* GeoPracticeApp.swift */,
 				B0000000000000000000000D /* Assets.xcassets */,
 				B0000000000000000000000F /* PrivacyInfo.xcprivacy */,
+				B00000000000000000000012 /* BravuraText.otf */,
 				C00000000000000000000002 /* Models */,
 				C00000000000000000000003 /* Services */,
 				C00000000000000000000004 /* Views */,
@@ -232,6 +235,7 @@
 			files = (
 				A0000000000000000000000B /* Assets.xcassets in Resources */,
 				A0000000000000000000000D /* PrivacyInfo.xcprivacy in Resources */,
+				A00000000000000000000010 /* BravuraText.otf in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -401,7 +405,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_TEAM = XKY44WW2XC;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "节拍打卡";
@@ -429,7 +433,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_TEAM = XKY44WW2XC;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_CFBundleDisplayName = "节拍打卡";

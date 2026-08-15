@@ -105,6 +105,10 @@ struct BeatVisualLifecycle: Equatable, Sendable {
     private(set) var phase: Phase = .origin
     private(set) var beatCount: Int
     private(set) var revealedBeats: Set<Int> = []
+    /// The most recent main-beat vertex. It deliberately survives subdivision
+    /// hits, pauses, and interval-only tempo changes so peripheral vision can
+    /// still locate the current beat after the short Hit has decayed.
+    private(set) var currentBeatIndex: Int?
     private(set) var isPaused = true
 
     init(beats: Int = 4) {
@@ -138,6 +142,7 @@ struct BeatVisualLifecycle: Equatable, Sendable {
         if phase == .orbiting {
             beatCount = normalized
             revealedBeats = Set(0..<normalized)
+            currentBeatIndex = nil
         } else {
             reset(beats: normalized)
         }
@@ -153,6 +158,13 @@ struct BeatVisualLifecycle: Equatable, Sendable {
         isPaused = true
     }
 
+    /// Clears only the persistent main-beat locator while preserving the
+    /// established geometry. Used when the event topology is replaced and the
+    /// old vertex can no longer describe the pending scheduler cursor.
+    mutating func clearCurrentBeatLocation() {
+        currentBeatIndex = nil
+    }
+
     mutating func record(beat: Int, subdivision: Int, cycle: Int, beats: Int) {
         reconfigure(beats: beats)
         guard phase != .finishing, phase != .settled,
@@ -166,17 +178,22 @@ struct BeatVisualLifecycle: Equatable, Sendable {
         // progressively drawn by a travelling point. Even a first subdivision
         // event establishes all main-beat anchors at once.
         revealedBeats = Set(0..<beatCount)
+        if subdivision == 0 {
+            currentBeatIndex = beat
+        }
         phase = .orbiting
     }
 
     mutating func beginFinishing() {
         guard phase != .finishing, phase != .settled else { return }
         isPaused = true
+        currentBeatIndex = nil
         phase = .finishing
     }
 
     mutating func settle() {
         isPaused = true
+        currentBeatIndex = nil
         phase = .settled
     }
 

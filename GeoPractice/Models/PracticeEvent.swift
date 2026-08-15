@@ -42,6 +42,7 @@ final class PracticeEvent {
     var subdivision: Int
     var directionRawValue: String
     var grouping: String
+    var referenceNoteRaw: String?
     var createdAt: Date
     var updatedAt: Date
 
@@ -72,6 +73,7 @@ final class PracticeEvent {
         self.subdivision = preset.subdivision
         self.directionRawValue = preset.direction.rawValue
         self.grouping = preset.grouping
+        self.referenceNoteRaw = preset.referenceNoteRaw
         self.createdAt = createdAt
         self.updatedAt = updatedAt
     }
@@ -82,7 +84,8 @@ final class PracticeEvent {
             beats: beats,
             subdivision: subdivision,
             direction: RotationDirection(rawValue: directionRawValue) ?? .counterclockwise,
-            grouping: grouping
+            grouping: grouping,
+            referenceNoteRaw: referenceNoteRaw
         ).normalized
     }
 
@@ -105,6 +108,7 @@ final class PracticeEvent {
         subdivision = preset.subdivision
         directionRawValue = preset.direction.rawValue
         grouping = preset.grouping
+        referenceNoteRaw = preset.referenceNoteRaw
         updatedAt = .now
     }
 

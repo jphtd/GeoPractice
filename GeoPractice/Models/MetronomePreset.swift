@@ -53,7 +53,7 @@ enum TempoSemantics: String, CaseIterable, Identifiable, Sendable {
     var explanation: String {
         switch self {
         case .legacyQuarterReference:
-            "当前版本逻辑。BPM 始终表示四分音符速度，训练音符越细，实际脉冲越密。"
+            "对照逻辑。BPM 始终表示四分音符速度，训练音符越细，实际脉冲越密。"
         case .trainingNoteReference:
             "BPM 表示当前训练音符的速度。八分音符 88 BPM 就是每分钟 88 次脉冲。"
         case .independentReference:
@@ -62,28 +62,78 @@ enum TempoSemantics: String, CaseIterable, Identifiable, Sendable {
     }
 }
 
-enum TempoReferenceNote: String, CaseIterable, Identifiable, Sendable {
+enum TempoReferenceNote: String, CaseIterable, Codable, Identifiable, Sendable {
     case half
+    case dottedHalf
     case quarter
+    case dottedQuarter
     case eighth
+    case dottedEighth
     case sixteenth
 
     var id: String { rawValue }
 
-    var density: Double {
+    /// Notes offered by the independent BPM-reference selector. Sixteenth
+    /// notes remain available as a training value, but are intentionally not
+    /// part of the customer's requested reference-note choices.
+    static let tempoReferenceOptions: [TempoReferenceNote] = [
+        .half, .dottedHalf,
+        .quarter, .dottedQuarter,
+        .eighth, .dottedEighth
+    ]
+
+    /// Undotted rhythmic values supported by the training-note selector.
+    static let trainingNoteOptions: [TempoReferenceNote] = [
+        .half, .quarter, .eighth, .sixteenth
+    ]
+
+    /// SMuFL `metAugmentationDot` in Bravura Text. The selector renders this
+    /// separately from the note so it can stay legible at compact UI sizes.
+    static let augmentationDotSymbol = "\u{ECB7}"
+
+    /// Written duration measured in quarter notes. An augmentation dot adds
+    /// half of the undotted value, so every dotted option is exactly 1.5x its
+    /// corresponding base note.
+    var durationInQuarterNotes: Double {
         switch self {
-        case .half: 0.5
+        case .half: 2
+        case .dottedHalf: 3
         case .quarter: 1
-        case .eighth: 2
-        case .sixteenth: 4
+        case .dottedQuarter: 1.5
+        case .eighth: 0.5
+        case .dottedEighth: 0.75
+        case .sixteenth: 0.25
+        }
+    }
+
+    var density: Double {
+        1 / durationInQuarterNotes
+    }
+
+    var isDotted: Bool {
+        switch self {
+        case .dottedHalf, .dottedQuarter, .dottedEighth: true
+        default: false
+        }
+    }
+
+    var undottedNote: TempoReferenceNote {
+        switch self {
+        case .dottedHalf: .half
+        case .dottedQuarter: .quarter
+        case .dottedEighth: .eighth
+        default: self
         }
     }
 
     var title: String {
         switch self {
         case .half: "二分音符"
+        case .dottedHalf: "附点二分音符"
         case .quarter: "四分音符"
+        case .dottedQuarter: "附点四分音符"
         case .eighth: "八分音符"
+        case .dottedEighth: "附点八分音符"
         case .sixteenth: "十六分音符"
         }
     }
@@ -91,18 +141,25 @@ enum TempoReferenceNote: String, CaseIterable, Identifiable, Sendable {
     var shortTitle: String {
         switch self {
         case .half: "2 分"
+        case .dottedHalf: "附点 2 分"
         case .quarter: "4 分"
+        case .dottedQuarter: "附点 4 分"
         case .eighth: "8 分"
+        case .dottedEighth: "附点 8 分"
         case .sixteenth: "16 分"
         }
     }
 
+    /// Bravura Text SMuFL glyph used by the selectors and BPM mark.
     var symbol: String {
         switch self {
-        case .half: "𝅗𝅥"
-        case .quarter: "♩"
-        case .eighth: "♪"
-        case .sixteenth: "♬"
+        case .half: "\u{ECA3}"
+        case .dottedHalf: "\u{ECA3}\(Self.augmentationDotSymbol)"
+        case .quarter: "\u{ECA5}"
+        case .dottedQuarter: "\u{ECA5}\(Self.augmentationDotSymbol)"
+        case .eighth: "\u{ECA7}"
+        case .dottedEighth: "\u{ECA7}\(Self.augmentationDotSymbol)"
+        case .sixteenth: "\u{ECA9}"
         }
     }
 
@@ -130,8 +187,8 @@ struct MetronomePlaybackPlan: Hashable, Sendable {
 
     init(
         preset: MetronomePreset,
-        semantics: TempoSemantics = .legacyQuarterReference,
-        referenceNote: TempoReferenceNote = .quarter
+        semantics: TempoSemantics = .independentReference,
+        referenceNote: TempoReferenceNote? = nil
     ) {
         let normalized = preset.normalized
         let trainingNote = TempoReferenceNote.trainingNote(for: normalized.subdivision)
@@ -142,7 +199,7 @@ struct MetronomePlaybackPlan: Hashable, Sendable {
         case .trainingNoteReference:
             effectiveReference = trainingNote
         case .independentReference:
-            effectiveReference = referenceNote
+            effectiveReference = referenceNote ?? normalized.referenceNote
         }
 
         let pulsesPerBeat = max(1, normalized.subdivision)
@@ -189,6 +246,19 @@ struct MetronomePreset: Codable, Hashable, Sendable {
     var subdivision: Int
     var direction: RotationDirection
     var grouping: String
+    /// Optional raw storage keeps legacy five-field preset payloads valid.
+    /// A missing or unrecognized value safely retains the historical quarter-
+    /// note reference without discarding a future value during decoding.
+    var referenceNoteRaw: String? = nil
+
+    var referenceNote: TempoReferenceNote {
+        get {
+            referenceNoteRaw.flatMap(TempoReferenceNote.init(rawValue:)) ?? .quarter
+        }
+        set {
+            referenceNoteRaw = newValue.rawValue
+        }
+    }
 
     static let standard = MetronomePreset(
         bpm: 112,
@@ -276,20 +346,20 @@ struct MetronomePreset: Codable, Hashable, Sendable {
     }
 
     var eventInterval: TimeInterval {
-        60 / Double(bpm) / eventDensity
+        playbackPlan().eventInterval
     }
 
     var eventsPerMeasure: Int {
-        beats * pulsesPerBeat
+        playbackPlan().eventsPerMeasure
     }
 
     var mainBeatDuration: TimeInterval {
-        eventInterval * Double(pulsesPerBeat)
+        playbackPlan().mainBeatDuration
     }
 
     func playbackPlan(
-        semantics: TempoSemantics = .legacyQuarterReference,
-        referenceNote: TempoReferenceNote = .quarter
+        semantics: TempoSemantics = .independentReference,
+        referenceNote: TempoReferenceNote? = nil
     ) -> MetronomePlaybackPlan {
         MetronomePlaybackPlan(
             preset: self,

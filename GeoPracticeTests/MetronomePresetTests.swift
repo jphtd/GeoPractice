@@ -98,6 +98,55 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(sixteenth.mainBeatDuration, 0.5, accuracy: 0.000_1)
     }
 
+    func testTempoReferenceAndTrainingOptionsStayDistinct() {
+        XCTAssertEqual(
+            TempoReferenceNote.tempoReferenceOptions,
+            [.half, .dottedHalf, .quarter, .dottedQuarter, .eighth, .dottedEighth]
+        )
+        XCTAssertEqual(
+            TempoReferenceNote.trainingNoteOptions,
+            [.half, .quarter, .eighth, .sixteenth]
+        )
+        XCTAssertTrue(TempoReferenceNote.tempoReferenceOptions.allSatisfy { $0 != .sixteenth })
+        XCTAssertTrue(TempoReferenceNote.trainingNoteOptions.allSatisfy { !$0.isDotted })
+        XCTAssertEqual(
+            TempoReferenceNote.trainingNoteOptions.map(\.symbol),
+            ["\u{ECA3}", "\u{ECA5}", "\u{ECA7}", "\u{ECA9}"]
+        )
+        XCTAssertEqual(
+            TempoReferenceNote.tempoReferenceOptions.map(\.symbol),
+            [
+                "\u{ECA3}", "\u{ECA3}\u{ECB7}",
+                "\u{ECA5}", "\u{ECA5}\u{ECB7}",
+                "\u{ECA7}", "\u{ECA7}\u{ECB7}"
+            ]
+        )
+    }
+
+    func testDottedReferenceNotesAreOneAndAHalfTimesTheirBaseValue() {
+        let pairs: [(plain: TempoReferenceNote, dotted: TempoReferenceNote)] = [
+            (.half, .dottedHalf),
+            (.quarter, .dottedQuarter),
+            (.eighth, .dottedEighth)
+        ]
+
+        for pair in pairs {
+            XCTAssertTrue(pair.dotted.isDotted)
+            XCTAssertFalse(pair.plain.isDotted)
+            XCTAssertEqual(pair.dotted.undottedNote, pair.plain)
+            XCTAssertEqual(
+                pair.dotted.durationInQuarterNotes,
+                pair.plain.durationInQuarterNotes * 1.5,
+                accuracy: 0.000_001
+            )
+            XCTAssertEqual(
+                pair.dotted.density,
+                pair.plain.density / 1.5,
+                accuracy: 0.000_001
+            )
+        }
+    }
+
     func testFirstPulseEstablishesFixedGeometryAndKeepsItAcrossCycles() {
         var lifecycle = BeatVisualLifecycle(beats: 4)
 
@@ -235,6 +284,143 @@ final class MetronomePresetTests: XCTestCase {
         )
     }
 
+    func testTempoContinuationKeepsNextSubdivisionAndMeasurePosition() {
+        var oldPreset = MetronomePreset.standard
+        oldPreset.bpm = 60
+        oldPreset.beats = 4
+        oldPreset.subdivision = 2
+        var nextPreset = oldPreset
+        nextPreset.bpm = 70
+
+        let continuation = BeatPlaybackContinuation.next(
+            currentBeat: 2,
+            currentSubdivision: 0,
+            currentCycle: 4,
+            previousPlan: oldPreset.playbackPlan(),
+            nextPlan: nextPreset.playbackPlan(),
+            elapsedSinceLastPulse: 0.1
+        )
+
+        XCTAssertEqual(continuation.initialEventIndex, 5)
+        XCTAssertEqual(continuation.initialCycle, 4)
+        XCTAssertEqual(
+            continuation.firstEventPresentationDelay ?? -1,
+            nextPreset.eventInterval - 0.1,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testTempoContinuationWrapsOnlyAfterLastSubdivision() {
+        var preset = MetronomePreset.standard
+        preset.beats = 4
+        preset.subdivision = 2
+        let plan = preset.playbackPlan()
+
+        let continuation = BeatPlaybackContinuation.next(
+            currentBeat: 3,
+            currentSubdivision: 1,
+            currentCycle: 9,
+            previousPlan: plan,
+            nextPlan: plan,
+            elapsedSinceLastPulse: 0.02
+        )
+
+        XCTAssertEqual(continuation.initialEventIndex, 0)
+        XCTAssertEqual(continuation.initialCycle, 10)
+    }
+
+    func testTempoContinuationBeforeFirstPulseStillStartsAtDownbeat() {
+        var preset = MetronomePreset.standard
+        preset.beats = 5
+        preset.subdivision = 4
+        let plan = preset.playbackPlan()
+
+        let continuation = BeatPlaybackContinuation.next(
+            currentBeat: 0,
+            currentSubdivision: 0,
+            currentCycle: 0,
+            previousPlan: plan,
+            nextPlan: plan,
+            elapsedSinceLastPulse: nil
+        )
+
+        XCTAssertEqual(continuation.initialEventIndex, 0)
+        XCTAssertEqual(continuation.initialCycle, 0)
+        XCTAssertNil(continuation.firstEventPresentationDelay)
+    }
+
+    func testTempoContinuationClampsNegativeElapsedTime() {
+        var preset = MetronomePreset.standard
+        preset.bpm = 120
+        preset.subdivision = 1
+        let plan = preset.playbackPlan()
+
+        let continuation = BeatPlaybackContinuation.next(
+            currentBeat: 1,
+            currentSubdivision: 0,
+            currentCycle: 2,
+            previousPlan: plan,
+            nextPlan: plan,
+            elapsedSinceLastPulse: -10
+        )
+
+        XCTAssertEqual(
+            continuation.firstEventPresentationDelay ?? -1,
+            plan.eventInterval,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testTempoContinuationStartsImmediatelyWhenNewIntervalHasElapsed() {
+        var oldPreset = MetronomePreset.standard
+        oldPreset.bpm = 60
+        oldPreset.subdivision = 2
+        var nextPreset = oldPreset
+        nextPreset.bpm = 120
+
+        let continuation = BeatPlaybackContinuation.next(
+            currentBeat: 1,
+            currentSubdivision: 0,
+            currentCycle: 2,
+            previousPlan: oldPreset.playbackPlan(),
+            nextPlan: nextPreset.playbackPlan(),
+            elapsedSinceLastPulse: 0.4
+        )
+
+        XCTAssertEqual(continuation.initialEventIndex, 3)
+        XCTAssertEqual(continuation.initialCycle, 2)
+        XCTAssertEqual(continuation.firstEventPresentationDelay, 0)
+    }
+
+    func testRepeatedTempoContinuationDoesNotAdvanceCursorTwice() {
+        var preset = MetronomePreset.standard
+        preset.beats = 4
+        preset.subdivision = 2
+        preset.bpm = 60
+        let originalPlan = preset.playbackPlan()
+
+        let continuations = [70, 80, 65].map { bpm -> BeatPlaybackContinuation in
+            var next = preset
+            next.bpm = bpm
+            return BeatPlaybackContinuation.next(
+                currentBeat: 1,
+                currentSubdivision: 1,
+                currentCycle: 3,
+                previousPlan: originalPlan,
+                nextPlan: next.playbackPlan(),
+                elapsedSinceLastPulse: 0.12
+            )
+        }
+
+        XCTAssertEqual(Set(continuations.map(\.initialEventIndex)), [4])
+        XCTAssertEqual(Set(continuations.map(\.initialCycle)), [3])
+        XCTAssertEqual(
+            continuations.last?.firstEventPresentationDelay ?? -1,
+            (60.0 / 65.0 / 2.0) - 0.12,
+            accuracy: 0.000_001
+        )
+    }
+
     func testCustomerTempoPlansKeepEightNoteTopologyButChangeTiming() {
         var preset = MetronomePreset.standard
         preset.bpm = 88
@@ -259,13 +445,13 @@ final class MetronomePresetTests: XCTestCase {
         }
 
         XCTAssertEqual(legacy.referenceNote, .quarter)
-        XCTAssertEqual(legacy.bpmMark, "♩ = 88")
+        XCTAssertEqual(legacy.bpmMark, "\u{ECA5} = 88")
         XCTAssertEqual(legacy.actualPulsesPerMinute, 176, accuracy: 0.000_001)
         XCTAssertEqual(legacy.eventInterval, 60.0 / 176.0, accuracy: 0.000_001)
         XCTAssertEqual(legacy.measureDuration, 240.0 / 88.0, accuracy: 0.000_001)
 
         XCTAssertEqual(training.referenceNote, .eighth)
-        XCTAssertEqual(training.bpmMark, "♪ = 88")
+        XCTAssertEqual(training.bpmMark, "\u{ECA7} = 88")
         XCTAssertEqual(training.actualPulsesPerMinute, 88, accuracy: 0.000_001)
         XCTAssertEqual(training.eventInterval, 60.0 / 88.0, accuracy: 0.000_001)
         XCTAssertEqual(training.measureDuration, 480.0 / 88.0, accuracy: 0.000_001)
@@ -285,12 +471,14 @@ final class MetronomePresetTests: XCTestCase {
 
         let expectedRates: [TempoReferenceNote: Double] = [
             .half: 352,
+            .dottedHalf: 528,
             .quarter: 176,
+            .dottedQuarter: 264,
             .eighth: 88,
-            .sixteenth: 44
+            .dottedEighth: 132
         ]
 
-        for note in TempoReferenceNote.allCases {
+        for note in TempoReferenceNote.tempoReferenceOptions {
             let plan = preset.playbackPlan(
                 semantics: .independentReference,
                 referenceNote: note
@@ -303,6 +491,46 @@ final class MetronomePresetTests: XCTestCase {
             XCTAssertEqual(plan.eventsPerMeasure, 8)
             XCTAssertEqual(plan.eventInterval, 60 / expectedRates[note]!, accuracy: 0.000_001)
         }
+    }
+
+    func testDottedReferenceChangesOnlyTimingNotTrainingTopology() {
+        var preset = MetronomePreset.standard
+        preset.bpm = 60
+        preset.beats = 4
+        preset.subdivision = 2
+
+        let plain = preset.playbackPlan(
+            semantics: .independentReference,
+            referenceNote: .quarter
+        )
+        let dotted = preset.playbackPlan(
+            semantics: .independentReference,
+            referenceNote: .dottedQuarter
+        )
+
+        XCTAssertEqual(plain.bpmMark, "\u{ECA5} = 60")
+        XCTAssertEqual(dotted.bpmMark, "\u{ECA5}\u{ECB7} = 60")
+        XCTAssertEqual(dotted.trainingNote, .eighth)
+        XCTAssertEqual(dotted.pulsesPerBeat, plain.pulsesPerBeat)
+        XCTAssertEqual(dotted.eventsPerMeasure, plain.eventsPerMeasure)
+        XCTAssertEqual(dotted.eventInterval, 1.0 / 3.0, accuracy: 0.000_001)
+        XCTAssertEqual(dotted.eventInterval, plain.eventInterval / 1.5, accuracy: 0.000_001)
+        XCTAssertFalse(dotted.hasSameSchedule(as: plain))
+    }
+
+    func testDefaultPlaybackPlanUsesReferenceSavedInPreset() {
+        var preset = MetronomePreset.standard
+        preset.bpm = 60
+        preset.subdivision = 2
+        preset.referenceNote = .dottedQuarter
+
+        let plan = preset.playbackPlan()
+
+        XCTAssertEqual(plan.semantics, .independentReference)
+        XCTAssertEqual(plan.referenceNote, .dottedQuarter)
+        XCTAssertEqual(plan.eventInterval, 1.0 / 3.0, accuracy: 0.000_001)
+        XCTAssertEqual(preset.eventInterval, plan.eventInterval, accuracy: 0.000_001)
+        XCTAssertEqual(preset.mainBeatDuration, plan.mainBeatDuration, accuracy: 0.000_001)
     }
 
     func testTempoSemanticsDoNotChangeVisualPulseAddresses() throws {
@@ -355,6 +583,73 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(decoded.subdivision, 2)
         XCTAssertEqual(decoded.direction, .counterclockwise)
         XCTAssertEqual(decoded.grouping, "标准")
+        XCTAssertNil(decoded.referenceNoteRaw)
+        XCTAssertEqual(decoded.referenceNote, .quarter)
+
+        let reencoded = try JSONEncoder().encode(decoded)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: reencoded) as? [String: Any]
+        )
+        XCTAssertEqual(
+            Set(object.keys),
+            ["bpm", "beats", "subdivision", "direction", "grouping"]
+        )
+    }
+
+    func testSelectedReferenceNoteRoundTripsInsidePreset() throws {
+        var source = MetronomePreset.standard
+        source.referenceNote = .dottedHalf
+
+        let data = try JSONEncoder().encode(source)
+        let object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        XCTAssertEqual(object["referenceNoteRaw"] as? String, "dottedHalf")
+
+        let restored = try JSONDecoder().decode(MetronomePreset.self, from: data)
+        XCTAssertEqual(restored.referenceNoteRaw, "dottedHalf")
+        XCTAssertEqual(restored.referenceNote, .dottedHalf)
+        XCTAssertEqual(restored, source)
+    }
+
+    func testUnknownStoredReferenceFallsBackWithoutDestroyingRawValue() throws {
+        let json = """
+        {
+          "bpm": 88,
+          "beats": 4,
+          "subdivision": 2,
+          "direction": "counterclockwise",
+          "grouping": "标准",
+          "referenceNoteRaw": "futureReferenceValue"
+        }
+        """
+        let decoded = try JSONDecoder().decode(
+            MetronomePreset.self,
+            from: try XCTUnwrap(json.data(using: .utf8))
+        )
+
+        XCTAssertEqual(decoded.referenceNote, .quarter)
+        XCTAssertEqual(decoded.referenceNoteRaw, "futureReferenceValue")
+    }
+
+    func testTempoReferenceRawValuesRemainBackwardCompatibleAndCodable() throws {
+        XCTAssertEqual(TempoReferenceNote.half.rawValue, "half")
+        XCTAssertEqual(TempoReferenceNote.quarter.rawValue, "quarter")
+        XCTAssertEqual(TempoReferenceNote.eighth.rawValue, "eighth")
+        XCTAssertEqual(TempoReferenceNote.sixteenth.rawValue, "sixteenth")
+
+        let restoredLegacy = try JSONDecoder().decode(
+            TempoReferenceNote.self,
+            from: Data("\"sixteenth\"".utf8)
+        )
+        XCTAssertEqual(restoredLegacy, .sixteenth)
+
+        let dottedData = try JSONEncoder().encode(TempoReferenceNote.dottedQuarter)
+        XCTAssertEqual(String(decoding: dottedData, as: UTF8.self), "\"dottedQuarter\"")
+        XCTAssertEqual(
+            try JSONDecoder().decode(TempoReferenceNote.self, from: dottedData),
+            .dottedQuarter
+        )
     }
 
     func testLiquidSelectorRelativeMathClampsAndUsesGestureOrigin() {
@@ -404,16 +699,357 @@ final class MetronomePresetTests: XCTestCase {
         )
     }
 
+    func testLiquidSelectorContinuousIndexHandlesAllOptionCountsAndEdges() {
+        XCTAssertNil(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 0,
+                translation: 0,
+                pointsPerStep: 44,
+                optionCount: 0
+            )
+        )
+
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 0,
+                translation: 1_000,
+                pointsPerStep: 44,
+                optionCount: 1
+            ),
+            0
+        )
+
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 0,
+                translation: 22,
+                pointsPerStep: 44,
+                optionCount: 2
+            ),
+            0.5
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 1,
+                translation: 1_000,
+                pointsPerStep: 44,
+                optionCount: 2
+            ),
+            1
+        )
+
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 1,
+                translation: -44,
+                pointsPerStep: 44,
+                optionCount: 3
+            ),
+            0
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 1,
+                translation: 44,
+                pointsPerStep: 44,
+                optionCount: 3
+            ),
+            2
+        )
+
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 0,
+                translation: 0,
+                pointsPerStep: 44,
+                optionCount: 7
+            ),
+            0
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 3,
+                translation: 22,
+                pointsPerStep: 44,
+                optionCount: 7
+            ),
+            3.5
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 6,
+                translation: 0,
+                pointsPerStep: 44,
+                optionCount: 7
+            ),
+            6
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 3,
+                translation: -10_000,
+                pointsPerStep: 44,
+                optionCount: 7
+            ),
+            0
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 3,
+                translation: 10_000,
+                pointsPerStep: 44,
+                optionCount: 7
+            ),
+            6
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: -10,
+                translation: 0,
+                pointsPerStep: 44,
+                optionCount: 7
+            ),
+            0
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 10,
+                translation: 0,
+                pointsPerStep: 44,
+                optionCount: 7
+            ),
+            6
+        )
+
+        XCTAssertNil(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 3,
+                translation: 44,
+                pointsPerStep: 0,
+                optionCount: 7
+            )
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.continuousIndex(
+                startIndex: 3,
+                translation: 0.25,
+                pointsPerStep: 0.5,
+                optionCount: 7
+            ),
+            3.5
+        )
+    }
+
+    func testLiquidSelectorEdgePinnedStripOffsetHandlesCountsAndWidths() {
+        for optionCount in [0, 1, 2, 3] {
+            XCTAssertEqual(
+                LiquidSelectorMath.edgePinnedStripOffset(
+                    continuousIndex: -1_000,
+                    optionCount: optionCount,
+                    slotWidth: 40
+                ),
+                0,
+                "A \(optionCount)-option strip must stay fixed at its first edge"
+            )
+            XCTAssertEqual(
+                LiquidSelectorMath.edgePinnedStripOffset(
+                    continuousIndex: 1_000,
+                    optionCount: optionCount,
+                    slotWidth: 40
+                ),
+                0,
+                "A \(optionCount)-option strip must stay fixed at its last edge"
+            )
+        }
+
+        XCTAssertEqual(
+            LiquidSelectorMath.edgePinnedStripOffset(
+                continuousIndex: 3,
+                optionCount: 7,
+                slotWidth: 0
+            ),
+            0
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.edgePinnedStripOffset(
+                continuousIndex: 3,
+                optionCount: 7,
+                slotWidth: -1
+            ),
+            0
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.edgePinnedStripOffset(
+                continuousIndex: 3,
+                optionCount: 7,
+                slotWidth: 0.5
+            ),
+            -1
+        )
+    }
+
+    func testLiquidSelectorEdgePinnedStripShowsBoundaryTripletsInCorrectSlots() {
+        let values = Array(3...9)
+        let slotWidth: CGFloat = 40
+        let viewportWidth = slotWidth * 3
+
+        func center(of index: Int, offset: CGFloat) -> CGFloat {
+            (CGFloat(index) + 0.5) * slotWidth + offset
+        }
+
+        func visibleValues(at offset: CGFloat) -> [Int] {
+            values.enumerated().compactMap { index, value in
+                let itemCenter = center(of: index, offset: offset)
+                return (0..<viewportWidth).contains(itemCenter) ? value : nil
+            }
+        }
+
+        let expectedOffsets: [(index: CGFloat, offset: CGFloat)] = [
+            (0, 0),
+            (1, 0),
+            (2, -40),
+            (3, -80),
+            (4, -120),
+            (5, -160),
+            (6, -160)
+        ]
+        for item in expectedOffsets {
+            XCTAssertEqual(
+                LiquidSelectorMath.edgePinnedStripOffset(
+                    continuousIndex: item.index,
+                    optionCount: values.count,
+                    slotWidth: slotWidth
+                ),
+                item.offset
+            )
+        }
+
+        let firstOffset = LiquidSelectorMath.edgePinnedStripOffset(
+            continuousIndex: 0,
+            optionCount: values.count,
+            slotWidth: slotWidth
+        )
+        XCTAssertEqual(visibleValues(at: firstOffset), [3, 4, 5])
+        XCTAssertEqual(center(of: 0, offset: firstOffset), slotWidth / 2)
+
+        let lastOffset = LiquidSelectorMath.edgePinnedStripOffset(
+            continuousIndex: 6,
+            optionCount: values.count,
+            slotWidth: slotWidth
+        )
+        XCTAssertEqual(visibleValues(at: lastOffset), [7, 8, 9])
+        XCTAssertEqual(center(of: 6, offset: lastOffset), slotWidth * 2.5)
+
+        XCTAssertEqual(
+            LiquidSelectorMath.edgePinnedStripOffset(
+                continuousIndex: -1_000,
+                optionCount: values.count,
+                slotWidth: slotWidth
+            ),
+            firstOffset
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.edgePinnedStripOffset(
+                continuousIndex: 1_000,
+                optionCount: values.count,
+                slotWidth: slotWidth
+            ),
+            lastOffset
+        )
+    }
+
+    func testLiquidSelectorClampedCenterHandlesEdgesAndDegenerateWidths() {
+        XCTAssertEqual(
+            LiquidSelectorMath.clampedCenter(
+                proposedCenter: -1_000,
+                scaledCursorWidth: 20,
+                lowerBound: 4,
+                upperBound: 96
+            ),
+            14
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.clampedCenter(
+                proposedCenter: 50,
+                scaledCursorWidth: 20,
+                lowerBound: 4,
+                upperBound: 96
+            ),
+            50
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.clampedCenter(
+                proposedCenter: 1_000,
+                scaledCursorWidth: 20,
+                lowerBound: 4,
+                upperBound: 96
+            ),
+            86
+        )
+
+        XCTAssertEqual(
+            LiquidSelectorMath.clampedCenter(
+                proposedCenter: -1_000,
+                scaledCursorWidth: 0,
+                lowerBound: 4,
+                upperBound: 96
+            ),
+            4
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.clampedCenter(
+                proposedCenter: 1_000,
+                scaledCursorWidth: 0,
+                lowerBound: 4,
+                upperBound: 96
+            ),
+            96
+        )
+
+        XCTAssertEqual(
+            LiquidSelectorMath.clampedCenter(
+                proposedCenter: -1_000,
+                scaledCursorWidth: 20,
+                lowerBound: 0,
+                upperBound: 8
+            ),
+            4
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.clampedCenter(
+                proposedCenter: 1_000,
+                scaledCursorWidth: 20,
+                lowerBound: 0,
+                upperBound: 0
+            ),
+            0
+        )
+        XCTAssertEqual(
+            LiquidSelectorMath.clampedCenter(
+                proposedCenter: -1_000,
+                scaledCursorWidth: -20,
+                lowerBound: 4,
+                upperBound: 96
+            ),
+            4
+        )
+    }
+
     func testBeatVisualLifecyclePauseDoesNotCollapseAndFinishIsExplicit() {
         var lifecycle = BeatVisualLifecycle(beats: 3)
         for beat in 0..<3 {
             lifecycle.record(beat: beat, subdivision: 0, cycle: 0, beats: 3)
         }
 
+        XCTAssertEqual(lifecycle.currentBeatIndex, 2)
+        lifecycle.record(beat: 2, subdivision: 1, cycle: 0, beats: 3)
+        XCTAssertEqual(lifecycle.currentBeatIndex, 2)
+
         lifecycle.pause()
         XCTAssertTrue(lifecycle.isPaused)
         XCTAssertEqual(lifecycle.phase, .orbiting)
         XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2])
+        XCTAssertEqual(lifecycle.currentBeatIndex, 2)
 
         lifecycle.resume()
         XCTAssertFalse(lifecycle.isPaused)
@@ -423,13 +1059,16 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(lifecycle.phase, .finishing)
         XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2])
         XCTAssertTrue(lifecycle.hasEstablishedStructure)
+        XCTAssertNil(lifecycle.currentBeatIndex)
 
         lifecycle.record(beat: 1, subdivision: 0, cycle: 22, beats: 3)
         XCTAssertEqual(lifecycle.phase, .finishing)
+        XCTAssertNil(lifecycle.currentBeatIndex)
 
         lifecycle.settle()
         XCTAssertEqual(lifecycle.phase, .settled)
         XCTAssertEqual(lifecycle.visibleBeatIndices, [])
+        XCTAssertNil(lifecycle.currentBeatIndex)
         XCTAssertTrue(lifecycle.isPaused)
     }
 
@@ -445,11 +1084,24 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(lifecycle.phase, .orbiting)
         XCTAssertEqual(lifecycle.beatCount, 7)
         XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3, 4, 5, 6])
+        XCTAssertNil(lifecycle.currentBeatIndex)
 
         lifecycle.record(beat: -1, subdivision: 0, cycle: 0, beats: 7)
         lifecycle.record(beat: 9, subdivision: 0, cycle: 0, beats: 7)
         XCTAssertEqual(lifecycle.phase, .orbiting)
         XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3, 4, 5, 6])
+    }
+
+    func testBeatVisualLifecycleCanClearOnlyStaleCurrentBeatLocation() {
+        var lifecycle = BeatVisualLifecycle(beats: 4)
+        lifecycle.record(beat: 2, subdivision: 0, cycle: 1, beats: 4)
+        XCTAssertEqual(lifecycle.currentBeatIndex, 2)
+
+        lifecycle.clearCurrentBeatLocation()
+
+        XCTAssertNil(lifecycle.currentBeatIndex)
+        XCTAssertEqual(lifecycle.phase, .orbiting)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3])
     }
 
     func testBeatVisualLifecycleWaitingTopologyChangeStaysAtOrigin() {
@@ -467,17 +1119,33 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(PracticeHand.controlOrder.map(\.shortTitle), ["L", "B", "R"])
     }
 
+    @MainActor
+    func testEngineRemembersGroupingWhenReturningToBeatCount() {
+        let engine = MetronomeEngine()
+
+        engine.setBeats(5)
+        XCTAssertEqual(engine.preset.grouping, "2+3")
+        engine.setGrouping("3+2")
+        engine.setBeats(4)
+        engine.setBeats(5)
+
+        XCTAssertEqual(engine.preset.grouping, "3+2")
+    }
+
     func testPracticeEventStoresPresetSnapshotAndCounts() {
         var source = MetronomePreset.standard
         source.bpm = 144
         source.beats = 5
         source.grouping = "3+2"
+        source.referenceNote = .dottedQuarter
 
         let event = PracticeEvent(name: "音阶", leftCount: 2, preset: source)
         source.bpm = 72
+        source.referenceNote = .half
 
         XCTAssertEqual(event.preset.bpm, 144)
         XCTAssertEqual(event.preset.grouping, "3+2")
+        XCTAssertEqual(event.preset.referenceNote, .dottedQuarter)
         XCTAssertEqual(event.leftCount, 2)
 
         event.increment(.right)

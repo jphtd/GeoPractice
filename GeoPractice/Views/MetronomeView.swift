@@ -202,11 +202,11 @@ struct MetronomeView: View {
 
     private func v4Interface(size: CGSize) -> some View {
         let compactHeight = size.height < 720
-        let showsSupplementaryStageStatus = size.height >= 360
+        let usesCompactStageReadout = size.height < 360
 
         return VStack(spacing: compactHeight ? 4 : 10) {
             v4Header
-            v4Stage(showsSupplementaryStatus: showsSupplementaryStageStatus)
+            v4Stage(usesCompactReadout: usesCompactStageReadout)
                 .frame(maxHeight: .infinity)
                 .layoutPriority(1)
         }
@@ -330,7 +330,7 @@ struct MetronomeView: View {
         sourceEvent?.name ?? "自由练习"
     }
 
-    private func v4Stage(showsSupplementaryStatus: Bool) -> some View {
+    private func v4Stage(usesCompactReadout: Bool) -> some View {
         Button {
             toggleMetronome()
         } label: {
@@ -348,24 +348,23 @@ struct MetronomeView: View {
                 .aspectRatio(1, contentMode: .fit)
                 .frame(maxWidth: 680, maxHeight: 680)
 
-                if showsSupplementaryStatus {
-                    VStack {
-                        stageTempoStatus
-                            .padding(.top, 4)
-                        Spacer()
-                        HStack(spacing: 6) {
-                            Circle()
-                                .fill(visualFinish != nil || engine.isPlaying ? Color.white : GeoTheme.muted)
-                                .frame(width: 5, height: 5)
-                            Text(
-                                visualFinish != nil
-                                    ? "正在结束练习"
-                                    : (engine.isPlaying ? "轻点暂停" : "轻点开始")
-                            )
-                                .font(.system(size: 10, weight: .semibold))
-                                .foregroundStyle(GeoTheme.muted)
+                VStack {
+                    if usesCompactReadout {
+                        compactStageReadout
+                            .padding(.top, 2)
+                    } else {
+                        VStack(spacing: 3) {
+                            stageTempoStatus
+                            stagePracticeContext
                         }
-                        .padding(.bottom, 12)
+                        .padding(.top, 4)
+                    }
+
+                    Spacer()
+
+                    if !usesCompactReadout {
+                        stageActivityStatus
+                            .padding(.bottom, 12)
                     }
                 }
             }
@@ -379,27 +378,126 @@ struct MetronomeView: View {
                 ? "正在结束练习"
                 : (engine.isPlaying ? "暂停节拍器" : "开始节拍器")
         )
-        .accessibilityValue("\(engine.preset.beats) 拍，\(engine.preset.tempoDisplay)，\(engine.preset.subdivisionTitle)")
+        .accessibilityValue(stageGlanceStatus.accessibilitySummary)
     }
 
-    /// The geometry remains the primary visual object; this unboxed, compact
-    /// readout gives tempo a stable second-level position outside the dense
-    /// control panel.
+    private var stageGlanceStatus: MetronomeGlanceStatus {
+        MetronomeGlanceStatus(
+            preset: engine.preset,
+            hand: practiceSession.session.currentHand,
+            lifecycle: visualLifecycle,
+            isPlaying: engine.isPlaying,
+            isFinishing: visualFinish != nil,
+            isFinished: practiceSession.session.phase == .finished,
+            effectiveReferenceNote: engine.playbackPlan.referenceNote
+        )
+    }
+
+    /// The geometry remains the primary visual object. The complete tempo mark
+    /// is deliberately unboxed so it reads as status, not another control.
     private var stageTempoStatus: some View {
-        VStack(spacing: 0) {
-            Text("BPM")
-                .font(.system(size: 8, weight: .bold, design: .rounded))
-                .tracking(1.3)
-                .foregroundStyle(Color.white.opacity(0.42))
-            Text("\(engine.preset.bpm)")
-                .font(.system(size: 19, weight: .bold, design: .rounded))
+        HStack(alignment: .firstTextBaseline, spacing: 4) {
+            SMuFLNoteGlyph(note: stageGlanceStatus.referenceNote, size: 18)
+            Text("=")
+                .font(.system(.caption, design: .rounded, weight: .bold))
+                .foregroundStyle(Color.white.opacity(0.54))
+            Text("\(stageGlanceStatus.bpm)")
+                .font(.system(.title2, design: .rounded, weight: .bold))
                 .monospacedDigit()
                 .contentTransition(.numericText())
-                .foregroundStyle(Color.white.opacity(0.86))
+                .foregroundStyle(Color.white.opacity(0.94))
+            Text("BPM")
+                .font(.system(.caption2, design: .rounded, weight: .bold))
+                .tracking(0.8)
+                .foregroundStyle(Color.white.opacity(0.48))
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("当前速度")
-        .accessibilityValue("\(engine.preset.bpm) BPM")
+        .accessibilityHidden(true)
+    }
+
+    private var stagePracticeContext: some View {
+        HStack(spacing: 6) {
+            Text(stageGlanceStatus.beatStructureText)
+            Text("·")
+                .foregroundStyle(Color.white.opacity(0.28))
+            SMuFLNoteGlyph(note: stageGlanceStatus.trainingNote, size: 14)
+            Text("·")
+                .foregroundStyle(Color.white.opacity(0.28))
+            Text(stageGlanceStatus.hand.title)
+        }
+        .font(.system(.caption2, design: .rounded, weight: .semibold))
+        .foregroundStyle(Color.white.opacity(0.56))
+        .accessibilityHidden(true)
+    }
+
+    private var stageActivityStatus: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(stageGlanceStatus.state == .playing ? Color.white : GeoTheme.muted)
+                .frame(width: 5, height: 5)
+            Text(stageActivityText(includesActionHint: true))
+                .font(.system(.caption2, design: .rounded, weight: .semibold))
+                .foregroundStyle(Color.white.opacity(stageGlanceStatus.state == .playing ? 0.68 : 0.50))
+        }
+        .accessibilityHidden(true)
+    }
+
+    /// Short-height layouts keep every glanceable fact in one line instead of
+    /// hiding the status entirely. The central geometry still owns the space.
+    private var compactStageReadout: some View {
+        HStack(spacing: 7) {
+            HStack(alignment: .firstTextBaseline, spacing: 3) {
+                SMuFLNoteGlyph(note: stageGlanceStatus.referenceNote, size: 14)
+                Text("=")
+                Text("\(stageGlanceStatus.bpm)")
+                    .fontWeight(.bold)
+                    .monospacedDigit()
+                Text("BPM")
+                    .font(.system(size: 8, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.46))
+            }
+            .layoutPriority(2)
+
+            Text("·")
+                .foregroundStyle(Color.white.opacity(0.24))
+            Text(stageGlanceStatus.beatStructureText)
+                .lineLimit(1)
+            SMuFLNoteGlyph(note: stageGlanceStatus.trainingNote, size: 12)
+            Text(stageGlanceStatus.hand.shortTitle)
+                .fontWeight(.bold)
+
+            Spacer(minLength: 2)
+
+            HStack(spacing: 4) {
+                Circle()
+                    .fill(stageGlanceStatus.state == .playing ? Color.white : GeoTheme.muted)
+                    .frame(width: 4, height: 4)
+                Text(stageActivityText(includesActionHint: false))
+                    .lineLimit(1)
+            }
+        }
+        .font(.system(size: 9, weight: .semibold, design: .rounded))
+        .foregroundStyle(Color.white.opacity(0.62))
+        .padding(.horizontal, 10)
+        .accessibilityHidden(true)
+    }
+
+    private func stageActivityText(includesActionHint: Bool) -> String {
+        let action: String
+        switch stageGlanceStatus.state {
+        case .ready:
+            action = "轻点开始"
+        case .playing:
+            action = "轻点暂停"
+        case .paused:
+            action = "轻点继续"
+        case .finishing:
+            action = "请稍候"
+        case .finished:
+            action = "查看本次结果"
+        }
+        return includesActionHint
+            ? "节拍\(stageGlanceStatus.stateTitle) · \(action)"
+            : stageGlanceStatus.stateTitle
     }
 
     private var liquidBottomControlPanel: some View {
@@ -516,6 +614,7 @@ struct MetronomeView: View {
                 .foregroundStyle(GeoTheme.muted)
                 .lineLimit(1)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityHidden(true)
 
             HStack(spacing: 4) {
                 LiquidScrubSelector(
@@ -554,6 +653,7 @@ struct MetronomeView: View {
                     .font(.system(size: 9, weight: .semibold))
                     .foregroundStyle(GeoTheme.muted)
                     .lineLimit(1)
+                    .accessibilityHidden(true)
 
                 LiquidScrubSelector(
                     options: TempoReferenceNote.tempoReferenceOptions,
@@ -600,6 +700,7 @@ struct MetronomeView: View {
             Text("训练音符")
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(GeoTheme.muted)
+                .accessibilityHidden(true)
 
             LiquidScrubSelector(
                 options: MetronomePreset.supportedSubdivisions,
@@ -630,6 +731,7 @@ struct MetronomeView: View {
             Text("手型 · \(hand.title)")
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(GeoTheme.muted)
+                .accessibilityHidden(true)
 
             LiquidScrubSelector(
                 options: PracticeHand.controlOrder,
@@ -658,22 +760,14 @@ struct MetronomeView: View {
         } label: {
             VStack(spacing: 1) {
                 Text("+1")
-                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                    .foregroundStyle(Color.white.opacity(0.82))
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.68))
                 Text("\(hand.shortTitle) · \(count)")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
                     .foregroundStyle(GeoTheme.muted)
                     .monospacedDigit()
             }
             .frame(maxWidth: .infinity, minHeight: 52)
-            .background {
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(Color.white.opacity(0.018))
-                    .overlay {
-                        RoundedRectangle(cornerRadius: 18, style: .continuous)
-                            .stroke(Color.white.opacity(0.055), lineWidth: 0.8)
-                    }
-            }
             .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
         }
         .buttonStyle(LiquidPressButtonStyle())
@@ -2067,12 +2161,15 @@ private struct MetronomeCanvas: View {
         in context: inout GraphicsContext
     ) {
         for index in lifecycle.visibleBeatIndices where points.indices.contains(index) {
-            let isCurrentMainBeat = lifecycle.currentBeatIndex == index
+            let style = BeatVisualHierarchyModel.anchorStyle(
+                for: index,
+                lifecycle: lifecycle
+            )
             drawAnchor(
                 at: points[index],
-                opacity: isCurrentMainBeat ? 0.42 : 0.20,
+                opacity: style.opacity,
+                radius: style.radius,
                 scale: effectScale,
-                radiusMultiplier: isCurrentMainBeat ? 1.18 : 1,
                 in: &context
             )
         }
@@ -2087,7 +2184,7 @@ private struct MetronomeCanvas: View {
               let position = pulsePosition(for: address, points: points)
         else { return }
 
-        let style = BeatPulseVisualModel.style(
+        let style = BeatVisualHierarchyModel.pulseStyle(
             for: pulse.kind,
             eventInterval: pulse.eventInterval,
             dimFlashingLights: dimFlashingLights
@@ -2122,16 +2219,16 @@ private struct MetronomeCanvas: View {
     private func drawAnchor(
         at point: CGPoint,
         opacity: Double,
+        radius: Double = BeatVisualHierarchyModel.inactiveAnchorStyle.radius,
         scale: CGFloat,
-        radiusMultiplier: CGFloat = 1,
         in context: inout GraphicsContext
     ) {
-        let radius = 3.5 * scale * radiusMultiplier
+        let scaledRadius = CGFloat(radius) * scale
         let rect = CGRect(
-            x: point.x - radius,
-            y: point.y - radius,
-            width: radius * 2,
-            height: radius * 2
+            x: point.x - scaledRadius,
+            y: point.y - scaledRadius,
+            width: scaledRadius * 2,
+            height: scaledRadius * 2
         )
         context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(opacity)))
     }

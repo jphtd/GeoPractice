@@ -1194,6 +1194,268 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertTrue(lifecycle.isPaused)
     }
 
+    func testMetronomeGlanceStatusResolvesAllFiveStates() {
+        let preset = MetronomePreset.standard
+        var lifecycle = BeatVisualLifecycle(beats: preset.beats)
+
+        XCTAssertEqual(
+            MetronomeGlanceStatus(
+                preset: preset,
+                hand: .both,
+                lifecycle: lifecycle,
+                isPlaying: false
+            ).state,
+            .ready
+        )
+
+        lifecycle.record(beat: 0, subdivision: 0, cycle: 0, beats: preset.beats)
+        XCTAssertEqual(
+            MetronomeGlanceStatus(
+                preset: preset,
+                hand: .both,
+                lifecycle: lifecycle,
+                isPlaying: true
+            ).state,
+            .playing
+        )
+
+        lifecycle.pause()
+        XCTAssertEqual(
+            MetronomeGlanceStatus(
+                preset: preset,
+                hand: .both,
+                lifecycle: lifecycle,
+                isPlaying: false
+            ).state,
+            .paused
+        )
+
+        lifecycle.beginFinishing()
+        XCTAssertEqual(
+            MetronomeGlanceStatus(
+                preset: preset,
+                hand: .both,
+                lifecycle: lifecycle,
+                isPlaying: false,
+                isFinishing: true
+            ).state,
+            .finishing
+        )
+
+        lifecycle.settle()
+        XCTAssertEqual(
+            MetronomeGlanceStatus(
+                preset: preset,
+                hand: .both,
+                lifecycle: lifecycle,
+                isPlaying: false,
+                isFinished: true
+            ).state,
+            .finished
+        )
+    }
+
+    func testMetronomeGlanceStatusContainsCompletePracticeContext() {
+        var preset = MetronomePreset.standard
+        preset.bpm = 88
+        preset.beats = 5
+        preset.grouping = "3+2"
+        preset.subdivision = 2
+        preset.referenceNote = .dottedQuarter
+        var lifecycle = BeatVisualLifecycle(beats: preset.beats)
+        lifecycle.record(beat: 2, subdivision: 0, cycle: 4, beats: preset.beats)
+
+        let status = MetronomeGlanceStatus(
+            preset: preset,
+            hand: .left,
+            lifecycle: lifecycle,
+            isPlaying: true
+        )
+
+        XCTAssertEqual(status.bpm, 88)
+        XCTAssertEqual(status.bpmText, "88 BPM")
+        XCTAssertEqual(status.referenceNote, .dottedQuarter)
+        XCTAssertEqual(status.referenceTempoText, "\u{ECA5}\u{ECB7} = 88")
+        XCTAssertEqual(status.trainingNote, .eighth)
+        XCTAssertEqual(status.trainingNoteText, "\u{ECA7}")
+        XCTAssertEqual(status.beats, 5)
+        XCTAssertEqual(status.grouping, "3+2")
+        XCTAssertEqual(status.beatStructureText, "5 拍 · 3+2")
+        XCTAssertEqual(status.hand, .left)
+        XCTAssertEqual(status.currentMainBeat, 3)
+        XCTAssertEqual(status.currentBeatText, "第 3 / 5 拍")
+        XCTAssertTrue(status.accessibilitySummary.contains("演奏中"))
+        XCTAssertTrue(status.accessibilitySummary.contains("当前第 3 拍"))
+        XCTAssertTrue(status.accessibilitySummary.contains("速度每分钟 88 拍"))
+        XCTAssertTrue(status.accessibilitySummary.contains("基准音符附点四分音符"))
+        XCTAssertTrue(status.accessibilitySummary.contains("训练音符八分音符"))
+        XCTAssertTrue(status.accessibilitySummary.contains("左手"))
+    }
+
+    func testMetronomeGlanceStatusUsesTheEffectivePlaybackReference() {
+        var preset = MetronomePreset.standard
+        preset.referenceNote = .dottedHalf
+
+        let status = MetronomeGlanceStatus(
+            preset: preset,
+            hand: .both,
+            lifecycle: BeatVisualLifecycle(beats: preset.beats),
+            isPlaying: false,
+            effectiveReferenceNote: .eighth
+        )
+
+        XCTAssertEqual(status.referenceNote, .eighth)
+        XCTAssertEqual(status.referenceTempoText, "\u{ECA7} = 112")
+        XCTAssertTrue(status.accessibilitySummary.contains("基准音符八分音符"))
+    }
+
+    func testSubdivisionKeepsItsContainingMainBeatCurrent() {
+        let preset = MetronomePreset.standard
+        var lifecycle = BeatVisualLifecycle(beats: preset.beats)
+        lifecycle.record(beat: 2, subdivision: 0, cycle: 0, beats: preset.beats)
+        let before = MetronomeGlanceStatus(
+            preset: preset,
+            hand: .both,
+            lifecycle: lifecycle,
+            isPlaying: true
+        )
+
+        lifecycle.record(beat: 2, subdivision: 1, cycle: 0, beats: preset.beats)
+        let after = MetronomeGlanceStatus(
+            preset: preset,
+            hand: .both,
+            lifecycle: lifecycle,
+            isPlaying: true
+        )
+
+        XCTAssertEqual(before.currentMainBeat, 3)
+        XCTAssertEqual(after.currentMainBeat, before.currentMainBeat)
+    }
+
+    func testSubdivisionPulseLocatesItsMainBeatAfterTopologyChange() {
+        var lifecycle = BeatVisualLifecycle(beats: 4)
+        lifecycle.record(beat: 2, subdivision: 0, cycle: 0, beats: 4)
+        lifecycle.reconfigure(beats: 7)
+        XCTAssertNil(lifecycle.currentBeatIndex)
+
+        lifecycle.record(beat: 4, subdivision: 1, cycle: 0, beats: 7)
+
+        XCTAssertEqual(lifecycle.currentBeatIndex, 4)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3, 4, 5, 6])
+    }
+
+    func testCurrentAnchorRemainsDominantWhilePlayingAndPaused() {
+        var lifecycle = BeatVisualLifecycle(beats: 4)
+        lifecycle.record(beat: 1, subdivision: 0, cycle: 0, beats: 4)
+
+        let playingCurrent = BeatVisualHierarchyModel.anchorStyle(
+            for: 1,
+            lifecycle: lifecycle
+        )
+        let playingInactive = BeatVisualHierarchyModel.anchorStyle(
+            for: 0,
+            lifecycle: lifecycle
+        )
+        XCTAssertGreaterThan(playingCurrent.radius, playingInactive.radius)
+        XCTAssertGreaterThan(playingCurrent.opacity, playingInactive.opacity)
+        XCTAssertGreaterThan(playingCurrent.prominence, playingInactive.prominence * 2)
+
+        lifecycle.pause()
+        let pausedCurrent = BeatVisualHierarchyModel.anchorStyle(
+            for: 1,
+            lifecycle: lifecycle
+        )
+        let pausedInactive = BeatVisualHierarchyModel.anchorStyle(
+            for: 2,
+            lifecycle: lifecycle
+        )
+        XCTAssertGreaterThan(pausedCurrent.radius, pausedInactive.radius)
+        XCTAssertGreaterThan(pausedCurrent.opacity, pausedInactive.opacity)
+        XCTAssertGreaterThan(pausedCurrent.prominence, pausedInactive.prominence * 2)
+    }
+
+    func testDimFlashingLightsKeepsPulseHierarchy() {
+        let eventInterval = 60.0 / 112.0 / 4.0
+        let styles = [
+            BeatPulseKind.strong,
+            .secondary,
+            .weak,
+            .subdivision
+        ].map {
+            BeatVisualHierarchyModel.pulseStyle(
+                for: $0,
+                eventInterval: eventInterval,
+                dimFlashingLights: true
+            )
+        }
+
+        XCTAssertGreaterThan(styles[0].peakRadius, styles[1].peakRadius)
+        XCTAssertGreaterThan(styles[1].peakRadius, styles[2].peakRadius)
+        XCTAssertGreaterThan(styles[2].peakRadius, styles[3].peakRadius)
+        XCTAssertGreaterThan(styles[0].peakOpacity, styles[1].peakOpacity)
+        XCTAssertGreaterThan(styles[1].peakOpacity, styles[2].peakOpacity)
+        XCTAssertGreaterThan(styles[2].peakOpacity, styles[3].peakOpacity)
+    }
+
+    func testGlanceStatusClearsCurrentBeatAcrossFinishAndReset() {
+        var lifecycle = BeatVisualLifecycle(beats: 7)
+        lifecycle.record(beat: 5, subdivision: 0, cycle: 2, beats: 7)
+        XCTAssertEqual(
+            MetronomeGlanceStatus(
+                preset: MetronomePreset(
+                    bpm: 120,
+                    beats: 7,
+                    subdivision: 1,
+                    direction: .clockwise,
+                    grouping: "3+4"
+                ),
+                hand: .right,
+                lifecycle: lifecycle,
+                isPlaying: true
+            ).currentMainBeat,
+            6
+        )
+
+        lifecycle.beginFinishing()
+        let finishing = MetronomeGlanceStatus(
+            preset: MetronomePreset(
+                bpm: 120,
+                beats: 7,
+                subdivision: 1,
+                direction: .clockwise,
+                grouping: "3+4"
+            ),
+            hand: .right,
+            lifecycle: lifecycle,
+            isPlaying: false,
+            isFinishing: true
+        )
+        XCTAssertEqual(finishing.state, .finishing)
+        XCTAssertNil(finishing.currentMainBeat)
+
+        lifecycle.settle()
+        XCTAssertEqual(
+            MetronomeGlanceStatus(
+                preset: MetronomePreset.standard,
+                hand: .right,
+                lifecycle: lifecycle,
+                isPlaying: false
+            ).state,
+            .finished
+        )
+
+        lifecycle.reset(beats: 4)
+        let ready = MetronomeGlanceStatus(
+            preset: MetronomePreset.standard,
+            hand: .both,
+            lifecycle: lifecycle,
+            isPlaying: false
+        )
+        XCTAssertEqual(ready.state, .ready)
+        XCTAssertNil(ready.currentMainBeat)
+        XCTAssertEqual(ready.currentBeatText, "尚无当前拍")
+    }
+
     func testPracticeHandControlOrderAndSymbols() {
         XCTAssertEqual(PracticeHand.controlOrder, [.left, .both, .right])
         XCTAssertEqual(PracticeHand.controlOrder.map(\.shortTitle), ["L", "B", "R"])

@@ -105,9 +105,10 @@ struct BeatVisualLifecycle: Equatable, Sendable {
     private(set) var phase: Phase = .origin
     private(set) var beatCount: Int
     private(set) var revealedBeats: Set<Int> = []
-    /// The most recent main-beat vertex. It deliberately survives subdivision
-    /// hits, pauses, and interval-only tempo changes so peripheral vision can
-    /// still locate the current beat after the short Hit has decayed.
+    /// The main-beat vertex which owns the most recent valid pulse. It
+    /// deliberately survives pauses and interval-only tempo changes so
+    /// peripheral vision can still locate the current beat after the short Hit
+    /// has decayed. Subdivision pulses select their containing main beat.
     private(set) var currentBeatIndex: Int?
     private(set) var isPaused = true
 
@@ -178,9 +179,7 @@ struct BeatVisualLifecycle: Equatable, Sendable {
         // progressively drawn by a travelling point. Even a first subdivision
         // event establishes all main-beat anchors at once.
         revealedBeats = Set(0..<beatCount)
-        if subdivision == 0 {
-            currentBeatIndex = beat
-        }
+        currentBeatIndex = beat
         phase = .orbiting
     }
 
@@ -199,5 +198,184 @@ struct BeatVisualLifecycle: Equatable, Sendable {
 
     private static func normalizedBeatCount(_ beats: Int) -> Int {
         min(max(beats, 3), 9)
+    }
+}
+
+/// Presentation-neutral tokens for a persistent geometry anchor. The canvas
+/// owns drawing and animation; this model only defines the visual hierarchy
+/// that must survive the short pulse envelope.
+struct BeatAnchorVisualStyle: Equatable, Sendable {
+    let radius: Double
+    let opacity: Double
+
+    /// A stable comparison value for tests and alternate renderers. It is not
+    /// intended to be interpreted as a physical luminance measurement.
+    var prominence: Double {
+        radius * opacity
+    }
+}
+
+/// Keeps the current main-beat locator visually dominant without coupling the
+/// rhythm model to SwiftUI, Canvas, or a particular screen size.
+enum BeatVisualHierarchyModel {
+    static let inactiveAnchorStyle = BeatAnchorVisualStyle(
+        radius: 3.8,
+        opacity: 0.30
+    )
+
+    static let currentPlayingAnchorStyle = BeatAnchorVisualStyle(
+        radius: 6.4,
+        opacity: 0.88
+    )
+
+    static let currentPausedAnchorStyle = BeatAnchorVisualStyle(
+        radius: 6.0,
+        opacity: 0.70
+    )
+
+    static func anchorStyle(
+        for beatIndex: Int,
+        lifecycle: BeatVisualLifecycle
+    ) -> BeatAnchorVisualStyle {
+        guard lifecycle.phase == .orbiting,
+              lifecycle.currentBeatIndex == beatIndex
+        else { return inactiveAnchorStyle }
+
+        return lifecycle.isPaused
+            ? currentPausedAnchorStyle
+            : currentPlayingAnchorStyle
+    }
+
+    static func pulseStyle(
+        for kind: BeatPulseKind,
+        eventInterval: TimeInterval,
+        dimFlashingLights: Bool = false
+    ) -> BeatPulseStyle {
+        BeatPulseVisualModel.style(
+            for: kind,
+            eventInterval: eventInterval,
+            dimFlashingLights: dimFlashingLights
+        )
+    }
+}
+
+/// The small set of facts a musician should be able to obtain at a glance
+/// while the controls remain secondary. This value is renderer-agnostic so
+/// the compact iPhone and spacious iPad layouts can present the same truth.
+struct MetronomeGlanceStatus: Equatable, Sendable {
+    enum State: String, Equatable, Sendable {
+        case ready
+        case playing
+        case paused
+        case finishing
+        case finished
+
+        var title: String {
+            switch self {
+            case .ready: "准备"
+            case .playing: "演奏中"
+            case .paused: "已暂停"
+            case .finishing: "正在结束"
+            case .finished: "已结束"
+            }
+        }
+    }
+
+    let state: State
+    let bpm: Int
+    let referenceNote: TempoReferenceNote
+    let trainingNote: TempoReferenceNote
+    let beats: Int
+    let grouping: String
+    let hand: PracticeHand
+    /// Human-facing beat number. Unlike `BeatVisualLifecycle.currentBeatIndex`,
+    /// this value is one-based so it can be displayed or spoken directly.
+    let currentMainBeat: Int?
+
+    init(
+        preset: MetronomePreset,
+        hand: PracticeHand,
+        lifecycle: BeatVisualLifecycle,
+        isPlaying: Bool,
+        isFinishing: Bool = false,
+        isFinished: Bool = false,
+        effectiveReferenceNote: TempoReferenceNote? = nil
+    ) {
+        let preset = preset.normalized
+        self.state = Self.resolveState(
+            lifecycle: lifecycle,
+            isPlaying: isPlaying,
+            isFinishing: isFinishing,
+            isFinished: isFinished
+        )
+        bpm = preset.bpm
+        referenceNote = effectiveReferenceNote ?? preset.referenceNote
+        trainingNote = TempoReferenceNote.trainingNote(for: preset.subdivision)
+        beats = preset.beats
+        grouping = preset.grouping
+        self.hand = hand
+        currentMainBeat = lifecycle.currentBeatIndex.flatMap { index in
+            (0..<preset.beats).contains(index) ? index + 1 : nil
+        }
+    }
+
+    var stateTitle: String { state.title }
+
+    var bpmText: String { "\(bpm) BPM" }
+
+    var referenceTempoText: String {
+        "\(referenceNote.symbol) = \(bpm)"
+    }
+
+    var trainingNoteText: String { trainingNote.symbol }
+
+    var beatStructureText: String {
+        grouping == "标准"
+            ? "\(beats) 拍"
+            : "\(beats) 拍 · \(grouping)"
+    }
+
+    var currentBeatText: String {
+        guard let currentMainBeat else {
+            return state == .playing ? "等待首拍" : "尚无当前拍"
+        }
+        return "第 \(currentMainBeat) / \(beats) 拍"
+    }
+
+    var statusText: String {
+        "\(stateTitle) · \(currentBeatText) · \(bpmText)"
+    }
+
+    /// VoiceOver and other non-visual clients should receive the same status
+    /// hierarchy without having to pronounce SMuFL private-use glyphs.
+    var accessibilitySummary: String {
+        let beatDescription = currentMainBeat.map {
+            "当前第 \($0) 拍，共 \(beats) 拍"
+        } ?? "共 \(beats) 拍，尚无当前拍"
+        let groupingDescription = grouping == "标准"
+            ? "标准分组"
+            : "分组 \(grouping)"
+        return [
+            stateTitle,
+            beatDescription,
+            groupingDescription,
+            "速度每分钟 \(bpm) 拍",
+            "基准音符\(referenceNote.title)",
+            "训练音符\(trainingNote.title)",
+            hand.title
+        ].joined(separator: "，")
+    }
+
+    private static func resolveState(
+        lifecycle: BeatVisualLifecycle,
+        isPlaying: Bool,
+        isFinishing: Bool,
+        isFinished: Bool
+    ) -> State {
+        if isFinished || lifecycle.phase == .settled { return .finished }
+        if isFinishing || lifecycle.phase == .finishing { return .finishing }
+        if isPlaying { return .playing }
+        if lifecycle.phase == .orbiting { return .paused }
+        return .ready
     }
 }

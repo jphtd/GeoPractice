@@ -355,12 +355,12 @@ struct MetronomeGlanceStatus: Equatable, Sendable {
         let groupingDescription = grouping == "标准"
             ? "标准分组"
             : "分组 \(grouping)"
+        let tempoDescription = "速度基准，\(referenceNote.title)等于每分钟 \(bpm) 拍"
         return [
             stateTitle,
             beatDescription,
+            tempoDescription,
             groupingDescription,
-            "速度每分钟 \(bpm) 拍",
-            "基准音符\(referenceNote.title)",
             "训练音符\(trainingNote.title)",
             hand.title
         ].joined(separator: "，")

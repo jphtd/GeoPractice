@@ -373,12 +373,23 @@ struct MetronomeView: View {
         }
         .buttonStyle(.plain)
         .disabled(visualFinish != nil || practiceSession.session.phase == .finished)
-        .accessibilityLabel(
-            visualFinish != nil
-                ? "正在结束练习"
-                : (engine.isPlaying ? "暂停节拍器" : "开始节拍器")
-        )
+        .accessibilityLabel(stageAccessibilityLabel)
         .accessibilityValue(stageGlanceStatus.accessibilitySummary)
+    }
+
+    private var stageAccessibilityLabel: String {
+        switch stageGlanceStatus.state {
+        case .ready:
+            "开始节拍器"
+        case .playing:
+            "暂停节拍器"
+        case .paused:
+            "继续节拍器"
+        case .finishing:
+            "正在结束练习"
+        case .finished:
+            "练习已结束"
+        }
     }
 
     private var stageGlanceStatus: MetronomeGlanceStatus {

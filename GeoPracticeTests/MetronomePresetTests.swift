@@ -28,6 +28,227 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(TempoScrubModel.bpm(start: 240, horizontalTranslation: 300), 240)
     }
 
+    func testTempoScrubPrimaryAxisAndDirectEntryValidation() {
+        XCTAssertEqual(TempoScrubModel.bpm(start: 88, primaryTranslation: 30), 98)
+        XCTAssertEqual(TempoScrubModel.bpm(start: 88, primaryTranslation: -30), 78)
+        XCTAssertEqual(TempoScrubModel.validatedBPMInput(" 120\n"), 120)
+        XCTAssertEqual(TempoScrubModel.validatedBPMInput("30"), 30)
+        XCTAssertEqual(TempoScrubModel.validatedBPMInput("240"), 240)
+        XCTAssertNil(TempoScrubModel.validatedBPMInput(""))
+        XCTAssertNil(TempoScrubModel.validatedBPMInput("29"))
+        XCTAssertNil(TempoScrubModel.validatedBPMInput("241"))
+        XCTAssertNil(TempoScrubModel.validatedBPMInput("88.5"))
+        XCTAssertNil(TempoScrubModel.validatedBPMInput("Allegro"))
+    }
+
+    func testV41TempoDirectionsKeepIncreaseSemanticsPredictable() {
+        XCTAssertEqual(
+            TempoScrubDirection.horizontal.primaryTranslation(
+                horizontal: 30,
+                vertical: -90
+            ),
+            30
+        )
+        XCTAssertEqual(
+            TempoScrubDirection.vertical.primaryTranslation(
+                horizontal: 90,
+                vertical: -30
+            ),
+            30
+        )
+        XCTAssertEqual(
+            TempoScrubDirection.vertical.primaryTranslation(
+                horizontal: -90,
+                vertical: 30
+            ),
+            -30
+        )
+    }
+
+    func testV41BackgroundAndIdleTimerPolicyKeepsStateConsistent() {
+        let defaults = PracticeRuntimePolicy()
+        XCTAssertEqual(
+            defaults.backgroundAction(
+                isMetronomeSelected: true,
+                isMetronomePlaying: true
+            ),
+            .continueRunning
+        )
+        XCTAssertEqual(
+            defaults.backgroundAction(
+                isMetronomeSelected: true,
+                isMetronomePlaying: false
+            ),
+            .stopAndPause
+        )
+        XCTAssertEqual(
+            defaults.backgroundAction(
+                isMetronomeSelected: false,
+                isMetronomePlaying: true
+            ),
+            .stopAndPause
+        )
+
+        let keepAwake = PracticeRuntimePolicy(
+            continueAudioInBackground: true,
+            keepScreenAwake: true
+        )
+        XCTAssertTrue(
+            keepAwake.shouldDisableIdleTimer(
+                sceneState: .active,
+                isMetronomeSelected: true,
+                isMetronomePlaying: true
+            )
+        )
+        for state in [
+            PracticeRuntimePolicy.SceneState.inactive,
+            .background
+        ] {
+            XCTAssertFalse(
+                keepAwake.shouldDisableIdleTimer(
+                    sceneState: state,
+                    isMetronomeSelected: true,
+                    isMetronomePlaying: true
+                )
+            )
+        }
+
+        XCTAssertTrue(
+            defaults.shouldPersistCheckpoint(
+                sceneState: .background,
+                isMetronomeSelected: true,
+                isMetronomePlaying: true,
+                isPracticeRunning: true
+            )
+        )
+        XCTAssertTrue(
+            defaults.shouldPauseWhenEnteringInactive(
+                isMetronomeSelected: true,
+                isMetronomePlaying: false,
+                isPracticeRunning: true
+            )
+        )
+        XCTAssertFalse(
+            defaults.shouldPauseWhenEnteringInactive(
+                isMetronomeSelected: true,
+                isMetronomePlaying: true,
+                isPracticeRunning: true
+            )
+        )
+        XCTAssertTrue(
+            defaults.shouldPauseAfterOffscreenPlaybackStops(
+                sceneState: .background,
+                isMetronomeSelected: true,
+                wasPlaying: true,
+                isPlaying: false,
+                isPracticeRunning: true
+            )
+        )
+        XCTAssertTrue(
+            defaults.shouldPauseAfterOffscreenPlaybackStops(
+                sceneState: .inactive,
+                isMetronomeSelected: true,
+                wasPlaying: true,
+                isPlaying: false,
+                isPracticeRunning: true
+            )
+        )
+        XCTAssertFalse(
+            defaults.shouldPauseAfterOffscreenPlaybackStops(
+                sceneState: .active,
+                isMetronomeSelected: true,
+                wasPlaying: true,
+                isPlaying: false,
+                isPracticeRunning: true
+            )
+        )
+    }
+
+    func testV41HostDeclaresBackgroundAudioCapability() throws {
+        let modes = try XCTUnwrap(
+            Bundle.main.object(forInfoDictionaryKey: "UIBackgroundModes") as? [String]
+        )
+        XCTAssertTrue(modes.contains("audio"))
+    }
+
+    func testV41ClickProfilesAreShortSafeAndKeepAudibleHierarchy() throws {
+        let orderedKinds: [MetronomeClickKind] = [
+            .downbeat, .groupAccent, .beat, .subdivision
+        ]
+        let pulseKinds: [BeatPulseKind] = [.strong, .secondary, .weak, .subdivision]
+        let profiles = orderedKinds.map(MetronomeClickProfile.profile(for:))
+        let minimumEnhancedPeaks = [0.50, 0.40, 0.30, 0.20]
+
+        XCTAssertEqual(
+            pulseKinds.map { MetronomeClickKind(pulseKind: $0) },
+            orderedKinds
+        )
+        XCTAssertTrue(zip(profiles, minimumEnhancedPeaks).allSatisfy {
+            $0.0.targetPeak >= $0.1
+                && $0.0.targetPeak <= MetronomeClickProfile.maximumPeak
+                && $0.0.duration > 0
+                && $0.0.duration <= MetronomeClickProfile.maximumDuration
+        })
+        for pair in zip(profiles, profiles.dropFirst()) {
+            XCTAssertGreaterThan(pair.0.targetPeak, pair.1.targetPeak)
+            XCTAssertGreaterThan(pair.0.frequency, pair.1.frequency)
+            XCTAssertGreaterThan(pair.0.duration, pair.1.duration)
+        }
+
+        let trainingValues: [(note: TempoReferenceNote, subdivision: Int)] = [
+            (.half, 0), (.quarter, 1), (.eighth, 2), (.sixteenth, 4)
+        ]
+        XCTAssertEqual(trainingValues.map(\.note), TempoReferenceNote.trainingNoteOptions)
+        let supportedIntervals = TempoReferenceNote.tempoReferenceOptions.flatMap { reference in
+            trainingValues.map { training -> TimeInterval in
+                var candidate = MetronomePreset.standard
+                candidate.bpm = TempoScrubModel.maximumBPM
+                candidate.referenceNote = reference
+                candidate.subdivision = training.subdivision
+                return candidate.playbackPlan().eventInterval
+            }
+        }
+        let shortestSupportedInterval = try XCTUnwrap(supportedIntervals.min())
+        XCTAssertEqual(shortestSupportedInterval, 1.0 / 48.0, accuracy: 0.000_001)
+        XCTAssertTrue(
+            profiles.allSatisfy {
+                $0.duration < shortestSupportedInterval
+            }
+        )
+    }
+
+    func testV41ClickWaveformsAreDeterministicFiniteAndPeakLimited() throws {
+        var rootMeanSquares: [Double] = []
+        for kind in MetronomeClickKind.allCases {
+            let first = MetronomeClickWaveform.samples(for: kind, sampleRate: 44_100)
+            let second = MetronomeClickWaveform.samples(for: kind, sampleRate: 44_100)
+            let profile = MetronomeClickProfile.profile(for: kind)
+            let peak = try XCTUnwrap(first.map { abs(Double($0)) }.max())
+
+            XCTAssertEqual(first, second)
+            XCTAssertGreaterThan(first.count, 2)
+            XCTAssertLessThanOrEqual(
+                Double(first.count) / 44_100,
+                MetronomeClickProfile.maximumDuration
+            )
+            XCTAssertTrue(first.allSatisfy(\.isFinite))
+            XCTAssertEqual(first.first, 0)
+            XCTAssertEqual(first.last, 0)
+            XCTAssertEqual(peak, profile.targetPeak, accuracy: 0.000_01)
+            XCTAssertLessThanOrEqual(peak, MetronomeClickProfile.maximumPeak)
+            rootMeanSquares.append(
+                sqrt(first.reduce(0) { $0 + Double($1 * $1) } / Double(first.count))
+            )
+        }
+        for pair in zip(rootMeanSquares, rootMeanSquares.dropFirst()) {
+            XCTAssertGreaterThan(pair.0, pair.1)
+        }
+        XCTAssertGreaterThanOrEqual(rootMeanSquares[0], 0.13)
+        XCTAssertGreaterThanOrEqual(rootMeanSquares[1], 0.095)
+        XCTAssertGreaterThanOrEqual(rootMeanSquares[2], 0.085)
+        XCTAssertGreaterThanOrEqual(rootMeanSquares[3], 0.06)
+    }
+
     func testGroupingStartIndices() {
         var preset = MetronomePreset.standard
         preset.beats = 4
@@ -1286,8 +1507,11 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(status.currentBeatText, "第 3 / 5 拍")
         XCTAssertTrue(status.accessibilitySummary.contains("演奏中"))
         XCTAssertTrue(status.accessibilitySummary.contains("当前第 3 拍"))
-        XCTAssertTrue(status.accessibilitySummary.contains("速度每分钟 88 拍"))
-        XCTAssertTrue(status.accessibilitySummary.contains("基准音符附点四分音符"))
+        XCTAssertTrue(
+            status.accessibilitySummary.contains(
+                "速度基准，附点四分音符等于每分钟 88 拍"
+            )
+        )
         XCTAssertTrue(status.accessibilitySummary.contains("训练音符八分音符"))
         XCTAssertTrue(status.accessibilitySummary.contains("左手"))
     }

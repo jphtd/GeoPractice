@@ -6,8 +6,21 @@ enum TempoScrubModel {
     static let pointsPerBPM: Double = 3
 
     static func bpm(start: Int, horizontalTranslation: Double) -> Int {
-        let delta = Int(horizontalTranslation / pointsPerBPM)
+        bpm(start: start, primaryTranslation: horizontalTranslation)
+    }
+
+    static func bpm(start: Int, primaryTranslation: Double) -> Int {
+        let delta = Int(primaryTranslation / pointsPerBPM)
         return min(maximumBPM, max(minimumBPM, start + delta))
+    }
+
+    static func validatedBPMInput(_ text: String) -> Int? {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              let value = Int(trimmed),
+              (minimumBPM...maximumBPM).contains(value)
+        else { return nil }
+        return value
     }
 }
 

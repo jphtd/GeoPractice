@@ -186,25 +186,24 @@ struct SMuFLNoteGlyph: View {
     }
 }
 
-/// A number-first tempo control. Horizontal distance maps to exact BPM steps;
-/// the model is committed only when the gesture ends, so a playing metronome is
-/// rescheduled once instead of on every drag sample.
+/// A number-first tempo control. The selected primary axis maps to exact BPM
+/// steps; the model is committed only when the gesture ends, so a playing
+/// metronome is rescheduled once instead of on every drag sample.
 struct TempoScrubber: View {
     let bpm: Int
     var compact = false
+    var direction: TempoScrubDirection = .horizontal
     var onTap: (() -> Void)?
+    var onScrubbingChanged: (Bool) -> Void = { _ in }
     let onCommit: (Int) -> Void
 
     @State private var draftBPM: Int?
     @State private var dragStartBPM: Int?
-    @State private var dragAxis: ScrubAxis?
+    @State private var isScrubbing = false
     @State private var suppressTap = false
     @State private var tapResetTask: Task<Void, Never>?
-
-    private enum ScrubAxis {
-        case horizontal
-        case vertical
-    }
+    @State private var isShowingDirectEntry = false
+    @State private var directEntryText = ""
 
     private var displayedBPM: Int {
         draftBPM ?? bpm
@@ -233,7 +232,7 @@ struct TempoScrubber: View {
                         .font(.system(size: 13, weight: .bold, design: .rounded))
                         .foregroundStyle(GeoTheme.muted)
                     scrubTarget(compact: false)
-                    Text("左右滑动数字 · 逐点精调 1 BPM")
+                    Text("\(direction.detail) · 双击直接输入")
                         .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(GeoTheme.muted)
                 }
@@ -251,11 +250,26 @@ struct TempoScrubber: View {
         .onDisappear {
             tapResetTask?.cancel()
             cancelDraft()
+            isShowingDirectEntry = false
+        }
+        .alert("输入 BPM", isPresented: $isShowingDirectEntry) {
+            TextField("当前 \(bpm)", text: $directEntryText)
+                .keyboardType(.numberPad)
+            Button("取消", role: .cancel) {}
+            Button("确定") {
+                commitDirectEntry()
+            }
+            .disabled(validatedDirectEntry == nil)
+        } message: {
+            Text("请输入 30 至 240 之间的整数。确认后速度只更新一次。")
         }
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("速度")
         .accessibilityValue("\(displayedTempoName)，\(displayedBPM) BPM")
-        .accessibilityHint("左右拖动数字调整；VoiceOver 上下轻扫每次调整 1 BPM")
+        .accessibilityHint("\(direction.accessibilityHint)；VoiceOver 上下轻扫每次调整 1 BPM")
+        .accessibilityAction(named: "直接输入 BPM") {
+            beginDirectEntry()
+        }
         .accessibilityAdjustableAction { direction in
             let delta: Int
             switch direction {
@@ -282,11 +296,8 @@ struct TempoScrubber: View {
                 .contentTransition(.numericText())
                 .frame(minWidth: compact ? 48 : 96, minHeight: compact ? 44 : 76)
                 .contentShape(Rectangle())
-                .onTapGesture {
-                    guard !suppressTap else { return }
-                    onTap?()
-                }
-                .simultaneousGesture(scrubGesture)
+                .gesture(tempoTapGesture)
+                .highPriorityGesture(scrubGesture)
 
             tempoStepButton(delta: 1, compact: compact)
         }
@@ -325,33 +336,60 @@ struct TempoScrubber: View {
     private var scrubGesture: some Gesture {
         DragGesture(minimumDistance: 4, coordinateSpace: .local)
             .onChanged { value in
-                let horizontal = abs(value.translation.width)
-                let vertical = abs(value.translation.height)
-                if dragAxis == nil {
-                    if horizontal > vertical * 1.05 {
-                        dragAxis = .horizontal
-                        dragStartBPM = bpm
-                        draftBPM = bpm
-                    } else if vertical > horizontal * 1.05 {
-                        dragAxis = .vertical
-                    } else {
-                        return
-                    }
+                if dragStartBPM == nil {
+                    dragStartBPM = bpm
+                    draftBPM = bpm
+                    setScrubbing(true)
                 }
-                guard dragAxis == .horizontal, let dragStartBPM else { return }
+                guard let dragStartBPM else { return }
                 suppressTap = true
+                let primaryTranslation = direction.primaryTranslation(
+                    horizontal: value.translation.width,
+                    vertical: value.translation.height
+                )
                 draftBPM = TempoScrubModel.bpm(
                     start: dragStartBPM,
-                    horizontalTranslation: value.translation.width
+                    primaryTranslation: Double(primaryTranslation)
                 )
             }
             .onEnded { _ in
-                let committed = dragAxis == .horizontal ? draftBPM : nil
+                let committed = draftBPM
                 cancelDraft(keepTapSuppressed: suppressTap)
                 if let committed, committed != bpm {
                     onCommit(committed)
                 }
             }
+    }
+
+    private var tempoTapGesture: some Gesture {
+        TapGesture(count: 2)
+            .exclusively(before: TapGesture(count: 1))
+            .onEnded { result in
+                guard !suppressTap else { return }
+                switch result {
+                case .first:
+                    beginDirectEntry()
+                case .second:
+                    onTap?()
+                }
+            }
+    }
+
+    private var validatedDirectEntry: Int? {
+        TempoScrubModel.validatedBPMInput(directEntryText)
+    }
+
+    private func beginDirectEntry() {
+        cancelDraft()
+        directEntryText = ""
+        isShowingDirectEntry = true
+    }
+
+    private func commitDirectEntry() {
+        guard let enteredBPM = validatedDirectEntry else { return }
+        if enteredBPM != bpm {
+            onCommit(enteredBPM)
+        }
     }
 
     private func nudge(by delta: Int) {
@@ -371,7 +409,7 @@ struct TempoScrubber: View {
         tapResetTask = nil
         draftBPM = nil
         dragStartBPM = nil
-        dragAxis = nil
+        setScrubbing(false)
         if keepTapSuppressed {
             tapResetTask = Task { @MainActor in
                 try? await Task.sleep(nanoseconds: 120_000_000)
@@ -382,6 +420,12 @@ struct TempoScrubber: View {
         } else {
             suppressTap = false
         }
+    }
+
+    private func setScrubbing(_ active: Bool) {
+        guard active != isScrubbing else { return }
+        isScrubbing = active
+        onScrubbingChanged(active)
     }
 }
 struct GeoSegmentButton: View {

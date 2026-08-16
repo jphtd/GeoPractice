@@ -9,10 +9,13 @@ struct PracticeEventEditorView: View {
     private let event: PracticeEvent?
     private let currentPreset: MetronomePreset
 
+    @AppStorage(PracticePreferenceKeys.tempoScrubDirection)
+    private var tempoScrubDirectionRaw = TempoScrubDirection.horizontal.rawValue
     @State private var name: String
     @State private var preset: MetronomePreset
     @State private var inheritanceSource: String
     @State private var persistenceError: String?
+    @State private var isTempoScrubbing = false
 
     init(event: PracticeEvent? = nil, currentPreset: MetronomePreset) {
         self.event = event
@@ -25,6 +28,10 @@ struct PracticeEventEditorView: View {
 
     private var trimmedName: String {
         name.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var tempoScrubDirection: TempoScrubDirection {
+        TempoScrubDirection(rawValue: tempoScrubDirectionRaw) ?? .horizontal
     }
 
     var body: some View {
@@ -73,6 +80,8 @@ struct PracticeEventEditorView: View {
                     Section("速度") {
                         TempoScrubber(
                             bpm: preset.bpm,
+                            direction: tempoScrubDirection,
+                            onScrubbingChanged: { isTempoScrubbing = $0 },
                             onCommit: { bpm in
                                 preset.bpm = bpm
                             }
@@ -117,6 +126,7 @@ struct PracticeEventEditorView: View {
                         }
                     }
                 }
+                .scrollDisabled(isTempoScrubbing)
                 .scrollContentBackground(.hidden)
             }
             .navigationTitle(event == nil ? "新建打卡" : "编辑打卡")

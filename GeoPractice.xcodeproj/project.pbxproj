@@ -23,6 +23,7 @@
 		A0000000000000000000000E /* BeatVisualLifecycle.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000010 /* BeatVisualLifecycle.swift */; };
 		A0000000000000000000000F /* LiquidControlComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000011 /* LiquidControlComponents.swift */; };
 		A00000000000000000000010 /* BravuraText.otf in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000012 /* BravuraText.otf */; };
+		A00000000000000000000011 /* PracticePreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000013 /* PracticePreferences.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -54,6 +55,8 @@
 		B00000000000000000000010 /* BeatVisualLifecycle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BeatVisualLifecycle.swift; sourceTree = "<group>"; };
 		B00000000000000000000011 /* LiquidControlComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiquidControlComponents.swift; sourceTree = "<group>"; };
 		B00000000000000000000012 /* BravuraText.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/Fonts/BravuraText.otf; sourceTree = "<group>"; };
+		B00000000000000000000013 /* PracticePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticePreferences.swift; sourceTree = "<group>"; };
+		B00000000000000000000014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -87,6 +90,7 @@
 			isa = PBXGroup;
 			children = (
 				B00000000000000000000001 /* GeoPracticeApp.swift */,
+				B00000000000000000000014 /* Info.plist */,
 				B0000000000000000000000D /* Assets.xcassets */,
 				B0000000000000000000000F /* PrivacyInfo.xcprivacy */,
 				B00000000000000000000012 /* BravuraText.otf */,
@@ -103,6 +107,7 @@
 				B00000000000000000000010 /* BeatVisualLifecycle.swift */,
 				B00000000000000000000002 /* MetronomePreset.swift */,
 				B00000000000000000000003 /* PracticeEvent.swift */,
+				B00000000000000000000013 /* PracticePreferences.swift */,
 				B0000000000000000000000E /* PracticeSession.swift */,
 			);
 			path = Models;
@@ -265,6 +270,7 @@
 				A0000000000000000000000C /* PracticeSession.swift in Sources */,
 				A0000000000000000000000E /* BeatVisualLifecycle.swift in Sources */,
 				A0000000000000000000000F /* LiquidControlComponents.swift in Sources */,
+				A00000000000000000000011 /* PracticePreferences.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -405,9 +411,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = XKY44WW2XC;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = GeoPractice/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "节拍打卡";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
@@ -417,7 +424,7 @@
 				INFOPLIST_KEY_UIRequiresFullScreen = NO;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 4.0;
+				MARKETING_VERSION = 4.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kuoxiyu.GeoPractice;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -433,9 +440,10 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 5;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = XKY44WW2XC;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = GeoPractice/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = "节拍打卡";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
@@ -445,7 +453,7 @@
 				INFOPLIST_KEY_UIRequiresFullScreen = NO;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 4.0;
+				MARKETING_VERSION = 4.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kuoxiyu.GeoPractice;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -465,7 +473,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 4.0;
+				MARKETING_VERSION = 4.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kuoxiyu.GeoPracticeTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;
@@ -482,7 +490,7 @@
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 4.0;
+				MARKETING_VERSION = 4.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kuoxiyu.GeoPracticeTests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_VERSION = 5.0;

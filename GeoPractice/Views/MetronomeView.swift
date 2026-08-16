@@ -5,6 +5,7 @@ private enum MetronomePanel: String, Identifiable {
     case session
     case structure
     case tempo
+    case preferences
 #if DEBUG || CUSTOMER_PREVIEW
     case experiments
 #endif
@@ -16,8 +17,9 @@ private enum MetronomePanel: String, Identifiable {
         case .session: "本次练习"
         case .structure: "节拍设置"
         case .tempo: "速度设置"
+        case .preferences: "调速、声音与屏幕"
 #if DEBUG || CUSTOMER_PREVIEW
-        case .experiments: "体验设置"
+        case .experiments: "节拍方案预览"
 #endif
         }
     }
@@ -49,6 +51,12 @@ struct MetronomeView: View {
     let leaveMetronome: () -> Void
 
     @AppStorage("confirmBeforeHandSwitch") private var confirmBeforeHandSwitch = true
+    @AppStorage(PracticePreferenceKeys.tempoScrubDirection)
+    private var tempoScrubDirectionRaw = TempoScrubDirection.horizontal.rawValue
+    @AppStorage(PracticePreferenceKeys.continueAudioInBackground)
+    private var continueAudioInBackground = true
+    @AppStorage(PracticePreferenceKeys.keepScreenAwake)
+    private var keepScreenAwake = false
 #if DEBUG || CUSTOMER_PREVIEW
     @AppStorage("debug.experience.tempoMode.v2")
     private var debugTempoModeRaw = TempoSemantics.independentReference.rawValue
@@ -67,6 +75,7 @@ struct MetronomeView: View {
     @State private var visualFinish: BeatVisualFinishAnimation?
     @State private var pendingReviewSummary: PracticeSessionSummary?
     @State private var visualSessionStartedAt: Date?
+    @State private var isTempoScrubbing = false
 
     private var sourceEvent: PracticeEvent? {
         guard let id = practiceSession.session.sourceEventID else { return nil }
@@ -251,12 +260,20 @@ struct MetronomeView: View {
                         Label("完整节拍设置", systemImage: "slider.horizontal.3")
                     }
 
+                    Button {
+                        activePanel = .preferences
+                    } label: {
+                        Label("调速、声音与屏幕", systemImage: "gearshape")
+                    }
+
 #if DEBUG || CUSTOMER_PREVIEW
+                    Divider()
+
                     Button {
                         activePanel = .experiments
                     } label: {
                         Label(
-                            "体验设置 · \(experienceSummary)",
+                            "节拍方案预览 · \(experienceSummary)",
                             systemImage: "slider.horizontal.3"
                         )
                     }
@@ -691,9 +708,11 @@ struct MetronomeView: View {
             TempoScrubber(
                 bpm: engine.preset.bpm,
                 compact: true,
+                direction: tempoScrubDirection,
                 onTap: {
                     activePanel = .tempo
                 },
+                onScrubbingChanged: { isTempoScrubbing = $0 },
                 onCommit: { bpm in
                     guard canEditLiquidControls else { return }
                     engine.setBPM(bpm)
@@ -811,6 +830,8 @@ struct MetronomeView: View {
                             structureCard
                         case .tempo:
                             tempoCard
+                        case .preferences:
+                            preferencesCard
 #if DEBUG || CUSTOMER_PREVIEW
                         case .experiments:
                             experienceSettingsCard
@@ -821,6 +842,7 @@ struct MetronomeView: View {
                     .padding(20)
                     .frame(maxWidth: .infinity)
                 }
+                .scrollDisabled(isTempoScrubbing)
             }
             .navigationTitle(panel.title)
             .navigationBarTitleDisplayMode(.inline)
@@ -956,6 +978,8 @@ struct MetronomeView: View {
                 CardTitle(title: "速度", subtitle: "TEMPO")
                 TempoScrubber(
                     bpm: engine.preset.bpm,
+                    direction: tempoScrubDirection,
+                    onScrubbingChanged: { isTempoScrubbing = $0 },
                     onCommit: { bpm in
                         engine.setBPM(bpm)
                     }
@@ -970,6 +994,137 @@ struct MetronomeView: View {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    private var tempoScrubDirection: TempoScrubDirection {
+        TempoScrubDirection(rawValue: tempoScrubDirectionRaw) ?? .horizontal
+    }
+
+    private var preferencesCard: some View {
+        VStack(spacing: 16) {
+            GeoCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    CardTitle(title: "调速手势", subtitle: "双击数字也可直接输入")
+
+                    ForEach(
+                        [TempoScrubDirection.horizontal, .vertical],
+                        id: \.rawValue
+                    ) { direction in
+                        Button {
+                            tempoScrubDirectionRaw = direction.rawValue
+                        } label: {
+                            HStack(spacing: 12) {
+                                Image(systemName: direction == .horizontal
+                                      ? "arrow.left.and.right"
+                                      : "arrow.up.and.down")
+                                    .font(.system(size: 15, weight: .bold))
+                                    .frame(width: 38, height: 38)
+                                    .background(
+                                        Color.white.opacity(
+                                            tempoScrubDirection == direction ? 0.18 : 0.06
+                                        ),
+                                        in: Circle()
+                                    )
+
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(direction.title)
+                                        .font(.system(size: 13, weight: .bold))
+                                    Text(direction.detail)
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundStyle(GeoTheme.muted)
+                                        .fixedSize(horizontal: false, vertical: true)
+                                }
+
+                                Spacer(minLength: 8)
+
+                                Image(systemName: tempoScrubDirection == direction
+                                      ? "checkmark.circle.fill"
+                                      : "circle")
+                                    .foregroundStyle(
+                                        tempoScrubDirection == direction
+                                            ? Color.white
+                                            : GeoTheme.muted
+                                    )
+                            }
+                            .padding(11)
+                            .background(
+                                Color.white.opacity(
+                                    tempoScrubDirection == direction ? 0.08 : 0.035
+                                ),
+                                in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+                            )
+                            .overlay {
+                                RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                    .stroke(
+                                        Color.white.opacity(
+                                            tempoScrubDirection == direction ? 0.24 : 0.08
+                                        ),
+                                        lineWidth: 0.8
+                                    )
+                            }
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityAddTraits(
+                            tempoScrubDirection == direction ? .isSelected : []
+                        )
+                    }
+                }
+            }
+
+            GeoCard {
+                VStack(alignment: .leading, spacing: 16) {
+                    CardTitle(title: "练习期间", subtitle: "声音与屏幕可独立设置")
+
+                    Toggle(isOn: $continueAudioInBackground) {
+                        preferenceToggleLabel(
+                            title: "锁屏后继续节拍声",
+                            detail: "锁屏或切换到其他 App 后，节拍器仍保持声音。",
+                            systemImage: "speaker.wave.2.fill"
+                        )
+                    }
+                    .tint(.white)
+
+                    Divider()
+                        .overlay(GeoTheme.line)
+
+                    Toggle(isOn: $keepScreenAwake) {
+                        preferenceToggleLabel(
+                            title: "运行时保持屏幕常亮",
+                            detail: "仅在节拍器播放期间防止系统自动熄屏。",
+                            systemImage: "sun.max.fill"
+                        )
+                    }
+                    .tint(.white)
+
+                    Text("两个选项可以同时开启；手动锁屏时由“锁屏后继续节拍声”决定是否继续播放。")
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundStyle(GeoTheme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private func preferenceToggleLabel(
+        title: String,
+        detail: String,
+        systemImage: String
+    ) -> some View {
+        HStack(spacing: 11) {
+            Image(systemName: systemImage)
+                .font(.system(size: 14, weight: .semibold))
+                .frame(width: 34, height: 34)
+                .background(Color.white.opacity(0.07), in: Circle())
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(title)
+                    .font(.system(size: 13, weight: .bold))
+                Text(detail)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundStyle(GeoTheme.muted)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
@@ -997,7 +1152,7 @@ struct MetronomeView: View {
         return VStack(spacing: 16) {
             GeoCard {
                 VStack(alignment: .leading, spacing: 12) {
-                    CardTitle(title: "节拍体验设置", subtitle: "选择后立即生效")
+                    CardTitle(title: "节拍方案预览", subtitle: "选择后立即生效")
 
                     VStack(spacing: 8) {
                         experienceCurrentRow(

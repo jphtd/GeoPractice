@@ -1,6 +1,7 @@
 import Combine
 import Foundation
 import SwiftUI
+import UIKit
 
 enum RootTab: Hashable {
     case practice
@@ -146,6 +147,10 @@ final class PracticeSessionController: ObservableObject {
 
 struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @AppStorage(PracticePreferenceKeys.continueAudioInBackground)
+    private var continueAudioInBackground = true
+    @AppStorage(PracticePreferenceKeys.keepScreenAwake)
+    private var keepScreenAwake = false
     @StateObject private var metronome = MetronomeEngine()
     @StateObject private var practiceSession = PracticeSessionController()
     @State private var selectedTab: RootTab = .practice
@@ -224,25 +229,41 @@ struct RootView: View {
                 metronome.stop()
                 practiceSession.pause()
             }
+            synchronizeIdleTimer()
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active {
-                metronome.stop()
-                practiceSession.pause()
-            } else if selectedTab == .metronome {
-                practiceSession.startIfNeeded(preset: metronome.preset)
-            }
+            handleScenePhaseChange(phase, at: .now)
+        }
+        .onChange(of: metronome.isPlaying) { wasPlaying, isPlaying in
+            handlePlaybackChange(
+                wasPlaying: wasPlaying,
+                isPlaying: isPlaying,
+                at: .now
+            )
+        }
+        .onChange(of: keepScreenAwake) { _, _ in
+            synchronizeIdleTimer()
+        }
+        .onChange(of: continueAudioInBackground) { _, _ in
+            guard scenePhase == .background else { return }
+            handleBackgroundTransition(at: .now)
         }
         .onAppear {
             if let restoredPreset = practiceSession.sessionPreset {
                 metronome.apply(restoredPreset)
             }
+            synchronizeIdleTimer()
+        }
+        .onDisappear {
+            UIApplication.shared.isIdleTimerDisabled = false
         }
         .onReceive(checkpointTimer) { date in
-            guard scenePhase == .active,
-                  selectedTab == .metronome,
-                  practiceSession.session.isRunning
-            else { return }
+            guard runtimePolicy.shouldPersistCheckpoint(
+                sceneState: runtimeSceneState(for: scenePhase),
+                isMetronomeSelected: selectedTab == .metronome,
+                isMetronomePlaying: metronome.isPlaying,
+                isPracticeRunning: practiceSession.session.isRunning
+            ) else { return }
             practiceSession.persistSnapshot(at: date)
         }
     }
@@ -251,6 +272,104 @@ struct RootView: View {
         metronome.apply(request.preset)
         practiceSession.begin(sourceEventID: request.eventID, preset: request.preset)
         selectedTab = .metronome
+    }
+
+    private var runtimePolicy: PracticeRuntimePolicy {
+        PracticeRuntimePolicy(
+            continueAudioInBackground: continueAudioInBackground,
+            keepScreenAwake: keepScreenAwake
+        )
+    }
+
+    private func handleScenePhaseChange(_ phase: ScenePhase, at date: Date) {
+        switch phase {
+        case .inactive:
+            // Locking an iPhone passes through inactive before background. Save
+            // immediately, but do not tear down audio during that transition.
+            // If an interruption stopped audio just before the phase update,
+            // pause timing here so the two states cannot drift apart.
+            if runtimePolicy.shouldPauseWhenEnteringInactive(
+                isMetronomeSelected: selectedTab == .metronome,
+                isMetronomePlaying: metronome.isPlaying,
+                isPracticeRunning: practiceSession.session.isRunning
+            ) {
+                practiceSession.pause(at: date)
+            }
+            practiceSession.persistSnapshot(at: date)
+        case .background:
+            handleBackgroundTransition(at: date)
+        case .active:
+            if selectedTab == .metronome {
+                practiceSession.startIfNeeded(preset: metronome.preset, at: date)
+            }
+        @unknown default:
+            practiceSession.persistSnapshot(at: date)
+        }
+        synchronizeIdleTimer(for: phase)
+    }
+
+    private func handleBackgroundTransition(at date: Date) {
+        switch runtimePolicy.backgroundAction(
+            isMetronomeSelected: selectedTab == .metronome,
+            isMetronomePlaying: metronome.isPlaying
+        ) {
+        case .continueRunning:
+            practiceSession.startIfNeeded(preset: metronome.preset, at: date)
+            practiceSession.persistSnapshot(at: date)
+        case .stopAndPause:
+            metronome.stop()
+            practiceSession.pause(at: date)
+            practiceSession.persistSnapshot(at: date)
+        }
+        synchronizeIdleTimer(for: .background)
+    }
+
+    private func handlePlaybackChange(
+        wasPlaying: Bool,
+        isPlaying: Bool,
+        at date: Date
+    ) {
+        if runtimePolicy.shouldPauseAfterOffscreenPlaybackStops(
+            sceneState: runtimeSceneState(for: scenePhase),
+            isMetronomeSelected: selectedTab == .metronome,
+            wasPlaying: wasPlaying,
+            isPlaying: isPlaying,
+            isPracticeRunning: practiceSession.session.isRunning
+        ) {
+            // Audio interruptions and media-service resets can stop the engine
+            // while no UI is visible. Keep the recorded practice duration in
+            // step with the audio truth instead of silently counting onward.
+            practiceSession.pause(at: date)
+            practiceSession.persistSnapshot(at: date)
+        }
+        synchronizeIdleTimer()
+    }
+
+    private func synchronizeIdleTimer(for phase: ScenePhase? = nil) {
+        let effectivePhase = phase ?? scenePhase
+        let shouldDisable = runtimePolicy.shouldDisableIdleTimer(
+            sceneState: runtimeSceneState(for: effectivePhase),
+            isMetronomeSelected: selectedTab == .metronome,
+            isMetronomePlaying: metronome.isPlaying
+        )
+        if UIApplication.shared.isIdleTimerDisabled != shouldDisable {
+            UIApplication.shared.isIdleTimerDisabled = shouldDisable
+        }
+    }
+
+    private func runtimeSceneState(
+        for phase: ScenePhase
+    ) -> PracticeRuntimePolicy.SceneState {
+        switch phase {
+        case .active:
+            .active
+        case .inactive:
+            .inactive
+        case .background:
+            .background
+        @unknown default:
+            .inactive
+        }
     }
 
     private var protectedPracticeEventID: UUID? {

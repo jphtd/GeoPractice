@@ -3,6 +3,184 @@ import Combine
 import Darwin
 import Foundation
 
+/// The four audible roles of a metronome event. Keeping this mapping outside
+/// AVFoundation makes the sound hierarchy deterministic and directly testable.
+enum MetronomeClickKind: String, CaseIterable, Hashable, Sendable {
+    case downbeat
+    case groupAccent
+    case beat
+    case subdivision
+
+    init(pulseKind: BeatPulseKind) {
+        switch pulseKind {
+        case .strong:
+            self = .downbeat
+        case .secondary:
+            self = .groupAccent
+        case .weak:
+            self = .beat
+        case .subdivision:
+            self = .subdivision
+        }
+    }
+}
+
+/// A short procedural click tuned for phone speakers. `targetPeak` is a hard
+/// digital ceiling for a single rendered click, not a system-volume override.
+struct MetronomeClickProfile: Equatable, Sendable {
+    static let maximumPeak = 0.60
+    static let maximumDuration: TimeInterval = 0.018
+
+    let frequency: Double
+    let targetPeak: Double
+    let duration: TimeInterval
+    let attackDuration: TimeInterval
+    let decayTimeConstant: TimeInterval
+    let harmonicMix: Double
+    let transientMix: Double
+
+    static func profile(for kind: MetronomeClickKind) -> Self {
+        switch kind {
+        case .downbeat:
+            Self(
+                frequency: 1_800,
+                targetPeak: 0.54,
+                duration: 0.018,
+                attackDuration: 0.00035,
+                decayTimeConstant: 0.0058,
+                harmonicMix: 0.34,
+                transientMix: 0.24
+            )
+        case .groupAccent:
+            Self(
+                frequency: 1_450,
+                targetPeak: 0.44,
+                duration: 0.017,
+                attackDuration: 0.00038,
+                decayTimeConstant: 0.0052,
+                harmonicMix: 0.30,
+                transientMix: 0.20
+            )
+        case .beat:
+            Self(
+                frequency: 1_050,
+                targetPeak: 0.34,
+                duration: 0.016,
+                attackDuration: 0.00042,
+                decayTimeConstant: 0.0048,
+                harmonicMix: 0.27,
+                transientMix: 0.17
+            )
+        case .subdivision:
+            Self(
+                frequency: 780,
+                targetPeak: 0.22,
+                duration: 0.0135,
+                attackDuration: 0.00045,
+                decayTimeConstant: 0.0039,
+                harmonicMix: 0.22,
+                transientMix: 0.12
+            )
+        }
+    }
+}
+
+/// Offline renderer shared by the audio graph and unit tests. The waveform is
+/// deliberately deterministic: two calls with the same kind and sample rate
+/// return bit-for-bit identical samples.
+enum MetronomeClickWaveform {
+    static func samples(
+        for kind: MetronomeClickKind,
+        sampleRate: Double
+    ) -> [Float] {
+        samples(
+            profile: MetronomeClickProfile.profile(for: kind),
+            sampleRate: sampleRate
+        )
+    }
+
+    static func samples(
+        profile: MetronomeClickProfile,
+        sampleRate: Double
+    ) -> [Float] {
+        guard sampleRate.isFinite, sampleRate >= 8_000 else { return [] }
+
+        let duration = min(
+            MetronomeClickProfile.maximumDuration,
+            max(2 / sampleRate, finiteOrZero(profile.duration))
+        )
+        let frameCount = max(2, Int(floor(sampleRate * duration)))
+        let targetPeak = min(
+            MetronomeClickProfile.maximumPeak,
+            max(0, finiteOrZero(profile.targetPeak))
+        )
+        guard targetPeak > 0 else { return Array(repeating: 0, count: frameCount) }
+
+        let nyquistSafeFrequency = sampleRate * 0.44
+        let frequency = min(
+            nyquistSafeFrequency / 2,
+            max(40, finiteOrZero(profile.frequency))
+        )
+        let attackDuration = max(1 / sampleRate, finiteOrZero(profile.attackDuration))
+        let decayTimeConstant = max(1 / sampleRate, finiteOrZero(profile.decayTimeConstant))
+        let harmonicMix = min(0.5, max(0, finiteOrZero(profile.harmonicMix)))
+        let transientMix = min(0.35, max(0, finiteOrZero(profile.transientMix)))
+        let releaseDuration = min(0.0012, duration * 0.18)
+        let transientFrequencyA = min(3_200, nyquistSafeFrequency)
+        let transientFrequencyB = min(5_100, nyquistSafeFrequency * 0.92)
+
+        var rawSamples = [Double](repeating: 0, count: frameCount)
+        var rawPeak = 0.0
+
+        for frame in 0..<frameCount {
+            let time = Double(frame) / sampleRate
+            let remaining = max(0, duration - time)
+            let attackProgress = min(1, time / attackDuration)
+            let attack = attackProgress * attackProgress * (3 - 2 * attackProgress)
+            let releaseProgress = min(1, remaining / releaseDuration)
+            let release = releaseProgress * releaseProgress * (3 - 2 * releaseProgress)
+            let tonalDecay = exp(-time / decayTimeConstant)
+            let transientDecay = exp(-time / 0.00115)
+
+            let fundamental = sin(2 * .pi * frequency * time)
+            let harmonic = sin(2 * .pi * frequency * 2 * time + 0.17)
+            let transient = 0.62 * sin(2 * .pi * transientFrequencyA * time)
+                + 0.38 * sin(2 * .pi * transientFrequencyB * time + 0.31)
+            let sample = attack * release * (
+                (fundamental + harmonicMix * harmonic) * tonalDecay
+                    + transientMix * transient * transientDecay
+            )
+
+            rawSamples[frame] = sample
+            rawPeak = max(rawPeak, abs(sample))
+        }
+
+        guard rawPeak > .ulpOfOne else {
+            return Array(repeating: 0, count: frameCount)
+        }
+
+        let normalization = targetPeak / rawPeak
+        var result = rawSamples.map { sample -> Float in
+            let normalized = sample * normalization
+            let limited = min(
+                MetronomeClickProfile.maximumPeak,
+                max(-MetronomeClickProfile.maximumPeak, normalized)
+            )
+            return Float(limited)
+        }
+
+        // Exact zero endpoints avoid a discontinuity when AVAudioPlayerNode
+        // begins or releases a buffer, including at the fastest supported rate.
+        result[0] = 0
+        result[result.count - 1] = 0
+        return result
+    }
+
+    private static func finiteOrZero(_ value: Double) -> Double {
+        value.isFinite ? value : 0
+    }
+}
+
 struct BeatPlaybackPulse: Equatable, Sendable {
     let beat: Int
     let subdivision: Int
@@ -341,13 +519,6 @@ final class MetronomeEngine: ObservableObject {
 }
 
 private final class BeatAudioScheduler: @unchecked Sendable {
-    private enum ClickKind: CaseIterable {
-        case downbeat
-        case groupAccent
-        case beat
-        case subdivision
-    }
-
     private struct PlaybackSession {
         let token: UUID
         var preset: MetronomePreset
@@ -367,8 +538,8 @@ private final class BeatAudioScheduler: @unchecked Sendable {
     private let schedulingQueue = DispatchQueue(label: "com.kuoxiyu.GeoPractice.audio-scheduler", qos: .userInteractive)
     private let sampleRate = 44_100.0
     private let lookAheadSeconds = 0.22
-    private var playerNodes: [ClickKind: AVAudioPlayerNode] = [:]
-    private var clickBuffers: [ClickKind: AVAudioPCMBuffer] = [:]
+    private var playerNodes: [MetronomeClickKind: AVAudioPlayerNode] = [:]
+    private var clickBuffers: [MetronomeClickKind: AVAudioPCMBuffer] = [:]
     private var schedulingTimer: DispatchSourceTimer?
     private var playbackSession: PlaybackSession?
     private var pendingRevision: PendingRevision?
@@ -489,15 +660,16 @@ private final class BeatAudioScheduler: @unchecked Sendable {
             let scheduledFrame = AVAudioFramePosition(event.exactFrame.rounded())
             let beat = event.beat
             let subdivision = event.subdivision
-            let kind = clickKind(beat: beat, subdivision: subdivision, preset: session.preset)
             let pulseKind = BeatPulseVisualModel.kind(
                 beat: beat,
                 subdivision: subdivision,
                 strongBeatIndices: session.preset.strongBeatIndices,
                 secondaryAccentIndices: session.preset.secondaryAccentIndices
             )
+            let clickKind = MetronomeClickKind(pulseKind: pulseKind)
 
-            if let buffer = clickBuffers[kind], let playerNode = playerNodes[kind] {
+            if let buffer = clickBuffers[clickKind],
+               let playerNode = playerNodes[clickKind] {
                 let audioTime = AVAudioTime(sampleTime: scheduledFrame, atRate: sampleRate)
                 playerNode.scheduleBuffer(buffer, at: audioTime)
             }
@@ -590,52 +762,31 @@ private final class BeatAudioScheduler: @unchecked Sendable {
         }
     }
 
-    private func clickKind(beat: Int, subdivision: Int, preset: MetronomePreset) -> ClickKind {
-        if subdivision > 0 {
-            return .subdivision
-        }
-        if preset.strongBeatIndices.contains(beat) {
-            return .downbeat
-        }
-        if preset.secondaryAccentIndices.contains(beat) {
-            return .groupAccent
-        }
-        return .beat
-    }
-
     private func prepareAudioGraph() {
         let format = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: 1)!
-        for kind in ClickKind.allCases {
+        for kind in MetronomeClickKind.allCases {
             let playerNode = AVAudioPlayerNode()
             playerNodes[kind] = playerNode
             audioEngine.attach(playerNode)
             audioEngine.connect(playerNode, to: audioEngine.mainMixerNode, format: format)
+            clickBuffers[kind] = makeClick(kind: kind, format: format)
         }
-
-        clickBuffers[.downbeat] = makeClick(frequency: 1_100, gain: 0.16, duration: 0.065, format: format)
-        clickBuffers[.groupAccent] = makeClick(frequency: 850, gain: 0.16, duration: 0.065, format: format)
-        clickBuffers[.beat] = makeClick(frequency: 620, gain: 0.085, duration: 0.065, format: format)
-        clickBuffers[.subdivision] = makeClick(frequency: 420, gain: 0.032, duration: 0.040, format: format)
     }
 
     private func makeClick(
-        frequency: Double,
-        gain: Double,
-        duration: Double,
+        kind: MetronomeClickKind,
         format: AVAudioFormat
     ) -> AVAudioPCMBuffer {
-        let frameCount = AVAudioFrameCount(format.sampleRate * duration)
+        let waveform = MetronomeClickWaveform.samples(
+            for: kind,
+            sampleRate: format.sampleRate
+        )
+        let frameCount = AVAudioFrameCount(waveform.count)
         let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount)!
         buffer.frameLength = frameCount
         let samples = buffer.floatChannelData![0]
-        let terminalGain = 0.001
-        let exponentialRate = log(terminalGain / gain) / duration
-
-        for frame in 0..<Int(frameCount) {
-            let time = Double(frame) / format.sampleRate
-            let attack = min(1, time / 0.0015)
-            let envelope = gain * exp(exponentialRate * time) * attack
-            samples[frame] = Float(sin(2 * .pi * frequency * time) * envelope)
+        for (frame, sample) in waveform.enumerated() {
+            samples[frame] = sample
         }
         return buffer
     }

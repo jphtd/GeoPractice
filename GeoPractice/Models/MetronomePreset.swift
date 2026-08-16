@@ -240,6 +240,96 @@ struct MetronomePlaybackPlan: Hashable, Sendable {
     }
 }
 
+/// The scheduler's musical cursor at the boundary between queued and not-yet
+/// queued events. Keeping this independent from AVAudioEngine lets tempo
+/// changes preserve event order without consulting delayed UI callbacks.
+struct BeatScheduleFrontier: Equatable, Sendable {
+    struct Event: Equatable, Sendable {
+        let exactFrame: Double
+        let eventIndex: Int
+        let beat: Int
+        let subdivision: Int
+        let cycle: Int
+        let sequence: UInt64
+        let eventInterval: TimeInterval
+    }
+
+    private(set) var nextExactFrame: Double
+    private(set) var eventIndex: Int
+    private(set) var cycle: Int
+    private(set) var lastScheduledExactFrame: Double?
+
+    init(
+        nextExactFrame: Double = 0,
+        eventIndex: Int = 0,
+        cycle: Int = 0,
+        lastScheduledExactFrame: Double? = nil
+    ) {
+        self.nextExactFrame = max(0, nextExactFrame)
+        self.eventIndex = max(0, eventIndex)
+        self.cycle = max(0, cycle)
+        self.lastScheduledExactFrame = lastScheduledExactFrame
+    }
+
+    mutating func takeNext(
+        plan: MetronomePlaybackPlan,
+        sampleRate: Double
+    ) -> Event {
+        let safeSampleRate = max(1, sampleRate)
+        let eventCount = max(1, plan.eventsPerMeasure)
+        let pulsesPerBeat = max(1, plan.pulsesPerBeat)
+        let safeIndex = min(max(0, eventIndex), eventCount - 1)
+        let frame = nextExactFrame
+        let eventCountValue = UInt64(eventCount)
+        let eventIndexValue = UInt64(safeIndex)
+        let cycleValue = UInt64(max(0, cycle))
+        let maximumCycle = (UInt64.max - eventIndexValue) / eventCountValue
+        let event = Event(
+            exactFrame: frame,
+            eventIndex: safeIndex,
+            beat: safeIndex / pulsesPerBeat,
+            subdivision: safeIndex % pulsesPerBeat,
+            cycle: cycle,
+            sequence: min(cycleValue, maximumCycle) * eventCountValue
+                + eventIndexValue,
+            eventInterval: plan.eventInterval
+        )
+
+        lastScheduledExactFrame = frame
+        nextExactFrame = frame + safeSampleRate * plan.eventInterval
+        if safeIndex + 1 >= eventCount {
+            eventIndex = 0
+            cycle += 1
+        } else {
+            eventIndex = safeIndex + 1
+        }
+        return event
+    }
+
+    /// Moves only the future timing frontier. The next musical address is not
+    /// changed, and an overdue successor is scheduled once at the earliest
+    /// safe frame instead of being skipped or emitted in a catch-up burst.
+    mutating func reviseFutureInterval(
+        to eventInterval: TimeInterval,
+        sampleRate: Double,
+        minimumNextExactFrame: Double
+    ) {
+        guard let lastScheduledExactFrame else { return }
+        let intervalFrames = max(0.001, eventInterval) * max(1, sampleRate)
+        nextExactFrame = max(
+            lastScheduledExactFrame + intervalFrames,
+            max(0, minimumNextExactFrame)
+        )
+    }
+
+    /// Defers the same next musical event when a scheduler wake-up is late.
+    /// The address and sequence are deliberately untouched, preventing both a
+    /// catch-up burst and a skipped beat.
+    mutating func ensureNextEventIsNoEarlier(than minimumExactFrame: Double) {
+        nextExactFrame = max(nextExactFrame, max(0, minimumExactFrame))
+    }
+}
+
 struct MetronomePreset: Codable, Hashable, Sendable {
     var bpm: Int
     var beats: Int

@@ -3,47 +3,14 @@ import Combine
 import Darwin
 import Foundation
 
-/// Pure continuation math for an interval-only transport update. Keeping this
-/// independent from AVAudioEngine makes P0-3 cursor behavior deterministic at
-/// subdivision and measure boundaries.
-struct BeatPlaybackContinuation: Equatable, Sendable {
-    let initialEventIndex: Int
-    let initialCycle: Int
-    let firstEventPresentationDelay: TimeInterval?
-
-    static func next(
-        currentBeat: Int,
-        currentSubdivision: Int,
-        currentCycle: Int,
-        previousPlan: MetronomePlaybackPlan,
-        nextPlan: MetronomePlaybackPlan,
-        elapsedSinceLastPulse: TimeInterval?
-    ) -> BeatPlaybackContinuation {
-        guard let elapsedSinceLastPulse else {
-            return BeatPlaybackContinuation(
-                initialEventIndex: 0,
-                initialCycle: 0,
-                firstEventPresentationDelay: nil
-            )
-        }
-
-        let eventCount = max(1, previousPlan.eventsPerMeasure)
-        let rawCurrentIndex = currentBeat * previousPlan.pulsesPerBeat
-            + currentSubdivision
-        let currentIndex = min(eventCount - 1, max(0, rawCurrentIndex))
-        let nextIndex = currentIndex + 1
-        let wrapsMeasure = nextIndex >= eventCount
-        let delay = max(
-            0,
-            nextPlan.eventInterval - max(0, elapsedSinceLastPulse)
-        )
-
-        return BeatPlaybackContinuation(
-            initialEventIndex: wrapsMeasure ? 0 : nextIndex,
-            initialCycle: max(0, currentCycle) + (wrapsMeasure ? 1 : 0),
-            firstEventPresentationDelay: delay
-        )
-    }
+struct BeatPlaybackPulse: Equatable, Sendable {
+    let beat: Int
+    let subdivision: Int
+    let cycle: Int
+    let sequence: UInt64
+    let kind: BeatPulseKind
+    let eventInterval: TimeInterval
+    let presentedAt: Date
 }
 
 @MainActor
@@ -55,11 +22,12 @@ final class MetronomeEngine: ObservableObject {
     @Published private(set) var currentBeat = 0
     @Published private(set) var currentSubdivision = 0
     @Published private(set) var currentCycle = 0
-    @Published private(set) var lastPulseDate = Date.distantPast
+    @Published private(set) var lastPulse: BeatPlaybackPulse?
     @Published var errorMessage: String?
 
     private var scheduler = BeatAudioScheduler()
     private var playbackToken = UUID()
+    private var lastAcceptedPulseSequence: UInt64?
     private var cancellables: Set<AnyCancellable> = []
     private var groupingPreferences: [Int: String] = [:]
 
@@ -107,16 +75,15 @@ final class MetronomeEngine: ObservableObject {
         updated.bpm = bpm
         let normalized = updated.normalized
         guard normalized != preset else { return }
-        let previousPlan = playbackPlan
         preset = normalized
         if isPlaying, reschedule {
-            continuePlayback(from: previousPlan)
+            reviseScheduledPlayback()
         }
     }
 
     func commitTempoChange() {
         if isPlaying {
-            continuePlayback(from: playbackPlan)
+            reviseScheduledPlayback()
         }
     }
 
@@ -221,26 +188,34 @@ final class MetronomeEngine: ObservableObject {
 
     func stop() {
         playbackToken = UUID()
+        lastAcceptedPulseSequence = nil
         scheduler.stop()
         isPlaying = false
         currentBeat = 0
         currentSubdivision = 0
         currentCycle = 0
-        lastPulseDate = .distantPast
+        lastPulse = nil
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
     private func restartPlayback() {
         playbackToken = UUID()
+        lastAcceptedPulseSequence = nil
         scheduler.stop()
         currentBeat = 0
         currentSubdivision = 0
         currentCycle = 0
-        lastPulseDate = .distantPast
+        lastPulse = nil
         do {
+            try configureAudioSession()
             try beginScheduledPlayback()
         } catch {
+            scheduler.stop()
             isPlaying = false
+            try? AVAudioSession.sharedInstance().setActive(
+                false,
+                options: .notifyOthersOnDeactivation
+            )
             errorMessage = "无法更新节拍：\(error.localizedDescription)"
         }
     }
@@ -265,65 +240,42 @@ final class MetronomeEngine: ObservableObject {
         let accentsChanged = preset.strongBeatIndices != previousPreset.strongBeatIndices
             || preset.secondaryAccentIndices != previousPreset.secondaryAccentIndices
         if timingChanged || accentsChanged {
-            continuePlayback(from: previousPlan)
+            reviseScheduledPlayback()
         }
     }
 
-    /// Cancels all look-ahead audio and visual callbacks, then makes the next
-    /// logical event the first event of a new scheduler anchor. The published
-    /// beat, subdivision, cycle, and last pulse remain intact while the new
-    /// interval is applied relative to the most recently heard pulse.
-    private func continuePlayback(from previousPlan: MetronomePlaybackPlan) {
-        let hasPresentedPulse = lastPulseDate != .distantPast
-        let elapsed = hasPresentedPulse
-            ? max(0, Date.now.timeIntervalSince(lastPulseDate))
-            : nil
-        let continuation = BeatPlaybackContinuation.next(
-            currentBeat: currentBeat,
-            currentSubdivision: currentSubdivision,
-            currentCycle: currentCycle,
-            previousPlan: previousPlan,
-            nextPlan: playbackPlan,
-            elapsedSinceLastPulse: elapsed
-        )
-
-        playbackToken = UUID()
-        do {
-            playbackToken = try scheduler.start(
-                preset: preset,
-                plan: playbackPlan,
-                initialEventIndex: continuation.initialEventIndex,
-                initialCycle: continuation.initialCycle,
-                firstEventPresentationDelay: continuation.firstEventPresentationDelay
-            ) { [weak self] token, beat, subdivision, cycle in
-                Task { @MainActor [weak self] in
-                    guard let self, self.isPlaying, self.playbackToken == token else { return }
-                    self.currentBeat = beat
-                    self.currentSubdivision = subdivision
-                    self.currentCycle = cycle
-                    self.lastPulseDate = .now
-                }
-            }
-            errorMessage = nil
-        } catch {
-            isPlaying = false
-            scheduler.stop()
-            errorMessage = "无法更新节拍：\(error.localizedDescription)"
+    /// Keeps the running audio graph and musical cursor intact. Already queued
+    /// clicks finish unchanged; the latest settings take effect at the first
+    /// event that has not yet entered the audio queue.
+    private func reviseScheduledPlayback() {
+        guard scheduler.reviseFutureSchedule(
+            preset: preset,
+            plan: playbackPlan
+        ) else {
+            // This is a recovery path for an inconsistent engine state, not the
+            // normal tempo-change path.
+            restartPlayback()
+            return
         }
+        errorMessage = nil
     }
 
     private func beginScheduledPlayback() throws {
+        lastAcceptedPulseSequence = nil
         playbackToken = try scheduler.start(
             preset: preset,
             plan: playbackPlan
-        ) { [weak self] token, beat, subdivision, cycle in
-            Task { @MainActor [weak self] in
-                guard let self, self.isPlaying, self.playbackToken == token else { return }
-                self.currentBeat = beat
-                self.currentSubdivision = subdivision
-                self.currentCycle = cycle
-                self.lastPulseDate = .now
+        ) { [weak self] token, pulse in
+            guard let self, self.isPlaying, self.playbackToken == token else { return }
+            if let lastSequence = self.lastAcceptedPulseSequence,
+               pulse.sequence <= lastSequence {
+                return
             }
+            self.lastAcceptedPulseSequence = pulse.sequence
+            self.currentBeat = pulse.beat
+            self.currentSubdivision = pulse.subdivision
+            self.currentCycle = pulse.cycle
+            self.lastPulse = pulse
         }
     }
 
@@ -373,13 +325,14 @@ final class MetronomeEngine: ObservableObject {
                 Task { @MainActor [weak self] in
                     guard let self else { return }
                     self.playbackToken = UUID()
+                    self.lastAcceptedPulseSequence = nil
                     self.scheduler.stop()
                     self.scheduler = BeatAudioScheduler()
                     self.isPlaying = false
                     self.currentBeat = 0
                     self.currentSubdivision = 0
                     self.currentCycle = 0
-                    self.lastPulseDate = .distantPast
+                    self.lastPulse = nil
                     self.errorMessage = "音频服务已重置，请重新点击播放。"
                 }
             }
@@ -397,14 +350,17 @@ private final class BeatAudioScheduler: @unchecked Sendable {
 
     private struct PlaybackSession {
         let token: UUID
-        let preset: MetronomePreset
-        let plan: MetronomePlaybackPlan
+        var preset: MetronomePreset
+        var plan: MetronomePlaybackPlan
         let startHostTime: UInt64
         let presentationLatency: TimeInterval
-        let onTick: @Sendable (UUID, Int, Int, Int) -> Void
-        var nextExactFrame: Double
-        var eventIndex: Int
-        var cycle: Int
+        let onTick: @MainActor @Sendable (UUID, BeatPlaybackPulse) -> Void
+        var frontier: BeatScheduleFrontier
+    }
+
+    private struct PendingRevision {
+        let preset: MetronomePreset
+        let plan: MetronomePlaybackPlan
     }
 
     private let audioEngine = AVAudioEngine()
@@ -415,6 +371,7 @@ private final class BeatAudioScheduler: @unchecked Sendable {
     private var clickBuffers: [ClickKind: AVAudioPCMBuffer] = [:]
     private var schedulingTimer: DispatchSourceTimer?
     private var playbackSession: PlaybackSession?
+    private var pendingRevision: PendingRevision?
 
     init() {
         prepareAudioGraph()
@@ -423,19 +380,8 @@ private final class BeatAudioScheduler: @unchecked Sendable {
     func start(
         preset: MetronomePreset,
         plan: MetronomePlaybackPlan,
-        initialEventIndex: Int = 0,
-        initialCycle: Int = 0,
-        firstEventPresentationDelay: TimeInterval? = nil,
-        onTick: @escaping @Sendable (UUID, Int, Int, Int) -> Void
+        onTick: @escaping @MainActor @Sendable (UUID, BeatPlaybackPulse) -> Void
     ) throws -> UUID {
-        // Capture the requested audible deadline before tearing down the old
-        // graph. This keeps queue-reset time from being added to the first
-        // continued interval on a busy device.
-        let requestedPresentationHostTime = firstEventPresentationDelay.map {
-            mach_absolute_time()
-                + AVAudioTime.hostTime(forSeconds: max(0, $0))
-        }
-
         return try schedulingQueue.sync {
             stopLocked()
             if !audioEngine.isRunning {
@@ -450,34 +396,8 @@ private final class BeatAudioScheduler: @unchecked Sendable {
 
             let token = UUID()
             let presentationLatency = audioEngine.outputNode.presentationLatency
-            let renderLead: TimeInterval
-            if let requestedPresentationHostTime {
-                // Player-node scheduling is expressed at render time, while
-                // the deadline is expressed at the user's audible/visual
-                // presentation time. Subtract graph-reset time and output
-                // latency, while retaining a small safe render lead.
-                let nowHostTime = mach_absolute_time()
-                let remainingPresentationDelay: TimeInterval
-                if requestedPresentationHostTime > nowHostTime {
-                    remainingPresentationDelay = AVAudioTime.seconds(
-                        forHostTime: requestedPresentationHostTime - nowHostTime
-                    )
-                } else {
-                    remainingPresentationDelay = 0
-                }
-                renderLead = max(
-                    0.012,
-                    remainingPresentationDelay - presentationLatency
-                )
-            } else {
-                renderLead = 0.035
-            }
             let startHostTime = mach_absolute_time()
-                + AVAudioTime.hostTime(forSeconds: renderLead)
-            let safeEventIndex = min(
-                max(0, initialEventIndex),
-                max(0, plan.eventsPerMeasure - 1)
-            )
+                + AVAudioTime.hostTime(forSeconds: 0.035)
             playbackSession = PlaybackSession(
                 token: token,
                 preset: preset.normalized,
@@ -485,9 +405,7 @@ private final class BeatAudioScheduler: @unchecked Sendable {
                 startHostTime: startHostTime,
                 presentationLatency: presentationLatency,
                 onTick: onTick,
-                nextExactFrame: 0,
-                eventIndex: safeEventIndex,
-                cycle: max(0, initialCycle)
+                frontier: BeatScheduleFrontier()
             )
 
             scheduleAheadLocked()
@@ -513,11 +431,31 @@ private final class BeatAudioScheduler: @unchecked Sendable {
         }
     }
 
+    /// Coalesces rapid UI commits on the scheduler queue. No queued audio is
+    /// revoked, so the graph never pauses and the musical address cannot jump.
+    func reviseFutureSchedule(
+        preset: MetronomePreset,
+        plan: MetronomePlaybackPlan
+    ) -> Bool {
+        schedulingQueue.sync {
+            guard let session = playbackSession,
+                  session.plan.eventsPerMeasure == plan.eventsPerMeasure,
+                  session.plan.pulsesPerBeat == plan.pulsesPerBeat
+            else { return false }
+            pendingRevision = PendingRevision(
+                preset: preset.normalized,
+                plan: plan
+            )
+            return true
+        }
+    }
+
     private func stopLocked() {
         schedulingTimer?.setEventHandler {}
         schedulingTimer?.cancel()
         schedulingTimer = nil
         playbackSession = nil
+        pendingRevision = nil
         for playerNode in playerNodes.values {
             playerNode.stop()
             playerNode.reset()
@@ -528,6 +466,7 @@ private final class BeatAudioScheduler: @unchecked Sendable {
     }
 
     private func scheduleAheadLocked() {
+        applyPendingRevisionLocked()
         guard var session = playbackSession else { return }
         let nowHostTime = mach_absolute_time()
         let elapsedSeconds: Double
@@ -536,15 +475,27 @@ private final class BeatAudioScheduler: @unchecked Sendable {
         } else {
             elapsedSeconds = -AVAudioTime.seconds(forHostTime: session.startHostTime - nowHostTime)
         }
+        if elapsedSeconds >= 0 {
+            session.frontier.ensureNextEventIsNoEarlier(
+                than: (elapsedSeconds + 0.012) * sampleRate
+            )
+        }
         let horizonFrame = max(0, elapsedSeconds + lookAheadSeconds) * sampleRate
-        let exactInterval = sampleRate * session.plan.eventInterval
-        let eventCount = session.plan.eventsPerMeasure
-
-        while session.nextExactFrame <= horizonFrame {
-            let scheduledFrame = AVAudioFramePosition(session.nextExactFrame.rounded())
-            let beat = session.eventIndex / session.plan.pulsesPerBeat
-            let subdivision = session.eventIndex % session.plan.pulsesPerBeat
+        while session.frontier.nextExactFrame <= horizonFrame {
+            let event = session.frontier.takeNext(
+                plan: session.plan,
+                sampleRate: sampleRate
+            )
+            let scheduledFrame = AVAudioFramePosition(event.exactFrame.rounded())
+            let beat = event.beat
+            let subdivision = event.subdivision
             let kind = clickKind(beat: beat, subdivision: subdivision, preset: session.preset)
+            let pulseKind = BeatPulseVisualModel.kind(
+                beat: beat,
+                subdivision: subdivision,
+                strongBeatIndices: session.preset.strongBeatIndices,
+                secondaryAccentIndices: session.preset.secondaryAccentIndices
+            )
 
             if let buffer = clickBuffers[kind], let playerNode = playerNodes[kind] {
                 let audioTime = AVAudioTime(sampleTime: scheduledFrame, atRate: sampleRate)
@@ -555,20 +506,44 @@ private final class BeatAudioScheduler: @unchecked Sendable {
                 token: session.token,
                 beat: beat,
                 subdivision: subdivision,
-                cycle: session.cycle,
-                eventFrame: session.nextExactFrame,
+                cycle: event.cycle,
+                sequence: event.sequence,
+                kind: pulseKind,
+                eventInterval: event.eventInterval,
+                eventFrame: event.exactFrame,
                 startHostTime: session.startHostTime,
                 presentationLatency: session.presentationLatency,
                 callback: session.onTick
             )
-
-            session.nextExactFrame += exactInterval
-            session.eventIndex += 1
-            if session.eventIndex == eventCount {
-                session.eventIndex = 0
-                session.cycle += 1
-            }
         }
+        playbackSession = session
+    }
+
+    private func applyPendingRevisionLocked() {
+        guard let revision = pendingRevision,
+              var session = playbackSession
+        else { return }
+        pendingRevision = nil
+
+        if revision.plan.eventInterval != session.plan.eventInterval {
+            let nowHostTime = mach_absolute_time()
+            let elapsed: TimeInterval
+            if nowHostTime >= session.startHostTime {
+                elapsed = AVAudioTime.seconds(
+                    forHostTime: nowHostTime - session.startHostTime
+                )
+            } else {
+                elapsed = 0
+            }
+            let minimumNextFrame = (elapsed + 0.012) * sampleRate
+            session.frontier.reviseFutureInterval(
+                to: revision.plan.eventInterval,
+                sampleRate: sampleRate,
+                minimumNextExactFrame: minimumNextFrame
+            )
+        }
+        session.preset = revision.preset
+        session.plan = revision.plan
         playbackSession = session
     }
 
@@ -577,10 +552,13 @@ private final class BeatAudioScheduler: @unchecked Sendable {
         beat: Int,
         subdivision: Int,
         cycle: Int,
+        sequence: UInt64,
+        kind: BeatPulseKind,
+        eventInterval: TimeInterval,
         eventFrame: Double,
         startHostTime: UInt64,
         presentationLatency: TimeInterval,
-        callback: @escaping @Sendable (UUID, Int, Int, Int) -> Void
+        callback: @escaping @MainActor @Sendable (UUID, BeatPlaybackPulse) -> Void
     ) {
         let eventOffset = AVAudioTime.hostTime(forSeconds: eventFrame / sampleRate)
         let eventHostTime = startHostTime + eventOffset
@@ -589,9 +567,26 @@ private final class BeatAudioScheduler: @unchecked Sendable {
             ? AVAudioTime.seconds(forHostTime: eventHostTime - nowHostTime)
             : 0
         let delay = renderDelay + presentationLatency
+        // Freeze the intended audible presentation time. If the main queue is
+        // briefly busy, the visual envelope arrives already aged instead of
+        // flashing late and drifting away from the click the user heard.
+        let intendedPresentationDate = Date.now.addingTimeInterval(delay)
 
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-            callback(token, beat, subdivision, cycle)
+            MainActor.assumeIsolated {
+                callback(
+                    token,
+                    BeatPlaybackPulse(
+                        beat: beat,
+                        subdivision: subdivision,
+                        cycle: cycle,
+                        sequence: sequence,
+                        kind: kind,
+                        eventInterval: eventInterval,
+                        presentedAt: intendedPresentationDate
+                    )
+                )
+            }
         }
     }
 

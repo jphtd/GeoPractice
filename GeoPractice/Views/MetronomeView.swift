@@ -183,8 +183,8 @@ struct MetronomeView: View {
             visualLifecycle.reconfigure(beats: beats)
             visualPulse = nil
         }
-        .onChange(of: engine.lastPulseDate) { _, pulseDate in
-            recordVisualTick(pulseDate: pulseDate)
+        .onChange(of: engine.lastPulse) { _, pulse in
+            recordVisualTick(pulse: pulse)
         }
         .onChange(of: engine.isPlaying) { wasPlaying, isPlaying in
             guard visualFinish == nil else { return }
@@ -1401,25 +1401,20 @@ struct MetronomeView: View {
         }
     }
 
-    private func recordVisualTick(pulseDate: Date) {
-        guard visualFinish == nil, pulseDate != .distantPast else { return }
+    private func recordVisualTick(pulse: BeatPlaybackPulse?) {
+        guard visualFinish == nil, let pulse else { return }
         let snapshot = BeatVisualPulseSnapshot(
-            beat: engine.currentBeat,
-            subdivision: engine.currentSubdivision,
-            pulseDate: pulseDate,
-            kind: BeatPulseVisualModel.kind(
-                beat: engine.currentBeat,
-                subdivision: engine.currentSubdivision,
-                strongBeatIndices: engine.preset.strongBeatIndices,
-                secondaryAccentIndices: engine.preset.secondaryAccentIndices
-            ),
-            eventInterval: engine.playbackPlan.eventInterval
+            beat: pulse.beat,
+            subdivision: pulse.subdivision,
+            pulseDate: pulse.presentedAt,
+            kind: pulse.kind,
+            eventInterval: pulse.eventInterval
         )
         visualPulse = snapshot
         visualLifecycle.record(
             beat: snapshot.beat,
             subdivision: snapshot.subdivision,
-            cycle: engine.currentCycle,
+            cycle: pulse.cycle,
             beats: engine.preset.beats
         )
     }

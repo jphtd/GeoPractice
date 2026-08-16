@@ -284,139 +284,219 @@ final class MetronomePresetTests: XCTestCase {
         )
     }
 
-    func testTempoContinuationKeepsNextSubdivisionAndMeasurePosition() {
+    func testScheduleFrontierChangesTempoWithoutChangingNextAddress() {
         var oldPreset = MetronomePreset.standard
         oldPreset.bpm = 60
         oldPreset.beats = 4
         oldPreset.subdivision = 2
-        var nextPreset = oldPreset
-        nextPreset.bpm = 70
+        var newPreset = oldPreset
+        newPreset.bpm = 120
+        let oldPlan = oldPreset.playbackPlan()
+        let newPlan = newPreset.playbackPlan()
+        var frontier = BeatScheduleFrontier()
 
-        let continuation = BeatPlaybackContinuation.next(
-            currentBeat: 2,
-            currentSubdivision: 0,
-            currentCycle: 4,
-            previousPlan: oldPreset.playbackPlan(),
-            nextPlan: nextPreset.playbackPlan(),
-            elapsedSinceLastPulse: 0.1
+        _ = frontier.takeNext(plan: oldPlan, sampleRate: 1_000)
+        _ = frontier.takeNext(plan: oldPlan, sampleRate: 1_000)
+        let lastOldEvent = frontier.takeNext(plan: oldPlan, sampleRate: 1_000)
+        frontier.reviseFutureInterval(
+            to: newPlan.eventInterval,
+            sampleRate: 1_000,
+            minimumNextExactFrame: 0
         )
+        let firstNewEvent = frontier.takeNext(plan: newPlan, sampleRate: 1_000)
+        let secondNewEvent = frontier.takeNext(plan: newPlan, sampleRate: 1_000)
 
-        XCTAssertEqual(continuation.initialEventIndex, 5)
-        XCTAssertEqual(continuation.initialCycle, 4)
+        XCTAssertEqual(lastOldEvent.eventIndex, 2)
+        XCTAssertEqual(firstNewEvent.eventIndex, 3)
+        XCTAssertEqual(firstNewEvent.beat, 1)
+        XCTAssertEqual(firstNewEvent.subdivision, 1)
+        XCTAssertEqual(firstNewEvent.cycle, 0)
         XCTAssertEqual(
-            continuation.firstEventPresentationDelay ?? -1,
-            nextPreset.eventInterval - 0.1,
+            firstNewEvent.exactFrame - lastOldEvent.exactFrame,
+            newPlan.eventInterval * 1_000,
             accuracy: 0.000_001
         )
+        XCTAssertEqual(
+            secondNewEvent.exactFrame - firstNewEvent.exactFrame,
+            newPlan.eventInterval * 1_000,
+            accuracy: 0.000_001
+        )
+        XCTAssertEqual(firstNewEvent.eventInterval, newPlan.eventInterval)
     }
 
-    func testTempoContinuationWrapsOnlyAfterLastSubdivision() {
+    func testScheduleFrontierWrapsMeasureExactlyOnceAfterTempoChange() {
         var preset = MetronomePreset.standard
         preset.beats = 4
         preset.subdivision = 2
         let plan = preset.playbackPlan()
+        var frontier = BeatScheduleFrontier(eventIndex: 7, cycle: 9)
 
-        let continuation = BeatPlaybackContinuation.next(
-            currentBeat: 3,
-            currentSubdivision: 1,
-            currentCycle: 9,
-            previousPlan: plan,
-            nextPlan: plan,
-            elapsedSinceLastPulse: 0.02
+        let finalEvent = frontier.takeNext(plan: plan, sampleRate: 1_000)
+        frontier.reviseFutureInterval(
+            to: plan.eventInterval / 2,
+            sampleRate: 1_000,
+            minimumNextExactFrame: 0
+        )
+        var fasterPreset = preset
+        fasterPreset.bpm *= 2
+        let wrappedEvent = frontier.takeNext(
+            plan: fasterPreset.playbackPlan(),
+            sampleRate: 1_000
         )
 
-        XCTAssertEqual(continuation.initialEventIndex, 0)
-        XCTAssertEqual(continuation.initialCycle, 10)
+        XCTAssertEqual(finalEvent.eventIndex, 7)
+        XCTAssertEqual(finalEvent.cycle, 9)
+        XCTAssertEqual(wrappedEvent.eventIndex, 0)
+        XCTAssertEqual(wrappedEvent.beat, 0)
+        XCTAssertEqual(wrappedEvent.subdivision, 0)
+        XCTAssertEqual(wrappedEvent.cycle, 10)
     }
 
-    func testTempoContinuationBeforeFirstPulseStillStartsAtDownbeat() {
+    func testScheduleFrontierBeforeFirstEventKeepsInitialDownbeat() {
         var preset = MetronomePreset.standard
         preset.beats = 5
         preset.subdivision = 4
         let plan = preset.playbackPlan()
+        var frontier = BeatScheduleFrontier()
 
-        let continuation = BeatPlaybackContinuation.next(
-            currentBeat: 0,
-            currentSubdivision: 0,
-            currentCycle: 0,
-            previousPlan: plan,
-            nextPlan: plan,
-            elapsedSinceLastPulse: nil
+        frontier.reviseFutureInterval(
+            to: plan.eventInterval / 2,
+            sampleRate: 1_000,
+            minimumNextExactFrame: 900
         )
+        let firstEvent = frontier.takeNext(plan: plan, sampleRate: 1_000)
 
-        XCTAssertEqual(continuation.initialEventIndex, 0)
-        XCTAssertEqual(continuation.initialCycle, 0)
-        XCTAssertNil(continuation.firstEventPresentationDelay)
+        XCTAssertEqual(firstEvent.exactFrame, 0)
+        XCTAssertEqual(firstEvent.eventIndex, 0)
+        XCTAssertEqual(firstEvent.beat, 0)
+        XCTAssertEqual(firstEvent.subdivision, 0)
+        XCTAssertEqual(firstEvent.cycle, 0)
     }
 
-    func testTempoContinuationClampsNegativeElapsedTime() {
+    func testScheduleFrontierOverdueSuccessorIsEmittedOnceAtSafeBoundary() {
         var preset = MetronomePreset.standard
-        preset.bpm = 120
-        preset.subdivision = 1
-        let plan = preset.playbackPlan()
+        preset.bpm = 30
+        let slowPlan = preset.playbackPlan()
+        var frontier = BeatScheduleFrontier()
+        let firstEvent = frontier.takeNext(plan: slowPlan, sampleRate: 1_000)
 
-        let continuation = BeatPlaybackContinuation.next(
-            currentBeat: 1,
-            currentSubdivision: 0,
-            currentCycle: 2,
-            previousPlan: plan,
-            nextPlan: plan,
-            elapsedSinceLastPulse: -10
+        preset.bpm = 240
+        let fastPlan = preset.playbackPlan()
+        frontier.reviseFutureInterval(
+            to: fastPlan.eventInterval,
+            sampleRate: 1_000,
+            minimumNextExactFrame: 1_500
         )
+        let successor = frontier.takeNext(plan: fastPlan, sampleRate: 1_000)
+        let following = frontier.takeNext(plan: fastPlan, sampleRate: 1_000)
 
+        XCTAssertEqual(firstEvent.eventIndex, 0)
+        XCTAssertEqual(successor.eventIndex, 1)
+        XCTAssertEqual(successor.exactFrame, 1_500)
+        XCTAssertEqual(following.eventIndex, 2)
         XCTAssertEqual(
-            continuation.firstEventPresentationDelay ?? -1,
-            plan.eventInterval,
+            following.exactFrame - successor.exactFrame,
+            fastPlan.eventInterval * 1_000,
             accuracy: 0.000_001
         )
     }
 
-    func testTempoContinuationStartsImmediatelyWhenNewIntervalHasElapsed() {
-        var oldPreset = MetronomePreset.standard
-        oldPreset.bpm = 60
-        oldPreset.subdivision = 2
-        var nextPreset = oldPreset
-        nextPreset.bpm = 120
-
-        let continuation = BeatPlaybackContinuation.next(
-            currentBeat: 1,
-            currentSubdivision: 0,
-            currentCycle: 2,
-            previousPlan: oldPreset.playbackPlan(),
-            nextPlan: nextPreset.playbackPlan(),
-            elapsedSinceLastPulse: 0.4
-        )
-
-        XCTAssertEqual(continuation.initialEventIndex, 3)
-        XCTAssertEqual(continuation.initialCycle, 2)
-        XCTAssertEqual(continuation.firstEventPresentationDelay, 0)
-    }
-
-    func testRepeatedTempoContinuationDoesNotAdvanceCursorTwice() {
+    func testRapidTempoRevisionsUseLatestIntervalWithoutAdvancingCursor() {
         var preset = MetronomePreset.standard
+        preset.bpm = 60
         preset.beats = 4
         preset.subdivision = 2
-        preset.bpm = 60
-        let originalPlan = preset.playbackPlan()
+        let initialPlan = preset.playbackPlan()
+        var frontier = BeatScheduleFrontier(eventIndex: 3, cycle: 4)
+        let queuedEvent = frontier.takeNext(plan: initialPlan, sampleRate: 1_000)
 
-        let continuations = [70, 80, 65].map { bpm -> BeatPlaybackContinuation in
-            var next = preset
-            next.bpm = bpm
-            return BeatPlaybackContinuation.next(
-                currentBeat: 1,
-                currentSubdivision: 1,
-                currentCycle: 3,
-                previousPlan: originalPlan,
-                nextPlan: next.playbackPlan(),
-                elapsedSinceLastPulse: 0.12
+        for bpm in [70, 80, 65] {
+            preset.bpm = bpm
+            frontier.reviseFutureInterval(
+                to: preset.playbackPlan().eventInterval,
+                sampleRate: 1_000,
+                minimumNextExactFrame: 0
             )
         }
+        let finalPlan = preset.playbackPlan()
+        let successor = frontier.takeNext(plan: finalPlan, sampleRate: 1_000)
 
-        XCTAssertEqual(Set(continuations.map(\.initialEventIndex)), [4])
-        XCTAssertEqual(Set(continuations.map(\.initialCycle)), [3])
+        XCTAssertEqual(queuedEvent.eventIndex, 3)
+        XCTAssertEqual(successor.eventIndex, 4)
+        XCTAssertEqual(successor.cycle, 4)
         XCTAssertEqual(
-            continuations.last?.firstEventPresentationDelay ?? -1,
-            (60.0 / 65.0 / 2.0) - 0.12,
+            successor.exactFrame - queuedEvent.exactFrame,
+            finalPlan.eventInterval * 1_000,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testQueuedLookaheadTailAndFirstRetimedEventStayInOneOrderedSequence() {
+        var preset = MetronomePreset.standard
+        preset.bpm = 240
+        preset.beats = 4
+        preset.subdivision = 4
+        preset.referenceNote = .dottedHalf
+        let oldPlan = preset.playbackPlan()
+        var frontier = BeatScheduleFrontier()
+        let queuedEventCount = Int(floor(0.22 / oldPlan.eventInterval)) + 1
+        let queuedTail = (0..<queuedEventCount).map { _ in
+            frontier.takeNext(plan: oldPlan, sampleRate: 44_100)
+        }
+
+        preset.bpm = 60
+        let newPlan = preset.playbackPlan()
+        frontier.reviseFutureInterval(
+            to: newPlan.eventInterval,
+            sampleRate: 44_100,
+            minimumNextExactFrame: 0
+        )
+        let firstRetimedEvent = frontier.takeNext(
+            plan: newPlan,
+            sampleRate: 44_100
+        )
+
+        XCTAssertEqual(queuedEventCount, 11)
+        XCTAssertEqual(queuedTail.map(\.eventIndex), Array(0..<queuedEventCount))
+        XCTAssertTrue(queuedTail.allSatisfy { $0.eventInterval == oldPlan.eventInterval })
+        XCTAssertEqual(firstRetimedEvent.eventIndex, queuedEventCount)
+        XCTAssertEqual(firstRetimedEvent.cycle, 0)
+        XCTAssertEqual(firstRetimedEvent.eventInterval, newPlan.eventInterval)
+        XCTAssertEqual(
+            firstRetimedEvent.exactFrame - queuedTail[queuedEventCount - 1].exactFrame,
+            newPlan.eventInterval * 44_100,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testLateSchedulerDefersOneSuccessorWithoutSkippingOrBursting() {
+        var preset = MetronomePreset.standard
+        preset.bpm = 240
+        preset.subdivision = 4
+        let plan = preset.playbackPlan()
+        var frontier = BeatScheduleFrontier()
+        let firstEvent = frontier.takeNext(plan: plan, sampleRate: 44_100)
+
+        frontier.ensureNextEventIsNoEarlier(than: 0.5 * 44_100)
+        let deferredSuccessor = frontier.takeNext(
+            plan: plan,
+            sampleRate: 44_100
+        )
+        let followingEvent = frontier.takeNext(
+            plan: plan,
+            sampleRate: 44_100
+        )
+
+        XCTAssertEqual(firstEvent.eventIndex, 0)
+        XCTAssertEqual(firstEvent.sequence, 0)
+        XCTAssertEqual(deferredSuccessor.eventIndex, 1)
+        XCTAssertEqual(deferredSuccessor.sequence, 1)
+        XCTAssertEqual(deferredSuccessor.exactFrame, 0.5 * 44_100)
+        XCTAssertEqual(followingEvent.eventIndex, 2)
+        XCTAssertEqual(followingEvent.sequence, 2)
+        XCTAssertEqual(
+            followingEvent.exactFrame - deferredSuccessor.exactFrame,
+            plan.eventInterval * 44_100,
             accuracy: 0.000_001
         )
     }

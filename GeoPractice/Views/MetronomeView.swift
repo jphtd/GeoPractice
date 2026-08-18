@@ -1,5 +1,6 @@
 import SwiftData
 import SwiftUI
+import UIKit
 
 private enum MetronomePanel: String, Identifiable {
     case session
@@ -40,6 +41,33 @@ private struct BeatVisualFinishAnimation: Equatable {
     let visibleBeatIndices: [Int]
 }
 
+private struct PracticeRecordFeedback: Equatable {
+    let id: UUID
+    let message: String
+    let symbol: String
+}
+
+private struct PracticeRecordFeedbackView: View {
+    let feedback: PracticeRecordFeedback
+
+    var body: some View {
+        Label(feedback.message, systemImage: feedback.symbol)
+            .font(.system(size: 14, weight: .bold, design: .rounded))
+            .foregroundStyle(Color(white: 0.05))
+            .lineLimit(2)
+            .multilineTextAlignment(.center)
+            .padding(.horizontal, 18)
+            .frame(minHeight: 44)
+            .background(
+                Color(white: 0.96),
+                in: Capsule(style: .continuous)
+            )
+            .shadow(color: .black.opacity(0.28), radius: 12, y: 6)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(feedback.message)
+    }
+}
+
 struct MetronomeView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
@@ -68,7 +96,10 @@ struct MetronomeView: View {
     @State private var pendingHandSwitch: PracticeHand?
     @State private var reviewSummary: PracticeSessionSummary?
     @State private var persistenceError: String?
+    @State private var persistenceSuccess: String?
     @State private var isSavingSummary = false
+    @State private var saveOperationID: UUID?
+    @State private var recordFeedback: PracticeRecordFeedback?
     @State private var activePanel: MetronomePanel?
     @State private var visualLifecycle = BeatVisualLifecycle()
     @State private var visualPulse: BeatVisualPulseSnapshot?
@@ -133,6 +164,7 @@ struct MetronomeView: View {
                     summary: summary,
                     sourceEventName: linkedEvent?.name,
                     persistenceError: persistenceError,
+                    persistenceSuccess: persistenceSuccess,
                     isSaving: isSavingSummary,
                     onAppend: linkedEvent == nil ? nil : {
                         append(summary, to: linkedEvent!)
@@ -158,6 +190,18 @@ struct MetronomeView: View {
         } message: {
             Text(engine.errorMessage ?? "")
         }
+        .overlay(alignment: .top) {
+            if let recordFeedback {
+                PracticeRecordFeedbackView(feedback: recordFeedback)
+                    .id(recordFeedback.id)
+                    .padding(.top, 68)
+                    .padding(.horizontal, 20)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .allowsHitTesting(false)
+                    .zIndex(10)
+            }
+        }
+        .animation(.easeOut(duration: reduceMotion ? 0.01 : 0.2), value: recordFeedback)
         .onAppear {
 #if DEBUG || CUSTOMER_PREVIEW
             synchronizeExperienceSettings()
@@ -786,7 +830,7 @@ struct MetronomeView: View {
         let canEdit = session.phase == .running || session.phase == .paused
 
         return Button {
-            practiceSession.adjustCount(for: hand, by: 1)
+            recordCompletion(for: hand)
         } label: {
             VStack(spacing: 1) {
                 Text("+1")
@@ -854,6 +898,18 @@ struct MetronomeView: View {
                 }
             }
         }
+        .overlay(alignment: .top) {
+            if let recordFeedback {
+                PracticeRecordFeedbackView(feedback: recordFeedback)
+                    .id(recordFeedback.id)
+                    .padding(.top, 58)
+                    .padding(.horizontal, 20)
+                    .transition(.move(edge: .top).combined(with: .opacity))
+                    .allowsHitTesting(false)
+                    .zIndex(10)
+            }
+        }
+        .animation(.easeOut(duration: reduceMotion ? 0.01 : 0.2), value: recordFeedback)
         .preferredColorScheme(.dark)
 #if DEBUG || CUSTOMER_PREVIEW
         .presentationDetents(panel == .experiments ? [.large] : [.medium, .large])
@@ -1544,21 +1600,17 @@ struct MetronomeView: View {
                             .font(.system(size: 13, weight: .semibold))
                         Spacer()
                         Button {
-                            practiceSession.adjustCount(
-                                for: practiceSession.session.currentHand,
-                                by: -1
-                            )
+                            undoLastCompletion(for: practiceSession.session.currentHand)
                         } label: {
                             Image(systemName: "minus")
                                 .frame(width: 44, height: 44)
                         }
                         .buttonStyle(.bordered)
-                        .disabled(
-                            practiceSession.session.stats(
-                                for: practiceSession.session.currentHand,
-                                at: .now
-                            ).count == 0
-                        )
+                        .accessibilityLabel("撤销最近一次\(practiceSession.session.currentHand.title)记录")
+                        .disabled(practiceSession.session.stats(
+                            for: practiceSession.session.currentHand,
+                            at: .now
+                        ).count == 0)
 
                         Text("\(practiceSession.session.stats(for: practiceSession.session.currentHand, at: .now).count)")
                             .font(.system(size: 22, weight: .bold, design: .rounded))
@@ -1566,10 +1618,7 @@ struct MetronomeView: View {
                             .frame(minWidth: 44)
 
                         Button {
-                            practiceSession.adjustCount(
-                                for: practiceSession.session.currentHand,
-                                by: 1
-                            )
+                            recordCompletion(for: practiceSession.session.currentHand)
                         } label: {
                             Image(systemName: "plus")
                                 .frame(width: 44, height: 44)
@@ -1577,6 +1626,8 @@ struct MetronomeView: View {
                         .buttonStyle(.borderedProminent)
                         .tint(.white)
                         .foregroundStyle(.black)
+                        .accessibilityLabel("为当前\(practiceSession.session.currentHand.title)记录一次")
+                        .accessibilityHint("按当前节拍器速度保存完成记录")
                     }
 
                     TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -1645,6 +1696,49 @@ struct MetronomeView: View {
         pendingHandSwitch = nil
     }
 
+    private func recordCompletion(for hand: PracticeHand) {
+        guard practiceSession.session.phase == .running
+                || practiceSession.session.phase == .paused,
+              visualFinish == nil
+        else { return }
+
+        practiceSession.recordCompletion(for: hand, preset: engine.preset)
+        showRecordFeedback(
+            "已记录 · \(hand.title) +1",
+            symbol: "checkmark.circle.fill"
+        )
+    }
+
+    private func undoLastCompletion(for hand: PracticeHand) {
+        guard practiceSession.undoLatestCompletionOrLegacyCount(for: hand) else {
+            return
+        }
+        showRecordFeedback(
+            "已撤销 · \(hand.title) -1",
+            symbol: "arrow.uturn.backward.circle.fill"
+        )
+    }
+
+    private func showRecordFeedback(_ message: String, symbol: String) {
+        let feedback = PracticeRecordFeedback(
+            id: UUID(),
+            message: message,
+            symbol: symbol
+        )
+        withAnimation {
+            recordFeedback = feedback
+        }
+        UIAccessibility.post(notification: .announcement, argument: message)
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(1.15))
+            guard recordFeedback?.id == feedback.id else { return }
+            withAnimation {
+                recordFeedback = nil
+            }
+        }
+    }
+
     private func synchronizeVisualSession() {
         let startedAt = practiceSession.session.startedAt
         guard startedAt != visualSessionStartedAt
@@ -1698,6 +1792,9 @@ struct MetronomeView: View {
         guard visualFinish == nil else { return }
         let now = Date.now
         guard let summary = practiceSession.finish(at: now) else { return }
+        persistenceError = nil
+        persistenceSuccess = nil
+        saveOperationID = nil
 
         // A finish action is also available inside a settings sheet. Freeze the
         // exact practice instant immediately, then let the sheet leave before
@@ -1734,25 +1831,43 @@ struct MetronomeView: View {
 
     private func append(_ summary: PracticeSessionSummary, to event: PracticeEvent) {
         guard !isSavingSummary else { return }
+        let operationID = UUID()
+        saveOperationID = operationID
         isSavingSummary = true
-        event.append(summary: summary)
+        persistenceError = nil
+        persistenceSuccess = nil
         do {
-            try modelContext.save()
-            isSavingSummary = false
-            persistenceError = nil
-            reviewSummary = nil
-            practiceSession.reset()
-            leaveMetronome()
+            let result = try event.commit(summary: summary, in: modelContext)
+            let success = result.wasInserted
+                ? "已追加到“\(event.name)”"
+                : "本次练习已在“\(event.name)”记录中"
+            persistenceSuccess = success
+            UIAccessibility.post(notification: .announcement, argument: success)
+
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(reduceMotion ? 0.45 : 1.15))
+                guard saveOperationID == operationID else { return }
+                isSavingSummary = false
+                saveOperationID = nil
+                reviewSummary = nil
+                practiceSession.reset()
+                leaveMetronome()
+            }
         } catch {
-            modelContext.rollback()
             isSavingSummary = false
-            persistenceError = "无法追加练习记录：\(error.localizedDescription)"
+            saveOperationID = nil
+            persistenceSuccess = nil
+            let message = "无法追加练习记录：\(error.localizedDescription)"
+            persistenceError = message
+            UIAccessibility.post(notification: .announcement, argument: message)
         }
     }
 
     private func completeSessionWithoutSaving() {
         guard !isSavingSummary else { return }
         persistenceError = nil
+        persistenceSuccess = nil
+        saveOperationID = nil
         reviewSummary = nil
         practiceSession.reset()
         leaveMetronome()
@@ -1761,6 +1876,8 @@ struct MetronomeView: View {
     private func continueSession() {
         guard !isSavingSummary else { return }
         persistenceError = nil
+        persistenceSuccess = nil
+        saveOperationID = nil
         reviewSummary = nil
         pendingReviewSummary = nil
         visualFinish = nil
@@ -1775,6 +1892,7 @@ private struct PracticeSessionSummaryView: View {
     let summary: PracticeSessionSummary
     let sourceEventName: String?
     let persistenceError: String?
+    let persistenceSuccess: String?
     let isSaving: Bool
     let onAppend: (() -> Void)?
     let onDiscard: () -> Void
@@ -1803,19 +1921,30 @@ private struct PracticeSessionSummaryView: View {
                                 CardTitle(title: "练习汇总", subtitle: "SESSION SUMMARY")
                                 ForEach(PracticeHand.controlOrder) { hand in
                                     let stats = summary.stats(for: hand)
-                                    HStack {
-                                        Text(hand.title)
-                                            .font(.system(size: 14, weight: .semibold))
-                                        Spacer()
-                                        Text("\(stats.count) 次")
-                                            .fontWeight(.bold)
-                                            .monospacedDigit()
-                                        Text(practiceDurationString(milliseconds: stats.durationMilliseconds))
-                                            .monospacedDigit()
-                                            .frame(minWidth: 78, alignment: .trailing)
-                                            .foregroundStyle(GeoTheme.muted)
+                                    let speed = summary.speedSummary(for: hand)
+                                    VStack(alignment: .leading, spacing: 5) {
+                                        HStack {
+                                            Text(hand.title)
+                                                .font(.system(size: 14, weight: .semibold))
+                                            Spacer()
+                                            Text("\(stats.count) 次")
+                                                .fontWeight(.bold)
+                                                .monospacedDigit()
+                                            Text(practiceDurationString(milliseconds: stats.durationMilliseconds))
+                                                .monospacedDigit()
+                                                .frame(minWidth: 78, alignment: .trailing)
+                                                .foregroundStyle(GeoTheme.muted)
+                                        }
+                                        if let mostPracticed = speed.mostPracticed,
+                                           let maximumAttempt = speed.maximumAttempt {
+                                            Text("练习最多：\(mostPracticed.bpm)　最大尝试：\(maximumAttempt.bpm)")
+                                                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                                                .foregroundStyle(GeoTheme.muted)
+                                                .monospacedDigit()
+                                        }
                                     }
                                     .font(.system(size: 13))
+                                    .accessibilityElement(children: .combine)
                                 }
                                 Divider()
                                     .overlay(GeoTheme.line)
@@ -1874,6 +2003,19 @@ private struct PracticeSessionSummaryView: View {
                                 )
                         }
 
+                        if let persistenceSuccess {
+                            Label(persistenceSuccess, systemImage: "checkmark.circle.fill")
+                                .font(.system(size: 15, weight: .bold, design: .rounded))
+                                .foregroundStyle(Color(white: 0.04))
+                                .frame(maxWidth: .infinity, minHeight: 54, alignment: .leading)
+                                .padding(.horizontal, 16)
+                                .background(
+                                    Color(white: 0.94),
+                                    in: RoundedRectangle(cornerRadius: 13, style: .continuous)
+                                )
+                                .accessibilityElement(children: .combine)
+                        }
+
                         Button(action: onContinue) {
                             Label("返回继续练习", systemImage: "arrow.uturn.backward")
                                 .frame(maxWidth: .infinity, minHeight: 48)
@@ -1890,7 +2032,7 @@ private struct PracticeSessionSummaryView: View {
                         .disabled(isSaving)
 
                         if isSaving {
-                            ProgressView("正在保存…")
+                            ProgressView(persistenceSuccess == nil ? "正在保存…" : "保存成功，正在返回…")
                                 .font(.system(size: 12, weight: .semibold))
                         }
                     }

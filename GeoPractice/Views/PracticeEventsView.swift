@@ -4,10 +4,14 @@ import SwiftUI
 struct PracticeEventsView: View {
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \PracticeEvent.updatedAt, order: .reverse) private var events: [PracticeEvent]
+    @Query(sort: [
+        SortDescriptor(\PracticeAttempt.finishedAt, order: .reverse),
+        SortDescriptor(\PracticeAttempt.createdAt, order: .reverse)
+    ]) private var attempts: [PracticeAttempt]
 
     @ObservedObject var metronome: MetronomeEngine
     let protectedEventID: UUID?
-    let openMetronome: (PracticeEvent) -> Void
+    let openMetronome: (PracticeEvent, MetronomePreset) -> Void
 
     @State private var showsNewEvent = false
     @State private var pendingDelete: PracticeEvent?
@@ -79,6 +83,7 @@ struct PracticeEventsView: View {
                 if let event = events.first(where: { $0.id == id }) {
                     PracticeEventDetailView(
                         event: event,
+                        attempts: attempts.filter { $0.eventID == event.id },
                         metronome: metronome,
                         openMetronome: openMetronome
                     )
@@ -100,8 +105,12 @@ struct PracticeEventsView: View {
             }
             Button("删除", role: .destructive) {
                 if let event = pendingDelete {
-                    modelContext.delete(event)
                     do {
+                        try PracticeAttempt.deleteHistory(
+                            for: event.id,
+                            in: modelContext
+                        )
+                        modelContext.delete(event)
                         try modelContext.save()
                     } catch {
                         modelContext.rollback()
@@ -111,7 +120,7 @@ struct PracticeEventsView: View {
                 pendingDelete = nil
             }
         } message: {
-            Text("此操作会删除名称、累计次数、练习时长和保存的节拍器预设。")
+            Text("此操作会删除名称、累计次数、练习时长、速度历史和保存的节拍器预设。")
         }
         .alert("无法删除", isPresented: Binding(
             get: { deleteError != nil },
@@ -171,8 +180,9 @@ private struct PracticeEventDetailView: View {
     @Environment(\.horizontalSizeClass) private var horizontalSizeClass
 
     let event: PracticeEvent
+    let attempts: [PracticeAttempt]
     @ObservedObject var metronome: MetronomeEngine
-    let openMetronome: (PracticeEvent) -> Void
+    let openMetronome: (PracticeEvent, MetronomePreset) -> Void
 
     @State private var showsEditor = false
 
@@ -186,10 +196,14 @@ private struct PracticeEventDetailView: View {
                     if horizontalSizeClass == .regular {
                         HStack(alignment: .top, spacing: 18) {
                             statisticsCard
-                            presetCard
+                            VStack(spacing: 18) {
+                                speedHistoryCard
+                                presetCard
+                            }
                         }
                     } else {
                         statisticsCard
+                        speedHistoryCard
                         presetCard
                     }
                 }
@@ -268,6 +282,139 @@ private struct PracticeEventDetailView: View {
         .frame(maxWidth: .infinity)
     }
 
+    private var speedHistoryCard: some View {
+        GeoCard {
+            VStack(alignment: .leading, spacing: 16) {
+                CardTitle(title: "速度记录", subtitle: "TEMPO HISTORY")
+
+                ForEach(PracticeHand.controlOrder) { hand in
+                    speedSummaryRow(for: hand)
+                    if hand != PracticeHand.controlOrder.last {
+                        Divider()
+                            .overlay(GeoTheme.line)
+                    }
+                }
+
+                if attempts.isEmpty {
+                    Text("完成练习并追加后，这里会保留每次的速度记录。")
+                        .font(.system(size: 11))
+                        .foregroundStyle(GeoTheme.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                } else {
+                    DisclosureGroup {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(attempts) { attempt in
+                                attemptHistoryRow(attempt)
+                            }
+                        }
+                        .padding(.top, 10)
+                    } label: {
+                        Text("查看全部 \(attempts.count) 次练习记录")
+                            .font(.system(size: 12, weight: .semibold))
+                    }
+                    .tint(.white)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private func speedSummaryRow(for hand: PracticeHand) -> some View {
+        let latest = latestAttempt(for: hand)
+
+        VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .firstTextBaseline) {
+                Text(hand.title)
+                    .font(.system(size: 14, weight: .bold))
+                Spacer(minLength: 8)
+                if let latest {
+                    Text(latest.finishedAt.formatted(date: .abbreviated, time: .shortened))
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(GeoTheme.muted)
+                        .lineLimit(1)
+                } else {
+                    Text("暂无记录")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(GeoTheme.muted)
+                }
+            }
+
+            if let latest {
+                let speed = latest.speedSummary(for: hand)
+                HStack(spacing: 8) {
+                    speedValue(
+                        title: "练习最多",
+                        bpm: speed.mostPracticed?.bpm
+                    )
+                    speedValue(
+                        title: "最大尝试",
+                        bpm: speed.maximumAttempt?.bpm
+                    )
+                }
+
+                if let preset = latest.mostPracticedPreset(for: hand) {
+                    Button {
+                        openMetronome(event, preset)
+                    } label: {
+                        Label("继承\(hand.title)上次设置并开始", systemImage: "arrow.down.circle.fill")
+                            .font(.system(size: 12, weight: .bold))
+                            .frame(maxWidth: .infinity, minHeight: 44)
+                    }
+                    .buttonStyle(.bordered)
+                    .accessibilityHint("继承基准音符、速度、训练音符、拍数、分组和方向")
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func speedValue(title: String, bpm: Int?) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title)
+                .font(.system(size: 9, weight: .semibold))
+                .foregroundStyle(GeoTheme.muted)
+            Text(bpm.map(String.init) ?? "—")
+                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .monospacedDigit()
+        }
+        .frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
+        .padding(.horizontal, 11)
+        .background(
+            Color.white.opacity(0.045),
+            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+        )
+        .accessibilityElement(children: .combine)
+    }
+
+    private func attemptHistoryRow(_ attempt: PracticeAttempt) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(attempt.finishedAt.formatted(date: .abbreviated, time: .shortened))
+                .font(.system(size: 11, weight: .bold))
+            ForEach(PracticeHand.controlOrder) { hand in
+                if attempt.stats(for: hand).count > 0 {
+                    let speed = attempt.speedSummary(for: hand)
+                    Text("\(hand.title)　练习最多：\(speed.mostPracticed?.bpm.description ?? "—")　最大尝试：\(speed.maximumAttempt?.bpm.description ?? "—")")
+                        .font(.system(size: 11, weight: .semibold, design: .rounded))
+                        .foregroundStyle(GeoTheme.muted)
+                        .monospacedDigit()
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(11)
+        .background(
+            Color.white.opacity(0.035),
+            in: RoundedRectangle(cornerRadius: 11, style: .continuous)
+        )
+        .accessibilityElement(children: .combine)
+    }
+
+    private func latestAttempt(for hand: PracticeHand) -> PracticeAttempt? {
+        attempts.first { $0.speedSummary(for: hand).mostPracticed != nil }
+    }
+
     private var presetCard: some View {
         GeoCard {
             VStack(alignment: .leading, spacing: 16) {
@@ -284,7 +431,7 @@ private struct PracticeEventDetailView: View {
                 .foregroundStyle(GeoTheme.text)
 
                 Button {
-                    openMetronome(event)
+                    openMetronome(event, event.preset)
                 } label: {
                     Label("载入并开始练习", systemImage: "play.fill")
                         .font(.system(size: 14, weight: .bold))

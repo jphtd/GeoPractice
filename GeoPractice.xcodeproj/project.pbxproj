@@ -24,6 +24,7 @@
 		A0000000000000000000000F /* LiquidControlComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000011 /* LiquidControlComponents.swift */; };
 		A00000000000000000000010 /* BravuraText.otf in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000012 /* BravuraText.otf */; };
 		A00000000000000000000011 /* PracticePreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000013 /* PracticePreferences.swift */; };
+		A00000000000000000000012 /* PracticeAttempt.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000015 /* PracticeAttempt.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -57,6 +58,7 @@
 		B00000000000000000000012 /* BravuraText.otf */ = {isa = PBXFileReference; lastKnownFileType = file; path = Resources/Fonts/BravuraText.otf; sourceTree = "<group>"; };
 		B00000000000000000000013 /* PracticePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticePreferences.swift; sourceTree = "<group>"; };
 		B00000000000000000000014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		B00000000000000000000015 /* PracticeAttempt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeAttempt.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -106,6 +108,7 @@
 			children = (
 				B00000000000000000000010 /* BeatVisualLifecycle.swift */,
 				B00000000000000000000002 /* MetronomePreset.swift */,
+				B00000000000000000000015 /* PracticeAttempt.swift */,
 				B00000000000000000000003 /* PracticeEvent.swift */,
 				B00000000000000000000013 /* PracticePreferences.swift */,
 				B0000000000000000000000E /* PracticeSession.swift */,
@@ -271,6 +274,7 @@
 				A0000000000000000000000E /* BeatVisualLifecycle.swift in Sources */,
 				A0000000000000000000000F /* LiquidControlComponents.swift in Sources */,
 				A00000000000000000000011 /* PracticePreferences.swift in Sources */,
+				A00000000000000000000012 /* PracticeAttempt.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

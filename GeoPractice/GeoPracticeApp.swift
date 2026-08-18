@@ -13,7 +13,7 @@ struct GeoPracticeApp: App {
         WindowGroup {
             RootView()
         }
-        .modelContainer(for: PracticeEvent.self)
+        .modelContainer(for: [PracticeEvent.self, PracticeAttempt.self])
     }
 }
 

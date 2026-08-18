@@ -27,6 +27,42 @@ enum PracticeHand: String, CaseIterable, Codable, Identifiable, Sendable {
     static let controlOrder: [PracticeHand] = [.left, .both, .right]
 }
 
+enum PracticeAttemptPersistenceError: LocalizedError, Equatable {
+    case sourceEventMismatch
+    case sessionAlreadyAssignedToAnotherEvent
+
+    var errorDescription: String? {
+        switch self {
+        case .sourceEventMismatch:
+            "本次练习并非从这条练习记录进入，无法追加。"
+        case .sessionAlreadyAssignedToAnotherEvent:
+            "本次练习已经追加到另一条练习记录。"
+        }
+    }
+}
+
+struct PracticeEventAggregateSnapshot: Equatable, Sendable {
+    let leftCount: Int
+    let rightCount: Int
+    let bothCount: Int
+    let leftDurationMilliseconds: Int64?
+    let rightDurationMilliseconds: Int64?
+    let bothDurationMilliseconds: Int64?
+    let updatedAt: Date
+}
+
+enum PracticeAttemptCommitDisposition: Equatable, Sendable {
+    case inserted
+    case alreadyCommitted
+}
+
+struct PracticeAttemptCommitResult {
+    let attempt: PracticeAttempt
+    let disposition: PracticeAttemptCommitDisposition
+
+    var wasInserted: Bool { disposition == .inserted }
+}
+
 @Model
 final class PracticeEvent {
     @Attribute(.unique) var id: UUID
@@ -148,6 +184,122 @@ final class PracticeEvent {
             )
         }
         updatedAt = .now
+    }
+
+    /// Atomically stages both the legacy aggregate update and an immutable
+    /// attempt. Replaying the same session is a no-op and returns the existing
+    /// object, which keeps crash/retry handling idempotent.
+    @discardableResult
+    func append(
+        summary: PracticeSessionSummary,
+        in context: ModelContext
+    ) throws -> PracticeAttempt {
+        if let sourceEventID = summary.sourceEventID, sourceEventID != id {
+            throw PracticeAttemptPersistenceError.sourceEventMismatch
+        }
+
+        if let existing = try PracticeAttempt.find(
+            sessionID: summary.sessionID,
+            in: context
+        ) {
+            guard existing.eventID == id else {
+                throw PracticeAttemptPersistenceError.sessionAlreadyAssignedToAnotherEvent
+            }
+            return existing
+        }
+
+        let attempt = PracticeAttempt(eventID: id, summary: summary)
+        append(summary: summary)
+        context.insert(attempt)
+        return attempt
+    }
+
+    /// Persists the attempt and aggregate as one user-visible commit. SwiftData
+    /// removes an inserted model on rollback but does not reliably restore the
+    /// live `PracticeEvent` instance, so the explicit snapshot is essential to
+    /// prevent a failed save from leaving false totals on screen.
+    @discardableResult
+    func commit(
+        summary: PracticeSessionSummary,
+        in context: ModelContext
+    ) throws -> PracticeAttemptCommitResult {
+        try commit(summary: summary, in: context) {
+            try context.save()
+        }
+    }
+
+    /// Injection point used by deterministic persistence-failure tests.
+    @discardableResult
+    func commit(
+        summary: PracticeSessionSummary,
+        in context: ModelContext,
+        saving: () throws -> Void
+    ) throws -> PracticeAttemptCommitResult {
+        if let sourceEventID = summary.sourceEventID, sourceEventID != id {
+            throw PracticeAttemptPersistenceError.sourceEventMismatch
+        }
+
+        if let existing = try PracticeAttempt.find(
+            sessionID: summary.sessionID,
+            in: context
+        ) {
+            guard existing.eventID == id else {
+                throw PracticeAttemptPersistenceError.sessionAlreadyAssignedToAnotherEvent
+            }
+            return PracticeAttemptCommitResult(
+                attempt: existing,
+                disposition: .alreadyCommitted
+            )
+        }
+
+        let snapshot = aggregateSnapshot()
+        let attempt = PracticeAttempt(eventID: id, summary: summary)
+        append(summary: summary)
+        context.insert(attempt)
+        do {
+            try saving()
+            return PracticeAttemptCommitResult(
+                attempt: attempt,
+                disposition: .inserted
+            )
+        } catch {
+            context.rollback()
+            restoreAggregate(from: snapshot)
+            throw error
+        }
+    }
+
+    func aggregateSnapshot() -> PracticeEventAggregateSnapshot {
+        PracticeEventAggregateSnapshot(
+            leftCount: leftCount,
+            rightCount: rightCount,
+            bothCount: bothCount,
+            leftDurationMilliseconds: leftDurationMilliseconds,
+            rightDurationMilliseconds: rightDurationMilliseconds,
+            bothDurationMilliseconds: bothDurationMilliseconds,
+            updatedAt: updatedAt
+        )
+    }
+
+    func restoreAggregate(from snapshot: PracticeEventAggregateSnapshot) {
+        leftCount = snapshot.leftCount
+        rightCount = snapshot.rightCount
+        bothCount = snapshot.bothCount
+        leftDurationMilliseconds = snapshot.leftDurationMilliseconds
+        rightDurationMilliseconds = snapshot.rightDurationMilliseconds
+        bothDurationMilliseconds = snapshot.bothDurationMilliseconds
+        updatedAt = snapshot.updatedAt
+    }
+
+    func inheritedPreset(
+        for hand: PracticeHand,
+        in context: ModelContext
+    ) throws -> MetronomePreset? {
+        try PracticeAttempt.latestMostPracticedPreset(
+            for: id,
+            hand: hand,
+            in: context
+        )
     }
 
     func increment(_ hand: PracticeHand) {

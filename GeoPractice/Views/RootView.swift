@@ -32,10 +32,12 @@ final class PracticeSessionController: ObservableObject {
         self.defaults = defaults
         var restored = PracticeSession()
         var restoredPreset: MetronomePreset?
+        var restoredSavedAt: Date?
         if let data = defaults.data(forKey: Self.draftKey),
            let draft = try? JSONDecoder().decode(PracticeSessionDraft.self, from: data) {
             restored = draft.session
             restoredPreset = draft.preset?.normalized
+            restoredSavedAt = draft.savedAt
             switch restored.phase {
             case .running:
                 restored.pause(at: draft.savedAt)
@@ -45,6 +47,11 @@ final class PracticeSessionController: ObservableObject {
         }
         _session = Published(initialValue: restored)
         sessionPreset = restoredPreset
+        if let restoredSavedAt {
+            // Re-encode immediately so legacy drafts that had no sessionID
+            // keep the decoder-generated ID across every later relaunch.
+            persist(restored, at: restoredSavedAt)
+        }
     }
 
     func begin(
@@ -90,10 +97,50 @@ final class PracticeSessionController: ObservableObject {
         commit(next, at: date)
     }
 
+    func recordCompletion(
+        for hand: PracticeHand,
+        preset: MetronomePreset,
+        at date: Date = .now
+    ) {
+        var next = session
+        next.recordCompletion(for: hand, preset: preset, at: date)
+        commit(next, at: date)
+    }
+
+    /// Compatibility for restoring and exercising legacy count-only drafts.
+    /// User-facing `+1` controls always call `recordCompletion` instead.
     func adjustCount(for hand: PracticeHand, by delta: Int) {
         var next = session
         next.adjustCount(for: hand, by: delta)
         commit(next, at: .now)
+    }
+
+    @discardableResult
+    func undoLastCompletion(
+        for hand: PracticeHand,
+        at date: Date = .now
+    ) -> PracticeCompletionSample? {
+        var next = session
+        let removed = next.undoLastCompletion(for: hand)
+        guard removed != nil else { return nil }
+        commit(next, at: date)
+        return removed
+    }
+
+    /// User-facing undo that also supports pre-history drafts whose counts do
+    /// not have corresponding completion samples.
+    @discardableResult
+    func undoLatestCompletionOrLegacyCount(
+        for hand: PracticeHand,
+        at date: Date = .now
+    ) -> Bool {
+        var next = session
+        if next.undoLastCompletion(for: hand) == nil {
+            guard next.stats(for: hand, at: date).count > 0 else { return false }
+            next.adjustCount(for: hand, by: -1)
+        }
+        commit(next, at: date)
+        return true
     }
 
     func finish(at date: Date = .now) -> PracticeSessionSummary? {
@@ -162,11 +209,11 @@ struct RootView: View {
             PracticeEventsView(
                 metronome: metronome,
                 protectedEventID: protectedPracticeEventID
-            ) { event in
+            ) { event, preset in
                 let request = PendingPracticeLaunch(
                     eventID: event.id,
                     eventName: event.name,
-                    preset: event.preset
+                    preset: preset
                 )
                 if practiceSession.session.phase == .running
                     || practiceSession.session.phase == .paused
@@ -384,5 +431,8 @@ struct RootView: View {
 
 #Preview {
     RootView()
-        .modelContainer(for: PracticeEvent.self, inMemory: true)
+        .modelContainer(
+            for: [PracticeEvent.self, PracticeAttempt.self],
+            inMemory: true
+        )
 }

@@ -1,4 +1,5 @@
 import XCTest
+import SwiftData
 @testable import GeoPractice
 
 final class MetronomePresetTests: XCTestCase {
@@ -1948,7 +1949,13 @@ final class MetronomePresetTests: XCTestCase {
         let original = PracticeSessionController(defaults: defaults)
         original.begin(sourceEventID: sourceID, preset: preset, at: start)
         original.switchHand(to: .left, at: start.addingTimeInterval(2))
-        original.adjustCount(for: .left, by: 3)
+        for offset in [2.1, 2.2, 2.3] {
+            original.recordCompletion(
+                for: .left,
+                preset: preset,
+                at: start.addingTimeInterval(offset)
+            )
+        }
         original.persistSnapshot(at: start.addingTimeInterval(5))
 
         let restored = PracticeSessionController(defaults: defaults)
@@ -1973,7 +1980,13 @@ final class MetronomePresetTests: XCTestCase {
 
         let original = PracticeSessionController(defaults: defaults)
         original.begin(preset: preset, at: start)
-        original.adjustCount(for: .both, by: 4)
+        for offset in [0.1, 0.2, 0.3, 0.4] {
+            original.recordCompletion(
+                for: .both,
+                preset: preset,
+                at: start.addingTimeInterval(offset)
+            )
+        }
         _ = original.finish(at: start.addingTimeInterval(6))
 
         let restored = PracticeSessionController(defaults: defaults)
@@ -1984,5 +1997,821 @@ final class MetronomePresetTests: XCTestCase {
             6_000
         )
         XCTAssertEqual(restored.sessionPreset, preset.normalized)
+    }
+
+    @MainActor
+    func testControllerRewritesLegacyFinishedDraftAndKeepsMigratedSessionIDStable() throws {
+        struct DraftEnvelope: Encodable {
+            let session: PracticeSession
+            let savedAt: Date
+            let preset: MetronomePreset?
+        }
+
+        let suiteName = "GeoPracticeTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let start = Date(timeIntervalSinceReferenceDate: 8_500)
+        let savedAt = start.addingTimeInterval(8)
+        let sourceID = UUID()
+        var preset = MetronomePreset.standard
+        preset.bpm = 126
+        preset.beats = 5
+        preset.grouping = "3+2"
+        preset.referenceNote = .dottedQuarter
+        preset.subdivision = 4
+
+        var finishedSession = PracticeSession()
+        finishedSession.begin(sourceEventID: sourceID, at: start)
+        finishedSession.adjustCount(for: .left, by: 3)
+        _ = finishedSession.finish(at: savedAt)
+
+        let currentDraftData = try JSONEncoder().encode(DraftEnvelope(
+            session: finishedSession,
+            savedAt: savedAt,
+            preset: preset
+        ))
+        var legacyDraft = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: currentDraftData) as? [String: Any]
+        )
+        var legacySession = try XCTUnwrap(
+            legacyDraft["session"] as? [String: Any]
+        )
+        legacySession.removeValue(forKey: "sessionID")
+        legacySession.removeValue(forKey: "completions")
+        var legacySummary = try XCTUnwrap(
+            legacySession["completedSummary"] as? [String: Any]
+        )
+        legacySummary.removeValue(forKey: "sessionID")
+        legacySummary.removeValue(forKey: "completions")
+        legacySession["completedSummary"] = legacySummary
+        legacyDraft["session"] = legacySession
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyDraft)
+        defaults.set(legacyData, forKey: "practiceSessionDraft.v1")
+
+        let firstRestore = PracticeSessionController(defaults: defaults)
+        let migratedID = firstRestore.session.sessionID
+        XCTAssertEqual(firstRestore.session.phase, .finished)
+        XCTAssertEqual(firstRestore.session.sourceEventID, sourceID)
+        XCTAssertEqual(firstRestore.session.reviewSummary?.sessionID, migratedID)
+        XCTAssertEqual(firstRestore.session.reviewSummary?.stats(for: .left).count, 3)
+        XCTAssertEqual(firstRestore.sessionPreset, preset.normalized)
+
+        let rewrittenData = try XCTUnwrap(
+            defaults.data(forKey: "practiceSessionDraft.v1")
+        )
+        let rewrittenDraft = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: rewrittenData) as? [String: Any]
+        )
+        let rewrittenSession = try XCTUnwrap(
+            rewrittenDraft["session"] as? [String: Any]
+        )
+        let rewrittenSummary = try XCTUnwrap(
+            rewrittenSession["completedSummary"] as? [String: Any]
+        )
+        XCTAssertEqual(rewrittenSession["sessionID"] as? String, migratedID.uuidString)
+        XCTAssertEqual(rewrittenSummary["sessionID"] as? String, migratedID.uuidString)
+        XCTAssertNotNil(rewrittenSession["completions"])
+        XCTAssertNotNil(rewrittenSummary["completions"])
+
+        let secondRestore = PracticeSessionController(defaults: defaults)
+        XCTAssertEqual(secondRestore.session.sessionID, migratedID)
+        XCTAssertEqual(secondRestore.session.reviewSummary?.sessionID, migratedID)
+        XCTAssertEqual(secondRestore.session, firstRestore.session)
+    }
+
+    @MainActor
+    func testControllerUndoFallsBackToLegacyCountOnlyDraftAndPersistsIt() throws {
+        struct DraftEnvelope: Encodable {
+            let session: PracticeSession
+            let savedAt: Date
+            let preset: MetronomePreset?
+        }
+
+        let suiteName = "GeoPracticeTests.\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let start = Date(timeIntervalSinceReferenceDate: 8_750)
+        let savedAt = start.addingTimeInterval(2)
+        var legacySession = PracticeSession()
+        legacySession.begin(at: start)
+        legacySession.adjustCount(for: .right, by: 1)
+        let draftData = try JSONEncoder().encode(DraftEnvelope(
+            session: legacySession,
+            savedAt: savedAt,
+            preset: .standard
+        ))
+        defaults.set(draftData, forKey: "practiceSessionDraft.v1")
+
+        let controller = PracticeSessionController(defaults: defaults)
+        XCTAssertEqual(controller.session.phase, .paused)
+        XCTAssertEqual(controller.session.stats(for: .right, at: savedAt).count, 1)
+        XCTAssertTrue(controller.session.completionSamples(for: .right).isEmpty)
+
+        XCTAssertTrue(
+            controller.undoLatestCompletionOrLegacyCount(for: .right, at: savedAt)
+        )
+        XCTAssertEqual(controller.session.stats(for: .right, at: savedAt).count, 0)
+        XCTAssertTrue(controller.session.completionSamples(for: .right).isEmpty)
+        XCTAssertFalse(
+            controller.undoLatestCompletionOrLegacyCount(for: .right, at: savedAt)
+        )
+
+        let restoredAgain = PracticeSessionController(defaults: defaults)
+        XCTAssertEqual(restoredAgain.session.stats(for: .right, at: savedAt).count, 0)
+        XCTAssertTrue(restoredAgain.session.completionSamples(for: .right).isEmpty)
+    }
+
+    func testLegacyPracticeSessionJSONWithoutSpeedHistoryStillDecodes() throws {
+        let start = Date(timeIntervalSinceReferenceDate: 9_000)
+        let sourceEventID = UUID()
+        var legacySession = PracticeSession()
+        legacySession.begin(sourceEventID: sourceEventID, at: start)
+        legacySession.adjustCount(for: .both, by: 3)
+        legacySession.switchHand(to: .left, at: start.addingTimeInterval(2))
+        legacySession.adjustCount(for: .left, by: 2)
+
+        let currentData = try JSONEncoder().encode(legacySession)
+        var legacyJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: currentData) as? [String: Any]
+        )
+        legacyJSON.removeValue(forKey: "sessionID")
+        legacyJSON.removeValue(forKey: "completions")
+        let legacyData = try JSONSerialization.data(withJSONObject: legacyJSON)
+
+        let restored = try JSONDecoder().decode(PracticeSession.self, from: legacyData)
+
+        XCTAssertEqual(restored.phase, .running)
+        XCTAssertEqual(restored.sourceEventID, sourceEventID)
+        XCTAssertEqual(restored.currentHand, .left)
+        XCTAssertEqual(restored.stats(for: .both, at: start).count, 3)
+        XCTAssertEqual(restored.stats(for: .left, at: start).count, 2)
+        XCTAssertTrue(restored.completionSamples(for: .left).isEmpty)
+        XCTAssertTrue(restored.completionSamples(for: .both).isEmpty)
+
+        let migratedData = try JSONEncoder().encode(restored)
+        let roundTripped = try JSONDecoder().decode(PracticeSession.self, from: migratedData)
+        XCTAssertEqual(roundTripped.sessionID, restored.sessionID)
+        XCTAssertEqual(roundTripped, restored)
+    }
+
+    func testPracticeSessionIDIsStableForTheWholeLifecycle() throws {
+        let start = Date(timeIntervalSinceReferenceDate: 10_000)
+        var session = PracticeSession()
+        let idleID = session.sessionID
+
+        session.begin(at: start)
+        let runningID = session.sessionID
+        XCTAssertNotEqual(runningID, idleID)
+
+        session.begin(at: start.addingTimeInterval(1))
+        XCTAssertEqual(session.sessionID, runningID)
+
+        var preset = MetronomePreset.standard
+        preset.bpm = 132
+        _ = session.recordCompletion(
+            for: .both,
+            preset: preset,
+            at: start.addingTimeInterval(2)
+        )
+        session.pause(at: start.addingTimeInterval(3))
+        session.resume(at: start.addingTimeInterval(4))
+        let summary = try XCTUnwrap(session.finish(at: start.addingTimeInterval(5)))
+
+        XCTAssertEqual(session.sessionID, runningID)
+        XCTAssertEqual(summary.sessionID, runningID)
+
+        let data = try JSONEncoder().encode(session)
+        let restored = try JSONDecoder().decode(PracticeSession.self, from: data)
+        XCTAssertEqual(restored.sessionID, runningID)
+        XCTAssertEqual(restored.reviewSummary?.sessionID, runningID)
+
+        session.reset()
+        XCTAssertEqual(session.sessionID, idleID)
+        session.begin(at: start.addingTimeInterval(10))
+        XCTAssertNotEqual(session.sessionID, runningID)
+        XCTAssertNotEqual(session.sessionID, idleID)
+    }
+
+    func testCompletionRecordsFullPresetAndUndoRemovesLatestForOnlyThatHand() throws {
+        let start = Date(timeIntervalSinceReferenceDate: 11_000)
+        var session = PracticeSession()
+        session.begin(at: start)
+
+        var firstLeftPreset = MetronomePreset.standard
+        firstLeftPreset.bpm = 88
+        firstLeftPreset.beats = 5
+        firstLeftPreset.grouping = "3+2"
+        firstLeftPreset.subdivision = 2
+        firstLeftPreset.direction = .clockwise
+        firstLeftPreset.referenceNote = .dottedQuarter
+
+        var secondLeftPreset = MetronomePreset.standard
+        secondLeftPreset.bpm = 144
+        secondLeftPreset.beats = 7
+        secondLeftPreset.grouping = "2+3+2"
+        secondLeftPreset.subdivision = 4
+        secondLeftPreset.direction = .counterclockwise
+        secondLeftPreset.referenceNote = .dottedEighth
+
+        var rightPreset = MetronomePreset.standard
+        rightPreset.bpm = 72
+        rightPreset.beats = 3
+        rightPreset.grouping = "标准"
+        rightPreset.subdivision = 0
+        rightPreset.referenceNote = .half
+
+        let firstLeft = try XCTUnwrap(session.recordCompletion(
+            for: .left,
+            preset: firstLeftPreset,
+            at: start.addingTimeInterval(1)
+        ))
+        let secondLeft = try XCTUnwrap(session.recordCompletion(
+            for: .left,
+            preset: secondLeftPreset,
+            at: start.addingTimeInterval(2)
+        ))
+        let right = try XCTUnwrap(session.recordCompletion(
+            for: .right,
+            preset: rightPreset,
+            at: start.addingTimeInterval(3)
+        ))
+
+        XCTAssertEqual(firstLeft.preset, firstLeftPreset.normalized)
+        XCTAssertEqual(secondLeft.preset, secondLeftPreset.normalized)
+        XCTAssertEqual(right.preset, rightPreset.normalized)
+        XCTAssertEqual(session.stats(for: .left, at: start).count, 2)
+        XCTAssertEqual(session.stats(for: .right, at: start).count, 1)
+
+        let removed = try XCTUnwrap(session.undoLastCompletion(for: .left))
+        XCTAssertEqual(removed.id, secondLeft.id)
+        XCTAssertEqual(removed.preset, secondLeftPreset.normalized)
+        XCTAssertEqual(session.completionSamples(for: .left), [firstLeft])
+        XCTAssertEqual(session.completionSamples(for: .right), [right])
+        XCTAssertEqual(session.stats(for: .left, at: start).count, 1)
+        XCTAssertEqual(session.stats(for: .right, at: start).count, 1)
+
+        XCTAssertEqual(session.undoLastCompletion(for: .left)?.id, firstLeft.id)
+        XCTAssertNil(session.undoLastCompletion(for: .left))
+        XCTAssertEqual(session.stats(for: .left, at: start).count, 0)
+        XCTAssertEqual(session.stats(for: .right, at: start).count, 1)
+    }
+
+    func testMostPracticedBPMUsesFrequencyAndBreaksTiesByLatestCompletion() throws {
+        let base = Date(timeIntervalSinceReferenceDate: 12_000)
+        func sample(_ bpm: Int, seconds: TimeInterval) -> PracticeCompletionSample {
+            var preset = MetronomePreset.standard
+            preset.bpm = bpm
+            return PracticeCompletionSample(
+                hand: .left,
+                preset: preset,
+                completedAt: base.addingTimeInterval(seconds)
+            )
+        }
+
+        let summary = PracticeHandSpeedSummary(
+            samples: [
+                sample(88, seconds: 1),
+                sample(96, seconds: 2),
+                sample(96, seconds: 4),
+                sample(88, seconds: 5),
+                sample(220, seconds: 3)
+            ],
+            for: .left
+        )
+
+        let mostPracticed = try XCTUnwrap(summary.mostPracticed)
+        XCTAssertEqual(mostPracticed.bpm, 88)
+        XCTAssertEqual(mostPracticed.completionCount, 2)
+        XCTAssertEqual(mostPracticed.lastCompletedAt, base.addingTimeInterval(5))
+
+        let maximumAttempt = try XCTUnwrap(summary.maximumAttempt)
+        XCTAssertEqual(maximumAttempt.bpm, 220)
+        XCTAssertEqual(maximumAttempt.completionCount, 1)
+    }
+
+    func testSpeedSummaryGroupsOnlyByBPMDespiteDifferentNoteSettings() throws {
+        let base = Date(timeIntervalSinceReferenceDate: 13_000)
+        var quarterEighthTraining = MetronomePreset.standard
+        quarterEighthTraining.bpm = 88
+        quarterEighthTraining.referenceNote = .quarter
+        quarterEighthTraining.subdivision = 2
+
+        var dottedEighthHalfTraining = MetronomePreset.standard
+        dottedEighthHalfTraining.bpm = 88
+        dottedEighthHalfTraining.referenceNote = .dottedEighth
+        dottedEighthHalfTraining.subdivision = 0
+        dottedEighthHalfTraining.beats = 5
+        dottedEighthHalfTraining.grouping = "3+2"
+
+        var faster = MetronomePreset.standard
+        faster.bpm = 96
+        faster.referenceNote = .half
+        faster.subdivision = 4
+
+        let speed = PracticeHandSpeedSummary(
+            samples: [
+                PracticeCompletionSample(
+                    hand: .both,
+                    preset: quarterEighthTraining,
+                    completedAt: base
+                ),
+                PracticeCompletionSample(
+                    hand: .both,
+                    preset: dottedEighthHalfTraining,
+                    completedAt: base.addingTimeInterval(1)
+                ),
+                PracticeCompletionSample(
+                    hand: .both,
+                    preset: faster,
+                    completedAt: base.addingTimeInterval(2)
+                )
+            ],
+            for: .both
+        )
+
+        let mostPracticed = try XCTUnwrap(speed.mostPracticed)
+        XCTAssertEqual(mostPracticed.bpm, 88)
+        XCTAssertEqual(mostPracticed.completionCount, 2)
+        XCTAssertEqual(mostPracticed.preset, dottedEighthHalfTraining.normalized)
+        XCTAssertEqual(speed.maximumAttempt?.bpm, 96)
+    }
+
+    func testSpeedSummariesRemainIndependentForAllThreeHands() throws {
+        let base = Date(timeIntervalSinceReferenceDate: 14_000)
+        func sample(
+            _ hand: PracticeHand,
+            _ bpm: Int,
+            _ seconds: TimeInterval
+        ) -> PracticeCompletionSample {
+            var preset = MetronomePreset.standard
+            preset.bpm = bpm
+            return PracticeCompletionSample(
+                hand: hand,
+                preset: preset,
+                completedAt: base.addingTimeInterval(seconds)
+            )
+        }
+
+        let samples = [
+            sample(.left, 72, 1), sample(.left, 72, 2), sample(.left, 200, 3),
+            sample(.right, 100, 4), sample(.right, 120, 5), sample(.right, 120, 6),
+            sample(.both, 50, 7), sample(.both, 40, 8)
+        ]
+
+        let left = PracticeHandSpeedSummary(samples: samples, for: .left)
+        let right = PracticeHandSpeedSummary(samples: samples, for: .right)
+        let both = PracticeHandSpeedSummary(samples: samples, for: .both)
+
+        XCTAssertEqual(left.mostPracticed?.bpm, 72)
+        XCTAssertEqual(left.maximumAttempt?.bpm, 200)
+        XCTAssertEqual(right.mostPracticed?.bpm, 120)
+        XCTAssertEqual(right.maximumAttempt?.bpm, 120)
+        XCTAssertEqual(both.mostPracticed?.bpm, 40, "A frequency tie must use the latest completion")
+        XCTAssertEqual(both.maximumAttempt?.bpm, 50)
+
+        XCTAssertNil(PracticeHandSpeedSummary(samples: [], for: .both).mostPracticed)
+        XCTAssertNil(PracticeHandSpeedSummary(samples: [], for: .both).maximumAttempt)
+    }
+
+    @MainActor
+    func testPracticeAttemptCommitIsIdempotentAndSessionIDsStayUnique() throws {
+        let container = try makeInMemoryPracticeContainer()
+        let context = container.mainContext
+        let event = PracticeEvent(name: "肖邦练习曲", leftCount: 4)
+        context.insert(event)
+        try context.save()
+
+        let start = Date(timeIntervalSinceReferenceDate: 15_000)
+        var preset = MetronomePreset.standard
+        preset.bpm = 116
+        preset.beats = 5
+        preset.grouping = "3+2"
+        preset.subdivision = 2
+        preset.referenceNote = .dottedQuarter
+
+        var firstSession = PracticeSession()
+        firstSession.begin(sourceEventID: event.id, at: start)
+        _ = firstSession.recordCompletion(
+            for: .left,
+            preset: preset,
+            at: start.addingTimeInterval(1)
+        )
+        let firstSummary = try XCTUnwrap(
+            firstSession.finish(at: start.addingTimeInterval(2))
+        )
+
+        let firstCommit = try event.commit(summary: firstSummary, in: context)
+        let replayedCommit = try event.commit(summary: firstSummary, in: context)
+
+        XCTAssertEqual(firstCommit.disposition, .inserted)
+        XCTAssertEqual(replayedCommit.disposition, .alreadyCommitted)
+        XCTAssertEqual(firstCommit.attempt.id, replayedCommit.attempt.id)
+        XCTAssertEqual(firstCommit.attempt.sessionID, firstSummary.sessionID)
+        XCTAssertEqual(event.leftCount, 5, "A replay must not add the aggregate twice")
+        XCTAssertEqual(try PracticeAttempt.history(for: event.id, in: context).count, 1)
+
+        var secondPreset = preset
+        secondPreset.bpm = 132
+        secondPreset.subdivision = 4
+        var secondSession = PracticeSession()
+        secondSession.begin(sourceEventID: event.id, at: start.addingTimeInterval(10))
+        _ = secondSession.recordCompletion(
+            for: .right,
+            preset: secondPreset,
+            at: start.addingTimeInterval(11)
+        )
+        let secondSummary = try XCTUnwrap(
+            secondSession.finish(at: start.addingTimeInterval(12))
+        )
+        let secondAttempt = try event.commit(
+            summary: secondSummary,
+            in: context
+        ).attempt
+
+        let history = try PracticeAttempt.history(for: event.id, in: context)
+        XCTAssertEqual(history.count, 2)
+        XCTAssertEqual(Set(history.map(\.sessionID)).count, 2)
+        XCTAssertTrue(history.contains { $0.id == firstCommit.attempt.id })
+        XCTAssertTrue(history.contains { $0.id == secondAttempt.id })
+        XCTAssertEqual(event.leftCount, 5)
+        XCTAssertEqual(event.rightCount, 1)
+    }
+
+    @MainActor
+    func testPracticeAttemptPersistsSnapshotsAndInheritsLatestPresetPerHand() throws {
+        let container = try makeInMemoryPracticeContainer()
+        let context = container.mainContext
+        let event = PracticeEvent(name: "音阶")
+        context.insert(event)
+        try context.save()
+
+        var leftPreset = MetronomePreset.standard
+        leftPreset.bpm = 91
+        leftPreset.beats = 5
+        leftPreset.grouping = "3+2"
+        leftPreset.subdivision = 2
+        leftPreset.direction = .clockwise
+        leftPreset.referenceNote = .dottedEighth
+
+        var bothPreset = MetronomePreset.standard
+        bothPreset.bpm = 104
+        bothPreset.beats = 7
+        bothPreset.grouping = "2+3+2"
+        bothPreset.subdivision = 4
+        bothPreset.direction = .counterclockwise
+        bothPreset.referenceNote = .dottedQuarter
+
+        let start = Date(timeIntervalSinceReferenceDate: 16_000)
+        var firstSession = PracticeSession()
+        firstSession.begin(sourceEventID: event.id, at: start)
+        _ = firstSession.recordCompletion(
+            for: .left,
+            preset: leftPreset,
+            at: start.addingTimeInterval(1)
+        )
+        _ = firstSession.recordCompletion(
+            for: .both,
+            preset: bothPreset,
+            at: start.addingTimeInterval(2)
+        )
+        let firstSummary = try XCTUnwrap(
+            firstSession.finish(at: start.addingTimeInterval(3))
+        )
+        let firstAttempt = try event.commit(
+            summary: firstSummary,
+            in: context
+        ).attempt
+
+        var rightPreset = MetronomePreset.standard
+        rightPreset.bpm = 150
+        rightPreset.beats = 3
+        rightPreset.subdivision = 0
+        rightPreset.referenceNote = .half
+
+        var secondSession = PracticeSession()
+        secondSession.begin(
+            sourceEventID: event.id,
+            at: start.addingTimeInterval(10)
+        )
+        _ = secondSession.recordCompletion(
+            for: .right,
+            preset: rightPreset,
+            at: start.addingTimeInterval(11)
+        )
+        let secondSummary = try XCTUnwrap(
+            secondSession.finish(at: start.addingTimeInterval(12))
+        )
+        let secondAttempt = try event.commit(
+            summary: secondSummary,
+            in: context
+        ).attempt
+
+        XCTAssertEqual(firstAttempt.completions, firstSummary.completions)
+        XCTAssertEqual(firstAttempt.mostPracticedPreset(for: .left), leftPreset.normalized)
+        XCTAssertEqual(firstAttempt.mostPracticedPreset(for: .both), bothPreset.normalized)
+        XCTAssertEqual(secondAttempt.mostPracticedPreset(for: .right), rightPreset.normalized)
+
+        XCTAssertEqual(
+            try PracticeAttempt.latest(for: event.id, hand: .left, in: context)?.id,
+            firstAttempt.id,
+            "A newer session for another hand must not hide the latest left-hand setting"
+        )
+        XCTAssertEqual(
+            try event.inheritedPreset(for: .left, in: context),
+            leftPreset.normalized
+        )
+        XCTAssertEqual(
+            try event.inheritedPreset(for: .right, in: context),
+            rightPreset.normalized
+        )
+        XCTAssertEqual(
+            try event.inheritedPreset(for: .both, in: context),
+            bothPreset.normalized
+        )
+    }
+
+    @MainActor
+    func testPracticeAttemptRejectsWrongEventAndCrossEventSessionReplay() throws {
+        let container = try makeInMemoryPracticeContainer()
+        let context = container.mainContext
+        let firstEvent = PracticeEvent(name: "第一首")
+        let secondEvent = PracticeEvent(name: "第二首")
+        context.insert(firstEvent)
+        context.insert(secondEvent)
+        try context.save()
+
+        let start = Date(timeIntervalSinceReferenceDate: 17_000)
+        var preset = MetronomePreset.standard
+        preset.bpm = 126
+
+        var linkedSession = PracticeSession()
+        linkedSession.begin(sourceEventID: firstEvent.id, at: start)
+        _ = linkedSession.recordCompletion(for: .both, preset: preset, at: start)
+        let linkedSummary = try XCTUnwrap(linkedSession.finish(at: start))
+
+        XCTAssertThrowsError(
+            try secondEvent.commit(summary: linkedSummary, in: context)
+        ) { error in
+            XCTAssertEqual(
+                error as? PracticeAttemptPersistenceError,
+                .sourceEventMismatch
+            )
+        }
+
+        let detachedSummary = PracticeSessionSummary(
+            sessionID: UUID(),
+            finishedAt: start.addingTimeInterval(1),
+            both: HandPracticeStats(count: 1),
+            completions: [
+                PracticeCompletionSample(
+                    hand: .both,
+                    preset: preset,
+                    completedAt: start.addingTimeInterval(1)
+                )
+            ]
+        )
+        _ = try firstEvent.commit(summary: detachedSummary, in: context)
+        XCTAssertThrowsError(
+            try secondEvent.commit(summary: detachedSummary, in: context)
+        ) { error in
+            XCTAssertEqual(
+                error as? PracticeAttemptPersistenceError,
+                .sessionAlreadyAssignedToAnotherEvent
+            )
+        }
+    }
+
+    @MainActor
+    func testPracticeAttemptDeleteHistoryIsScopedToOneEvent() throws {
+        let container = try makeInMemoryPracticeContainer()
+        let context = container.mainContext
+        let firstEvent = PracticeEvent(name: "第一首")
+        let secondEvent = PracticeEvent(name: "第二首")
+        context.insert(firstEvent)
+        context.insert(secondEvent)
+        try context.save()
+
+        let firstSummary = PracticeSessionSummary(
+            sourceEventID: firstEvent.id,
+            finishedAt: Date(timeIntervalSinceReferenceDate: 18_000),
+            left: HandPracticeStats(count: 1)
+        )
+        let secondSummary = PracticeSessionSummary(
+            sourceEventID: secondEvent.id,
+            finishedAt: Date(timeIntervalSinceReferenceDate: 18_001),
+            right: HandPracticeStats(count: 1)
+        )
+        let firstAttempt = try firstEvent.commit(
+            summary: firstSummary,
+            in: context
+        ).attempt
+        let secondAttempt = try secondEvent.commit(
+            summary: secondSummary,
+            in: context
+        ).attempt
+
+        try PracticeAttempt.deleteHistory(for: firstEvent.id, in: context)
+        try context.save()
+
+        XCTAssertTrue(try PracticeAttempt.history(for: firstEvent.id, in: context).isEmpty)
+        XCTAssertEqual(
+            try PracticeAttempt.history(for: secondEvent.id, in: context).map(\.id),
+            [secondAttempt.id]
+        )
+        XCTAssertNil(try PracticeAttempt.find(sessionID: firstAttempt.sessionID, in: context))
+        XCTAssertEqual(
+            try PracticeAttempt.find(sessionID: secondAttempt.sessionID, in: context)?.id,
+            secondAttempt.id
+        )
+    }
+
+    @MainActor
+    func testPracticeAttemptHistoryBreaksEqualFinishTimeByNewestCreatedAt() throws {
+        let container = try makeInMemoryPracticeContainer()
+        let context = container.mainContext
+        let eventID = UUID()
+        let finishedAt = Date(timeIntervalSinceReferenceDate: 18_250)
+        let older = PracticeAttempt(
+            eventID: eventID,
+            summary: PracticeSessionSummary(
+                sessionID: UUID(),
+                finishedAt: finishedAt,
+                left: HandPracticeStats(count: 1)
+            ),
+            createdAt: finishedAt.addingTimeInterval(1)
+        )
+        let newer = PracticeAttempt(
+            eventID: eventID,
+            summary: PracticeSessionSummary(
+                sessionID: UUID(),
+                finishedAt: finishedAt,
+                right: HandPracticeStats(count: 1)
+            ),
+            createdAt: finishedAt.addingTimeInterval(2)
+        )
+        context.insert(older)
+        context.insert(newer)
+        try context.save()
+
+        XCTAssertEqual(
+            try PracticeAttempt.history(for: eventID, in: context).map(\.id),
+            [newer.id, older.id]
+        )
+    }
+
+    @MainActor
+    func testPracticeAttemptCommitFailureRestoresEveryLiveAggregateField() throws {
+        enum ForcedSaveError: Error {
+            case failed
+        }
+
+        let container = try makeInMemoryPracticeContainer()
+        let context = container.mainContext
+        let originalUpdate = Date(timeIntervalSinceReferenceDate: 18_500)
+        let event = PracticeEvent(
+            name: "回滚测试",
+            leftCount: 2,
+            rightCount: 3,
+            bothCount: 4,
+            leftDurationMilliseconds: 500,
+            rightDurationMilliseconds: 600,
+            bothDurationMilliseconds: 700,
+            updatedAt: originalUpdate
+        )
+        context.insert(event)
+        try context.save()
+        let originalAggregate = event.aggregateSnapshot()
+
+        let summary = PracticeSessionSummary(
+            sourceEventID: event.id,
+            finishedAt: Date(timeIntervalSinceReferenceDate: 19_000),
+            left: HandPracticeStats(count: 3, durationMilliseconds: 2_000),
+            right: HandPracticeStats(count: 4, durationMilliseconds: 3_000),
+            both: HandPracticeStats(count: 5, durationMilliseconds: 4_000)
+        )
+        XCTAssertThrowsError(
+            try event.commit(summary: summary, in: context) {
+                throw ForcedSaveError.failed
+            }
+        ) { error in
+            XCTAssertTrue(error is ForcedSaveError)
+        }
+
+        XCTAssertEqual(event.aggregateSnapshot(), originalAggregate)
+        XCTAssertEqual(event.updatedAt, originalUpdate)
+        XCTAssertNil(try PracticeAttempt.find(sessionID: summary.sessionID, in: context))
+        XCTAssertTrue(try PracticeAttempt.history(for: event.id, in: context).isEmpty)
+    }
+
+    @MainActor
+    func testLegacySingleEntityStoreMigratesAdditivelyToAttemptHistorySchema() throws {
+        let storeDirectory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("GeoPracticeMigrationTests")
+            .appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(
+            at: storeDirectory,
+            withIntermediateDirectories: true
+        )
+        defer { try? FileManager.default.removeItem(at: storeDirectory) }
+        let storeURL = storeDirectory.appendingPathComponent("GeoPractice.store")
+        let eventID = UUID()
+        let createdAt = Date(timeIntervalSinceReferenceDate: 20_000)
+
+        do {
+            let legacySchema = Schema([PracticeEvent.self])
+            let legacyConfiguration = ModelConfiguration(
+                "GeoPractice",
+                schema: legacySchema,
+                url: storeURL,
+                cloudKitDatabase: .none
+            )
+            let legacyContainer = try ModelContainer(
+                for: legacySchema,
+                configurations: [legacyConfiguration]
+            )
+            let legacyEvent = PracticeEvent(
+                id: eventID,
+                name: "升级前记录",
+                leftCount: 7,
+                rightCount: 5,
+                bothCount: 3,
+                leftDurationMilliseconds: 1_000,
+                rightDurationMilliseconds: 2_000,
+                bothDurationMilliseconds: 3_000,
+                createdAt: createdAt,
+                updatedAt: createdAt
+            )
+            legacyContainer.mainContext.insert(legacyEvent)
+            try legacyContainer.mainContext.save()
+        }
+
+        let currentSchema = Schema([
+            PracticeEvent.self,
+            PracticeAttempt.self
+        ])
+        let currentConfiguration = ModelConfiguration(
+            "GeoPractice",
+            schema: currentSchema,
+            url: storeURL,
+            cloudKitDatabase: .none
+        )
+        let currentContainer = try ModelContainer(
+            for: currentSchema,
+            configurations: [currentConfiguration]
+        )
+        let context = currentContainer.mainContext
+        let restoredEvents = try context.fetch(FetchDescriptor<PracticeEvent>())
+        let restored = try XCTUnwrap(restoredEvents.first { $0.id == eventID })
+
+        XCTAssertEqual(restored.name, "升级前记录")
+        XCTAssertEqual(restored.leftCount, 7)
+        XCTAssertEqual(restored.rightCount, 5)
+        XCTAssertEqual(restored.bothCount, 3)
+        XCTAssertEqual(restored.totalDurationMilliseconds, 6_000)
+        XCTAssertTrue(try PracticeAttempt.history(for: eventID, in: context).isEmpty)
+
+        var preset = MetronomePreset.standard
+        preset.bpm = 138
+        preset.referenceNote = .dottedQuarter
+        preset.subdivision = 4
+        let summary = PracticeSessionSummary(
+            sourceEventID: eventID,
+            finishedAt: createdAt.addingTimeInterval(10),
+            both: HandPracticeStats(count: 1),
+            completions: [
+                PracticeCompletionSample(
+                    hand: .both,
+                    preset: preset,
+                    completedAt: createdAt.addingTimeInterval(10)
+                )
+            ]
+        )
+        _ = try restored.commit(summary: summary, in: context)
+
+        XCTAssertEqual(restored.bothCount, 4)
+        XCTAssertEqual(
+            try PracticeAttempt.history(for: eventID, in: context).count,
+            1
+        )
+        XCTAssertEqual(
+            try restored.inheritedPreset(for: .both, in: context),
+            preset.normalized
+        )
+    }
+
+    @MainActor
+    private func makeInMemoryPracticeContainer() throws -> ModelContainer {
+        let schema = Schema([
+            PracticeEvent.self,
+            PracticeAttempt.self
+        ])
+        let configuration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: true
+        )
+        return try ModelContainer(
+            for: schema,
+            configurations: [configuration]
+        )
     }
 }

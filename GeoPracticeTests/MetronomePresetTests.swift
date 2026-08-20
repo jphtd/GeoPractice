@@ -1,5 +1,6 @@
 import XCTest
 import SwiftData
+import SwiftUI
 @testable import GeoPractice
 
 final class MetronomePresetTests: XCTestCase {
@@ -1531,7 +1532,11 @@ final class MetronomePresetTests: XCTestCase {
 
         XCTAssertEqual(status.referenceNote, .eighth)
         XCTAssertEqual(status.referenceTempoText, "\u{ECA7} = 112")
-        XCTAssertTrue(status.accessibilitySummary.contains("基准音符八分音符"))
+        XCTAssertTrue(
+            status.accessibilitySummary.contains(
+                "速度基准，八分音符等于每分钟 112 拍"
+            )
+        )
     }
 
     func testSubdivisionKeepsItsContainingMainBeatCurrent() {
@@ -2136,6 +2141,7 @@ final class MetronomePresetTests: XCTestCase {
         )
         legacyJSON.removeValue(forKey: "sessionID")
         legacyJSON.removeValue(forKey: "completions")
+        legacyJSON.removeValue(forKey: "goalLaunchContext")
         let legacyData = try JSONSerialization.data(withJSONObject: legacyJSON)
 
         let restored = try JSONDecoder().decode(PracticeSession.self, from: legacyData)
@@ -2147,6 +2153,8 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(restored.stats(for: .left, at: start).count, 2)
         XCTAssertTrue(restored.completionSamples(for: .left).isEmpty)
         XCTAssertTrue(restored.completionSamples(for: .both).isEmpty)
+        XCTAssertNil(restored.goalLaunchContext)
+        XCTAssertNil(restored.goalProgress(for: .daily, at: start))
 
         let migratedData = try JSONEncoder().encode(restored)
         let roundTripped = try JSONDecoder().decode(PracticeSession.self, from: migratedData)
@@ -2703,6 +2711,396 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertTrue(try PracticeAttempt.history(for: event.id, in: context).isEmpty)
     }
 
+    func testPracticeGoalProgressCapsEachHandIndependently() {
+        let progress = PracticeGoalProgress(
+            targets: PracticeGoalCounts(left: 10, right: 10, both: 10),
+            completed: PracticeGoalCounts(left: 6, right: 100, both: 4)
+        )
+
+        XCTAssertEqual(progress.completed.value(for: .left), 6)
+        XCTAssertEqual(progress.completed.value(for: .right), 100)
+        XCTAssertEqual(progress.remaining, PracticeGoalCounts(left: 4, both: 6))
+        XCTAssertEqual(progress.creditedCompletedTotal, 20)
+        XCTAssertEqual(progress.completionRate, 2.0 / 3.0, accuracy: 0.000_001)
+        XCTAssertFalse(progress.isComplete)
+
+        let completed = PracticeGoalProgress(
+            targets: PracticeGoalCounts(left: 1, right: 2, both: 3),
+            completed: PracticeGoalCounts(left: 9, right: 2, both: 3)
+        )
+        XCTAssertEqual(completed.completionRate, 1)
+        XCTAssertTrue(completed.isComplete)
+    }
+
+    @MainActor
+    func testStructuredPracticeReportRendersAtExportResolution() throws {
+        let launchContext = PracticeGoalLaunchContext(
+            eventID: UUID(),
+            launchedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            localDay: "2023-11-15",
+            timeZoneIdentifier: "Asia/Shanghai",
+            timeZoneSecondsFromGMT: 28_800,
+            dailyGoalKey: "report-test",
+            dailyTargets: PracticeGoalCounts(left: 10, right: 10, both: 10),
+            plan: PracticeGoalPlan(
+                targets: PracticeGoalCounts(left: 30, right: 30, both: 30),
+                baseline: PracticeGoalCounts(),
+                enabledAt: Date(timeIntervalSince1970: 1_699_000_000)
+            )
+        )
+        let report = PracticeGoalReportSnapshot(
+            launchContext: launchContext,
+            sessionCompleted: PracticeGoalCounts(left: 6, right: 10, both: 4),
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_600)
+        )
+        let summary = PracticeSessionSummary(
+            startedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            finishedAt: Date(timeIntervalSince1970: 1_700_000_600),
+            left: HandPracticeStats(count: 6, durationMilliseconds: 180_000),
+            right: HandPracticeStats(count: 10, durationMilliseconds: 240_000),
+            both: HandPracticeStats(count: 4, durationMilliseconds: 120_000),
+            goalLaunchContext: launchContext,
+            goalReport: report
+        )
+
+        let image = try PracticeReportExporter.render {
+            PracticeResultCard(
+                summary: summary,
+                sourceEventName: "肖邦练习曲 Op. 10 No. 4"
+            )
+            .frame(width: 540, height: 675)
+        }
+
+        XCTAssertEqual(image.cgImage?.width, 1_080)
+        XCTAssertEqual(image.cgImage?.height, 1_350)
+        XCTAssertFalse(
+            (Bundle.main.object(
+                forInfoDictionaryKey: "NSPhotoLibraryAddUsageDescription"
+            ) as? String)?.isEmpty ?? true
+        )
+    }
+
+    func testPracticeGoalPlanCapturesEventAggregateAsImmutableBaseline() throws {
+        let enabledAt = Date(timeIntervalSinceReferenceDate: 19_100)
+        let event = PracticeEvent(
+            name: "目标基线",
+            leftCount: 7,
+            rightCount: 5,
+            bothCount: 3
+        )
+
+        event.enableGoalPlan(
+            targets: PracticeGoalCounts(left: 10, right: 8, both: 6),
+            at: enabledAt
+        )
+        let plan = try XCTUnwrap(event.goalPlan)
+        XCTAssertEqual(plan.targets, PracticeGoalCounts(left: 10, right: 8, both: 6))
+        XCTAssertEqual(plan.baseline, PracticeGoalCounts(left: 7, right: 5, both: 3))
+        XCTAssertEqual(plan.enabledAt, enabledAt)
+
+        event.updateGoalPlanTargets(
+            PracticeGoalCounts(left: 12, right: 9, both: 7),
+            at: enabledAt.addingTimeInterval(0.5)
+        )
+        XCTAssertEqual(event.goalPlan?.id, plan.id)
+        XCTAssertEqual(event.goalPlan?.baseline, plan.baseline)
+
+        event.increment(.left)
+        XCTAssertEqual(
+            event.goalPlan?.baseline,
+            PracticeGoalCounts(left: 7, right: 5, both: 3),
+            "Later aggregate changes must not move the plan baseline"
+        )
+
+        event.disableGoalPlan(at: enabledAt.addingTimeInterval(1))
+        XCTAssertNil(event.goalPlan)
+
+        event.enableGoalPlan(
+            targets: PracticeGoalCounts(left: 10, right: 8, both: 6),
+            at: enabledAt.addingTimeInterval(2)
+        )
+        XCTAssertNotEqual(event.goalPlan?.id, plan.id)
+    }
+
+    @MainActor
+    func testReenabledPlanDoesNotReuseSameDayGoalOrProgress() throws {
+        let container = try makeInMemoryPracticeContainer()
+        let context = container.mainContext
+        let event = PracticeEvent(name: "计划代次")
+        context.insert(event)
+        event.enableGoalPlan(targets: PracticeGoalCounts(left: 10))
+        let firstPlan = try XCTUnwrap(event.goalPlan)
+        let date = Date(timeIntervalSinceReferenceDate: 25_000)
+        let timeZone = try XCTUnwrap(TimeZone(secondsFromGMT: 0))
+        let firstGoal = try PracticeDailyGoal.create(
+            for: event.id,
+            planID: firstPlan.id,
+            targets: PracticeGoalCounts(left: 5),
+            at: date,
+            timeZone: timeZone,
+            in: context
+        )
+        try context.save()
+
+        event.disableGoalPlan()
+        event.enableGoalPlan(targets: PracticeGoalCounts(left: 20))
+        let secondPlan = try XCTUnwrap(event.goalPlan)
+
+        XCTAssertNotEqual(firstPlan.id, secondPlan.id)
+        XCTAssertNil(try PracticeDailyGoal.today(
+            for: event.id,
+            planID: secondPlan.id,
+            at: date,
+            timeZone: timeZone,
+            in: context
+        ))
+        XCTAssertNotNil(try PracticeDailyGoal.today(
+            for: event.id,
+            planID: firstPlan.id,
+            at: date,
+            timeZone: timeZone,
+            in: context
+        ))
+        XCTAssertEqual(firstGoal.planID, firstPlan.id)
+    }
+
+    @MainActor
+    func testPracticeDailyGoalCRUDUsesOneEventAndLocalDayKey() throws {
+        let container = try makeInMemoryPracticeContainer()
+        let context = container.mainContext
+        let eventID = UUID()
+        let timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let firstDay = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 8,
+            day: 20,
+            hour: 9
+        )))
+        let secondDay = try XCTUnwrap(calendar.date(byAdding: .day, value: 1, to: firstDay))
+
+        let first = try PracticeDailyGoal.create(
+            for: eventID,
+            targets: PracticeGoalCounts(left: 3, right: 4, both: 5),
+            at: firstDay,
+            timeZone: timeZone,
+            in: context
+        )
+        try context.save()
+        let updated = try PracticeDailyGoal.create(
+            for: eventID,
+            targets: PracticeGoalCounts(left: 10, right: 11, both: 12),
+            at: firstDay.addingTimeInterval(60),
+            timeZone: timeZone,
+            in: context
+        )
+        try context.save()
+
+        XCTAssertEqual(updated.id, first.id)
+        XCTAssertEqual(updated.key, first.key)
+        XCTAssertEqual(updated.localDay, "2026-08-20")
+        XCTAssertEqual(updated.targets, PracticeGoalCounts(left: 10, right: 11, both: 12))
+
+        let second = try PracticeDailyGoal.create(
+            for: eventID,
+            targets: PracticeGoalCounts(left: 1, right: 2, both: 3),
+            at: secondDay,
+            timeZone: timeZone,
+            in: context
+        )
+        try context.save()
+
+        XCTAssertNotEqual(second.key, first.key)
+        XCTAssertEqual(
+            try PracticeDailyGoal.today(
+                for: eventID,
+                at: secondDay,
+                timeZone: timeZone,
+                in: context
+            )?.id,
+            second.id
+        )
+        XCTAssertEqual(
+            try PracticeDailyGoal.previous(
+                for: eventID,
+                before: secondDay,
+                timeZone: timeZone,
+                in: context
+            )?.id,
+            first.id
+        )
+        XCTAssertEqual(try PracticeDailyGoal.history(for: eventID, in: context).count, 2)
+
+        try PracticeDailyGoal.deleteAll(for: eventID, in: context)
+        try context.save()
+        XCTAssertTrue(try PracticeDailyGoal.history(for: eventID, in: context).isEmpty)
+    }
+
+    @MainActor
+    func testGoalLaunchContextAndReportKeepLaunchDayAcrossMidnight() throws {
+        let container = try makeInMemoryPracticeContainer()
+        let context = container.mainContext
+        let timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let start = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 8,
+            day: 20,
+            hour: 23,
+            minute: 59,
+            second: 58
+        )))
+        let event = PracticeEvent(name: "跨午夜目标")
+        event.enableGoalPlan(
+            targets: PracticeGoalCounts(left: 10, right: 10, both: 10),
+            at: start.addingTimeInterval(-60)
+        )
+        let plan = try XCTUnwrap(event.goalPlan)
+        context.insert(event)
+        let dailyGoal = try PracticeDailyGoal.create(
+            for: event.id,
+            planID: plan.id,
+            targets: PracticeGoalCounts(left: 10, right: 10, both: 10),
+            at: start,
+            timeZone: timeZone,
+            in: context
+        )
+        try context.save()
+
+        let launchContext = try XCTUnwrap(PracticeGoalLaunchContext.capture(
+            for: event,
+            dailyGoal: dailyGoal,
+            launchedAt: start,
+            timeZone: timeZone,
+            in: context
+        ))
+        var session = PracticeSession()
+        session.begin(
+            sourceEventID: event.id,
+            goalContext: launchContext,
+            at: start
+        )
+        var preset = MetronomePreset.standard
+        for handAndCount in [
+            (PracticeHand.left, 6),
+            (.right, 10),
+            (.both, 4)
+        ] {
+            for index in 0..<handAndCount.1 {
+                preset.bpm = 88 + index
+                _ = session.recordCompletion(
+                    for: handAndCount.0,
+                    preset: preset,
+                    at: start.addingTimeInterval(Double(index) / 10)
+                )
+            }
+        }
+
+        let live = try XCTUnwrap(session.goalProgress(
+            for: .daily,
+            at: start.addingTimeInterval(1)
+        ))
+        XCTAssertEqual(live.completed, PracticeGoalCounts(left: 6, right: 10, both: 4))
+        XCTAssertEqual(live.completionRate, 2.0 / 3.0, accuracy: 0.000_001)
+
+        let summary = try XCTUnwrap(session.finish(at: start.addingTimeInterval(5)))
+        let report = try XCTUnwrap(summary.goalReport)
+        XCTAssertEqual(report.launchContext.localDay, "2026-08-20")
+        XCTAssertEqual(report.dailyProgress, live)
+        XCTAssertEqual(report.planProgress, live)
+        XCTAssertEqual(report.generatedAt, start.addingTimeInterval(5))
+
+        let result = try event.commit(summary: summary, in: context)
+        let replay = try event.commit(summary: summary, in: context)
+        XCTAssertEqual(result.disposition, .inserted)
+        XCTAssertEqual(replay.disposition, .alreadyCommitted)
+        XCTAssertEqual(result.attempt.dailyGoalKey, dailyGoal.key)
+        XCTAssertEqual(result.attempt.goalLaunchContext, launchContext)
+        XCTAssertEqual(result.attempt.goalReport, report)
+        XCTAssertEqual(
+            try PracticeAttempt.goalProgressCounts(
+                dailyGoalKey: dailyGoal.key,
+                eventID: event.id,
+                in: context
+            ),
+            PracticeGoalCounts(left: 6, right: 10, both: 4),
+            "A replay must not duplicate daily progress"
+        )
+
+        let nextLaunch = try XCTUnwrap(PracticeGoalLaunchContext.capture(
+            for: event,
+            dailyGoal: dailyGoal,
+            launchedAt: start.addingTimeInterval(10),
+            timeZone: timeZone,
+            in: context
+        ))
+        XCTAssertEqual(
+            nextLaunch.dailyCompletedBeforeSession,
+            PracticeGoalCounts(left: 6, right: 10, both: 4)
+        )
+        XCTAssertEqual(
+            nextLaunch.planCompletedBeforeSession,
+            PracticeGoalCounts(left: 6, right: 10, both: 4)
+        )
+    }
+
+    @MainActor
+    func testFailedGoalAttemptDoesNotBecomeDailyProgress() throws {
+        enum ForcedGoalSaveError: Error { case failed }
+
+        let container = try makeInMemoryPracticeContainer()
+        let context = container.mainContext
+        let event = PracticeEvent(name: "目标保存失败")
+        event.enableGoalPlan(targets: PracticeGoalCounts(left: 2))
+        let plan = try XCTUnwrap(event.goalPlan)
+        context.insert(event)
+        let date = Date(timeIntervalSinceReferenceDate: 19_500)
+        let dailyGoal = try PracticeDailyGoal.create(
+            for: event.id,
+            planID: plan.id,
+            targets: PracticeGoalCounts(left: 2),
+            at: date,
+            timeZone: TimeZone(secondsFromGMT: 0)!,
+            in: context
+        )
+        try context.save()
+        let launchContext = try XCTUnwrap(PracticeGoalLaunchContext.capture(
+            for: event,
+            dailyGoal: dailyGoal,
+            launchedAt: date,
+            timeZone: TimeZone(secondsFromGMT: 0)!,
+            in: context
+        ))
+        let report = PracticeGoalReportSnapshot(
+            launchContext: launchContext,
+            sessionCompleted: PracticeGoalCounts(left: 1),
+            generatedAt: date
+        )
+        let summary = PracticeSessionSummary(
+            sourceEventID: event.id,
+            finishedAt: date,
+            left: HandPracticeStats(count: 1),
+            goalLaunchContext: launchContext,
+            goalReport: report
+        )
+
+        XCTAssertThrowsError(
+            try event.commit(summary: summary, in: context) {
+                throw ForcedGoalSaveError.failed
+            }
+        )
+        XCTAssertEqual(
+            try PracticeAttempt.goalProgressCounts(
+                dailyGoalKey: dailyGoal.key,
+                eventID: event.id,
+                in: context
+            ),
+            PracticeGoalCounts()
+        )
+    }
+
     @MainActor
     func testLegacySingleEntityStoreMigratesAdditivelyToAttemptHistorySchema() throws {
         let storeDirectory = FileManager.default.temporaryDirectory
@@ -2747,7 +3145,9 @@ final class MetronomePresetTests: XCTestCase {
 
         let currentSchema = Schema([
             PracticeEvent.self,
-            PracticeAttempt.self
+            PracticeAttempt.self,
+            PracticeFolder.self,
+            PracticeDailyGoal.self
         ])
         let currentConfiguration = ModelConfiguration(
             "GeoPractice",
@@ -2803,7 +3203,9 @@ final class MetronomePresetTests: XCTestCase {
     private func makeInMemoryPracticeContainer() throws -> ModelContainer {
         let schema = Schema([
             PracticeEvent.self,
-            PracticeAttempt.self
+            PracticeAttempt.self,
+            PracticeFolder.self,
+            PracticeDailyGoal.self
         ])
         let configuration = ModelConfiguration(
             schema: schema,

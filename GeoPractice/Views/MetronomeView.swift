@@ -827,6 +827,9 @@ struct MetronomeView: View {
         let session = practiceSession.session
         let hand = session.currentHand
         let count = session.stats(for: hand, at: .now).count
+        let dailyProgress = session.goalProgress(for: .daily, at: .now)
+        let dailyTarget = dailyProgress?.targets.value(for: hand) ?? 0
+        let dailyCompleted = dailyProgress?.completed.value(for: hand) ?? count
         let canEdit = session.phase == .running || session.phase == .paused
 
         return Button {
@@ -836,10 +839,14 @@ struct MetronomeView: View {
                 Text("+1")
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .foregroundStyle(Color.white.opacity(0.68))
-                Text("\(hand.shortTitle) · \(count)")
+                Text(dailyTarget > 0
+                     ? "\(hand.shortTitle) · \(dailyCompleted)/\(dailyTarget)"
+                     : "\(hand.shortTitle) · \(count)")
                     .font(.system(size: 9, weight: .bold, design: .rounded))
                     .foregroundStyle(GeoTheme.muted)
                     .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.62)
             }
             .frame(maxWidth: .infinity, minHeight: 52)
             .contentShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -847,7 +854,11 @@ struct MetronomeView: View {
         .buttonStyle(LiquidPressButtonStyle())
         .disabled(!canEdit || visualFinish != nil)
         .accessibilityLabel("为当前\(hand.title)增加一次")
-        .accessibilityValue("当前 \(count) 次")
+        .accessibilityValue(goalAccessibilityValue(
+            hand: hand,
+            fallbackCount: count,
+            progress: dailyProgress
+        ))
     }
 
     private var canEditLiquidControls: Bool {
@@ -1612,10 +1623,21 @@ struct MetronomeView: View {
                             at: .now
                         ).count == 0)
 
-                        Text("\(practiceSession.session.stats(for: practiceSession.session.currentHand, at: .now).count)")
+                        let hand = practiceSession.session.currentHand
+                        let count = practiceSession.session.stats(for: hand, at: .now).count
+                        Text(goalCountText(
+                            hand: hand,
+                            fallbackCount: count,
+                            progress: practiceSession.session.goalProgress(
+                                for: .daily,
+                                at: .now
+                            )
+                        ))
                             .font(.system(size: 22, weight: .bold, design: .rounded))
                             .monospacedDigit()
-                            .frame(minWidth: 44)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.68)
+                            .frame(minWidth: 58)
 
                         Button {
                             recordCompletion(for: practiceSession.session.currentHand)
@@ -1663,13 +1685,21 @@ struct MetronomeView: View {
 
     private func sessionStatCell(for hand: PracticeHand, at date: Date) -> some View {
         let stats = practiceSession.session.stats(for: hand, at: date)
+        let dailyProgress = practiceSession.session.goalProgress(for: .daily, at: date)
         return VStack(spacing: 4) {
             Text(hand.title)
                 .font(.system(size: 10, weight: .semibold))
                 .foregroundStyle(GeoTheme.muted)
-            Text("\(stats.count) 次")
+            Text(goalCountText(
+                hand: hand,
+                fallbackCount: stats.count,
+                progress: dailyProgress,
+                includesUnit: true
+            ))
                 .font(.system(size: 14, weight: .bold, design: .rounded))
                 .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.72)
             Text(practiceDurationString(milliseconds: stats.durationMilliseconds))
                 .font(.system(size: 10, weight: .semibold))
                 .monospacedDigit()
@@ -1680,6 +1710,12 @@ struct MetronomeView: View {
             Color(white: 0.04),
             in: RoundedRectangle(cornerRadius: 11, style: .continuous)
         )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(goalAccessibilityValue(
+            hand: hand,
+            fallbackCount: stats.count,
+            progress: dailyProgress
+        ) + "，练习时长 " + practiceDurationString(milliseconds: stats.durationMilliseconds))
     }
 
     private func requestHandSwitch(to hand: PracticeHand) {
@@ -1702,11 +1738,57 @@ struct MetronomeView: View {
               visualFinish == nil
         else { return }
 
+        let before = practiceSession.session.goalProgress(for: .daily, at: .now)
         practiceSession.recordCompletion(for: hand, preset: engine.preset)
+        let after = practiceSession.session.goalProgress(for: .daily, at: .now)
+        let target = after?.targets.value(for: hand) ?? 0
+        let completed = after?.completed.value(for: hand)
+            ?? practiceSession.session.stats(for: hand, at: .now).count
+        let message: String
+        if before?.isComplete == false, after?.isComplete == true {
+            message = "今日目标已完成 · \(after?.completed.total ?? completed)/\(after?.targets.total ?? target)"
+        } else if target > 0,
+                  (before?.completed.value(for: hand) ?? 0) < target,
+                  completed >= target {
+            message = "今日\(hand.title)目标已完成 · \(completed)/\(target)"
+        } else if target > 0 {
+            message = "已记录 · \(hand.title) \(completed)/\(target)"
+        } else {
+            message = "已记录 · \(hand.title) +1"
+        }
         showRecordFeedback(
-            "已记录 · \(hand.title) +1",
+            message,
             symbol: "checkmark.circle.fill"
         )
+    }
+
+    private func goalCountText(
+        hand: PracticeHand,
+        fallbackCount: Int,
+        progress: PracticeGoalProgress?,
+        includesUnit: Bool = false
+    ) -> String {
+        let target = progress?.targets.value(for: hand) ?? 0
+        guard target > 0, let progress else {
+            return includesUnit ? "\(fallbackCount) 次" : "\(fallbackCount)"
+        }
+        let value = "\(progress.completed.value(for: hand))/\(target)"
+        return includesUnit ? value + " 次" : value
+    }
+
+    private func goalAccessibilityValue(
+        hand: PracticeHand,
+        fallbackCount: Int,
+        progress: PracticeGoalProgress?
+    ) -> String {
+        let target = progress?.targets.value(for: hand) ?? 0
+        guard target > 0, let progress else {
+            return "本次\(hand.title)已记录 \(fallbackCount) 次"
+        }
+        let completed = progress.completed.value(for: hand)
+        let remaining = progress.remaining.value(for: hand)
+        return "今日\(hand.title)已完成 \(completed) 次，目标 \(target) 次，剩余 \(remaining) 次"
+            + (completed >= target ? "，已完成目标" : "")
     }
 
     private func undoLastCompletion(for hand: PracticeHand) {
@@ -1898,6 +1980,11 @@ private struct PracticeSessionSummaryView: View {
     let onDiscard: () -> Void
     let onContinue: () -> Void
 
+    @State private var isExporting = false
+    @State private var exportSuccess: String?
+    @State private var exportError: String?
+    @State private var shouldOfferPhotoSettings = false
+
     var body: some View {
         NavigationStack {
             ZStack {
@@ -1966,21 +2053,24 @@ private struct PracticeSessionSummaryView: View {
                             }
                         }
 
-                        if let sourceEventName, let onAppend {
-                            VStack(spacing: 8) {
-                                Text("来源事件：\(sourceEventName)")
-                                    .font(.system(size: 12, weight: .semibold))
-                                    .foregroundStyle(GeoTheme.muted)
-                                Button(action: onAppend) {
-                                    Label("追加并更新“\(sourceEventName)”", systemImage: "tray.and.arrow.down.fill")
-                                        .font(.system(size: 15, weight: .bold))
-                                        .frame(maxWidth: .infinity, minHeight: 52)
-                                }
-                                .buttonStyle(.borderedProminent)
-                                .tint(.white)
-                                .foregroundStyle(.black)
-                                .disabled(isSaving)
-                            }
+                        if let dailyProgress = summary.goalProgress(for: .daily) {
+                            PracticeGoalProgressCard(
+                                title: "今日目标",
+                                progress: dailyProgress
+                            )
+                        }
+
+                        if let planProgress = summary.goalProgress(for: .plan) {
+                            PracticeGoalProgressCard(
+                                title: "练习计划总目标",
+                                progress: planProgress
+                            )
+                        }
+
+                        if let sourceEventName, onAppend != nil {
+                            Text("来源事件：\(sourceEventName)")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(GeoTheme.muted)
                         } else if summary.sourceEventID != nil {
                             Label("原练习记录已被删除，无法追加本次统计。", systemImage: "exclamationmark.triangle")
                                 .font(.system(size: 12, weight: .semibold))
@@ -2016,20 +2106,17 @@ private struct PracticeSessionSummaryView: View {
                                 .accessibilityElement(children: .combine)
                         }
 
-                        Button(action: onContinue) {
-                            Label("返回继续练习", systemImage: "arrow.uturn.backward")
-                                .frame(maxWidth: .infinity, minHeight: 48)
+                        if let exportSuccess {
+                            Label(exportSuccess, systemImage: "photo.badge.checkmark")
+                                .font(.system(size: 12, weight: .semibold))
+                                .foregroundStyle(Color.white.opacity(0.82))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(12)
+                                .background(
+                                    Color.white.opacity(0.06),
+                                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                )
                         }
-                        .buttonStyle(.bordered)
-                        .disabled(isSaving)
-
-                        Button(
-                            summary.sourceEventID == nil ? "完成" : "仅结束，不保存",
-                            role: summary.sourceEventID == nil ? nil : .destructive,
-                            action: onDiscard
-                        )
-                        .frame(minHeight: 44)
-                        .disabled(isSaving)
 
                         if isSaving {
                             ProgressView(persistenceSuccess == nil ? "正在保存…" : "保存成功，正在返回…")
@@ -2038,14 +2125,278 @@ private struct PracticeSessionSummaryView: View {
                     }
                     .frame(maxWidth: 560)
                     .padding(20)
+                    .padding(.bottom, 12)
                 }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) {
+                actionBar
             }
             .navigationTitle("练习完毕")
             .navigationBarTitleDisplayMode(.inline)
         }
         .preferredColorScheme(.dark)
-        .presentationDetents([.medium, .large])
+        .presentationDetents([.large])
         .presentationDragIndicator(.visible)
+        .alert("无法保存结果", isPresented: Binding(
+            get: { exportError != nil },
+            set: { if !$0 { exportError = nil } }
+        )) {
+            if shouldOfferPhotoSettings {
+                Button("打开设置") {
+                    if let url = URL(string: UIApplication.openSettingsURLString) {
+                        UIApplication.shared.open(url)
+                    }
+                }
+            }
+            Button("好", role: .cancel) { exportError = nil }
+        } message: {
+            Text(exportError ?? "请稍后重试。")
+        }
+        .alert("保存成功", isPresented: Binding(
+            get: { exportSuccess != nil },
+            set: { if !$0 { exportSuccess = nil } }
+        )) {
+            Button("好", role: .cancel) { exportSuccess = nil }
+        } message: {
+            Text(exportSuccess ?? "练习结果已保存到相册。")
+        }
+    }
+
+    private var actionBar: some View {
+        VStack(spacing: 9) {
+            Button {
+                saveResultToPhotos()
+            } label: {
+                Label(
+                    isExporting ? "正在保存结果…" : "保存结果到相册",
+                    systemImage: "photo.badge.plus"
+                )
+                .font(.callout.weight(.bold))
+                .frame(maxWidth: .infinity, minHeight: 44)
+            }
+            .buttonStyle(.bordered)
+            .disabled(isSaving || isExporting)
+
+            if let sourceEventName, let onAppend {
+                Button(action: onAppend) {
+                    Label(
+                        "追加并更新“\(sourceEventName)”",
+                        systemImage: "tray.and.arrow.down.fill"
+                    )
+                    .font(.callout.weight(.bold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.75)
+                    .frame(maxWidth: .infinity, minHeight: 48)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.white)
+                .foregroundStyle(.black)
+                .disabled(isSaving || isExporting)
+            }
+
+            ViewThatFits(in: .horizontal) {
+                HStack(spacing: 9) {
+                    secondaryActions
+                }
+                VStack(spacing: 7) {
+                    secondaryActions
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 10)
+        .padding(.bottom, 8)
+        .frame(maxWidth: 720)
+        .background(.ultraThinMaterial)
+        .overlay(alignment: .top) {
+            Rectangle()
+                .fill(Color.white.opacity(0.09))
+                .frame(height: 0.7)
+        }
+        .frame(maxWidth: .infinity)
+    }
+
+    @ViewBuilder
+    private var secondaryActions: some View {
+        Button(action: onContinue) {
+            Label("返回继续练习", systemImage: "arrow.uturn.backward")
+                .frame(maxWidth: .infinity, minHeight: 44)
+        }
+        .buttonStyle(.bordered)
+        .disabled(isSaving || isExporting)
+
+        Button(
+            summary.sourceEventID == nil ? "完成" : "仅结束，不保存",
+            role: summary.sourceEventID == nil ? nil : .destructive,
+            action: onDiscard
+        )
+        .frame(maxWidth: .infinity, minHeight: 44)
+        .disabled(isSaving || isExporting)
+    }
+
+    private func saveResultToPhotos() {
+        guard !isExporting else { return }
+        isExporting = true
+        exportSuccess = nil
+        exportError = nil
+        shouldOfferPhotoSettings = false
+
+        Task { @MainActor in
+            do {
+                let image = try PracticeReportExporter.render {
+                    PracticeResultCard(
+                        summary: summary,
+                        sourceEventName: sourceEventName
+                    )
+                    .frame(width: 540, height: 675)
+                }
+                try await PracticeReportExporter.saveToPhotoLibrary(image)
+                exportSuccess = "练习结果已保存到相册"
+                UIAccessibility.post(
+                    notification: .announcement,
+                    argument: exportSuccess
+                )
+            } catch {
+                exportError = error.localizedDescription
+                if case PracticeReportExportError.photoAccessDenied = error {
+                    shouldOfferPhotoSettings = true
+                }
+                UIAccessibility.post(
+                    notification: .announcement,
+                    argument: exportError
+                )
+            }
+            isExporting = false
+        }
+    }
+}
+
+struct PracticeResultCard: View {
+    let summary: PracticeSessionSummary
+    let sourceEventName: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(alignment: .top) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("GeoBeat")
+                        .font(.system(size: 30, weight: .bold, design: .rounded))
+                    Text("练习结果")
+                        .font(.system(size: 12, weight: .bold, design: .rounded))
+                        .tracking(2)
+                        .foregroundStyle(Color.white.opacity(0.55))
+                }
+                Spacer()
+                Text((summary.finishedAt ?? .now).formatted(
+                    date: .abbreviated,
+                    time: .shortened
+                ))
+                    .font(.system(size: 12, weight: .semibold, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.62))
+            }
+
+            Text(sourceEventName ?? "自由练习")
+                .font(.system(size: 24, weight: .bold, design: .rounded))
+                .lineLimit(2)
+
+            VStack(spacing: 11) {
+                ForEach(PracticeHand.controlOrder) { hand in
+                    let stats = summary.stats(for: hand)
+                    let speed = summary.speedSummary(for: hand)
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(hand.title)
+                            .fontWeight(.bold)
+                            .frame(width: 44, alignment: .leading)
+                        Text("\(stats.count) 次")
+                            .monospacedDigit()
+                        Text(practiceDurationString(milliseconds: stats.durationMilliseconds))
+                            .monospacedDigit()
+                            .foregroundStyle(Color.white.opacity(0.62))
+                        Spacer()
+                        Text("练习最多 \(speed.mostPracticed?.bpm.description ?? "—") · 最大尝试 \(speed.maximumAttempt?.bpm.description ?? "—")")
+                            .font(.system(size: 11, weight: .semibold, design: .rounded))
+                            .monospacedDigit()
+                            .foregroundStyle(Color.white.opacity(0.62))
+                    }
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                }
+            }
+            .padding(16)
+            .background(
+                Color.white.opacity(0.055),
+                in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+            )
+
+            if let daily = summary.goalProgress(for: .daily) {
+                exportGoalSection(title: "今日目标", progress: daily)
+            }
+            if let plan = summary.goalProgress(for: .plan) {
+                exportGoalSection(title: "练习计划总目标", progress: plan)
+            }
+
+            Spacer(minLength: 0)
+
+            HStack {
+                Text("本次总计")
+                Spacer()
+                Text("\(summary.totalCount) 次 · \(practiceDurationString(milliseconds: summary.totalDurationMilliseconds))")
+                    .fontWeight(.bold)
+                    .monospacedDigit()
+            }
+            .font(.system(size: 14, weight: .semibold, design: .rounded))
+
+            Text("点不跑，点只闪。")
+                .font(.system(size: 11, weight: .semibold, design: .rounded))
+                .foregroundStyle(Color.white.opacity(0.38))
+                .frame(maxWidth: .infinity, alignment: .center)
+        }
+        .foregroundStyle(.white)
+        .padding(34)
+        .background(Color(white: 0.035))
+    }
+
+    private func exportGoalSection(
+        title: String,
+        progress: PracticeGoalProgress
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(title)
+                    .font(.system(size: 13, weight: .bold, design: .rounded))
+                Spacer()
+                Text(progress.isComplete ? "已完成" : "进行中")
+                    .font(.system(size: 11, weight: .bold, design: .rounded))
+                    .foregroundStyle(Color.white.opacity(0.64))
+            }
+            HStack(spacing: 12) {
+                ForEach(PracticeHand.controlOrder) { hand in
+                    let target = progress.targets.value(for: hand)
+                    if target > 0 {
+                        Text("\(hand.title) \(progress.completed.value(for: hand))/\(target)")
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.72)
+                    }
+                }
+                Spacer(minLength: 0)
+            }
+            HStack {
+                Text("剩余 \(progress.remaining.total) 次")
+                    .foregroundStyle(Color.white.opacity(0.62))
+                Spacer()
+                Text("\(progress.creditedCompletedTotal)/\(progress.targets.total) · \(progress.completionRate.formatted(.percent.precision(.fractionLength(1))))")
+                    .fontWeight(.bold)
+                    .monospacedDigit()
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.78)
+            }
+            .font(.system(size: 11, weight: .semibold, design: .rounded))
+        }
+        .padding(13)
+        .background(
+            Color.white.opacity(0.045),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
     }
 }
 

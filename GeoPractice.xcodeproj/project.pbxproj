@@ -25,6 +25,11 @@
 		A00000000000000000000010 /* BravuraText.otf in Resources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000012 /* BravuraText.otf */; };
 		A00000000000000000000011 /* PracticePreferences.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000013 /* PracticePreferences.swift */; };
 		A00000000000000000000012 /* PracticeAttempt.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000015 /* PracticeAttempt.swift */; };
+		A00000000000000000000013 /* PracticeFolder.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000016 /* PracticeFolder.swift */; };
+		A00000000000000000000014 /* PracticeGoals.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000017 /* PracticeGoals.swift */; };
+		A00000000000000000000015 /* PracticeReportExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000018 /* PracticeReportExporter.swift */; };
+		A00000000000000000000016 /* PracticeGoalViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000019 /* PracticeGoalViews.swift */; };
+		A00000000000000000000017 /* PracticeFolderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001A /* PracticeFolderTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -59,6 +64,11 @@
 		B00000000000000000000013 /* PracticePreferences.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticePreferences.swift; sourceTree = "<group>"; };
 		B00000000000000000000014 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		B00000000000000000000015 /* PracticeAttempt.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeAttempt.swift; sourceTree = "<group>"; };
+		B00000000000000000000016 /* PracticeFolder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeFolder.swift; sourceTree = "<group>"; };
+		B00000000000000000000017 /* PracticeGoals.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeGoals.swift; sourceTree = "<group>"; };
+		B00000000000000000000018 /* PracticeReportExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeReportExporter.swift; sourceTree = "<group>"; };
+		B00000000000000000000019 /* PracticeGoalViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeGoalViews.swift; sourceTree = "<group>"; };
+		B0000000000000000000001A /* PracticeFolderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeFolderTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -110,6 +120,8 @@
 				B00000000000000000000002 /* MetronomePreset.swift */,
 				B00000000000000000000015 /* PracticeAttempt.swift */,
 				B00000000000000000000003 /* PracticeEvent.swift */,
+				B00000000000000000000016 /* PracticeFolder.swift */,
+				B00000000000000000000017 /* PracticeGoals.swift */,
 				B00000000000000000000013 /* PracticePreferences.swift */,
 				B0000000000000000000000E /* PracticeSession.swift */,
 			);
@@ -120,6 +132,7 @@
 			isa = PBXGroup;
 			children = (
 				B00000000000000000000004 /* MetronomeEngine.swift */,
+				B00000000000000000000018 /* PracticeReportExporter.swift */,
 			);
 			path = Services;
 			sourceTree = "<group>";
@@ -133,6 +146,7 @@
 				B00000000000000000000007 /* MetronomeView.swift */,
 				B00000000000000000000008 /* PracticeEventsView.swift */,
 				B00000000000000000000009 /* EventEditorView.swift */,
+				B00000000000000000000019 /* PracticeGoalViews.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -141,6 +155,7 @@
 			isa = PBXGroup;
 			children = (
 				B0000000000000000000000A /* MetronomePresetTests.swift */,
+				B0000000000000000000001A /* PracticeFolderTests.swift */,
 			);
 			path = GeoPracticeTests;
 			sourceTree = "<group>";
@@ -275,6 +290,10 @@
 				A0000000000000000000000F /* LiquidControlComponents.swift in Sources */,
 				A00000000000000000000011 /* PracticePreferences.swift in Sources */,
 				A00000000000000000000012 /* PracticeAttempt.swift in Sources */,
+				A00000000000000000000013 /* PracticeFolder.swift in Sources */,
+				A00000000000000000000014 /* PracticeGoals.swift in Sources */,
+				A00000000000000000000015 /* PracticeReportExporter.swift in Sources */,
+				A00000000000000000000016 /* PracticeGoalViews.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -283,6 +302,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A0000000000000000000000A /* MetronomePresetTests.swift in Sources */,
+				A00000000000000000000017 /* PracticeFolderTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -415,7 +435,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = XKY44WW2XC;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = GeoPractice/Info.plist;
@@ -428,7 +448,7 @@
 				INFOPLIST_KEY_UIRequiresFullScreen = NO;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 4.1;
+				MARKETING_VERSION = 4.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kuoxiyu.GeoPractice;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -444,7 +464,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = XKY44WW2XC;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = GeoPractice/Info.plist;
@@ -457,7 +477,7 @@
 				INFOPLIST_KEY_UIRequiresFullScreen = NO;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 4.1;
+				MARKETING_VERSION = 4.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kuoxiyu.GeoPractice;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

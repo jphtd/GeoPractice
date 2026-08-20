@@ -13,6 +13,7 @@ final class PracticeAttempt {
     var startedAt: Date
     var finishedAt: Date
     var createdAt: Date
+    var dailyGoalKey: String?
 
     var leftCount: Int
     var rightCount: Int
@@ -35,6 +36,8 @@ final class PracticeAttempt {
     private var rightMaximumAttemptData: Data?
     private var bothMaximumAttemptData: Data?
     private var completionSamplesData: Data?
+    private var goalLaunchContextData: Data?
+    private var goalReportData: Data?
 
     init(
         id: UUID = UUID(),
@@ -48,6 +51,7 @@ final class PracticeAttempt {
         self.createdAt = createdAt
         startedAt = summary.startedAt ?? summary.finishedAt ?? createdAt
         finishedAt = summary.finishedAt ?? createdAt
+        dailyGoalKey = summary.goalLaunchContext?.dailyGoalKey
 
         leftCount = summary.left.count
         rightCount = summary.right.count
@@ -74,12 +78,28 @@ final class PracticeAttempt {
         rightMaximumAttemptData = Self.encode(rightSpeed.maximumAttempt)
         bothMaximumAttemptData = Self.encode(bothSpeed.maximumAttempt)
         completionSamplesData = Self.encode(summary.completions)
+        goalLaunchContextData = Self.encode(summary.goalLaunchContext)
+        goalReportData = Self.encode(summary.goalReport)
     }
 
     var recordedAt: Date { createdAt }
 
     var completions: [PracticeCompletionSample] {
         Self.decode([PracticeCompletionSample].self, from: completionSamplesData) ?? []
+    }
+
+    var goalLaunchContext: PracticeGoalLaunchContext? {
+        Self.decode(
+            PracticeGoalLaunchContext.self,
+            from: goalLaunchContextData
+        )
+    }
+
+    var goalReport: PracticeGoalReportSnapshot? {
+        Self.decode(
+            PracticeGoalReportSnapshot.self,
+            from: goalReportData
+        )
     }
 
     func stats(for hand: PracticeHand) -> HandPracticeStats {
@@ -177,6 +197,18 @@ final class PracticeAttempt {
     ) throws -> MetronomePreset? {
         try latest(for: eventID, hand: hand, in: context)?
             .mostPracticedPreset(for: hand)
+    }
+
+    static func goalProgressCounts(
+        dailyGoalKey: String,
+        eventID: UUID,
+        in context: ModelContext
+    ) throws -> PracticeGoalCounts {
+        try history(for: eventID, in: context)
+            .filter { $0.dailyGoalKey == dailyGoalKey }
+            .reduce(PracticeGoalCounts()) { result, attempt in
+                result.adding(PracticeGoalCounts(attempt: attempt))
+            }
     }
 
     static func deleteHistory(for eventID: UUID, in context: ModelContext) throws {

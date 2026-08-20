@@ -9,9 +9,18 @@ enum RootTab: Hashable {
 }
 
 private struct PendingPracticeLaunch {
-    let eventID: UUID
-    let eventName: String
+    let event: PracticeEvent
     let preset: MetronomePreset
+
+    var eventID: UUID { event.id }
+    var eventName: String { event.name }
+}
+
+private struct PendingDailyGoalSetup: Identifiable {
+    let id = UUID()
+    let launch: PendingPracticeLaunch
+    let date: Date
+    let initialTargets: PracticeGoalCounts
 }
 
 private struct PracticeSessionDraft: Codable {
@@ -57,10 +66,15 @@ final class PracticeSessionController: ObservableObject {
     func begin(
         sourceEventID: UUID? = nil,
         preset: MetronomePreset,
+        goalContext: PracticeGoalLaunchContext? = nil,
         at date: Date = .now
     ) {
         var next = PracticeSession()
-        next.begin(sourceEventID: sourceEventID, at: date)
+        next.begin(
+            sourceEventID: sourceEventID,
+            goalContext: goalContext,
+            at: date
+        )
         sessionPreset = preset.normalized
         commit(next, at: date)
     }
@@ -194,6 +208,7 @@ final class PracticeSessionController: ObservableObject {
 
 struct RootView: View {
     @Environment(\.scenePhase) private var scenePhase
+    @Environment(\.modelContext) private var modelContext
     @AppStorage(PracticePreferenceKeys.continueAudioInBackground)
     private var continueAudioInBackground = true
     @AppStorage(PracticePreferenceKeys.keepScreenAwake)
@@ -202,6 +217,8 @@ struct RootView: View {
     @StateObject private var practiceSession = PracticeSessionController()
     @State private var selectedTab: RootTab = .practice
     @State private var pendingPracticeLaunch: PendingPracticeLaunch?
+    @State private var pendingDailyGoalSetup: PendingDailyGoalSetup?
+    @State private var launchError: String?
     private let checkpointTimer = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
 
     var body: some View {
@@ -211,8 +228,7 @@ struct RootView: View {
                 protectedEventID: protectedPracticeEventID
             ) { event, preset in
                 let request = PendingPracticeLaunch(
-                    eventID: event.id,
-                    eventName: event.name,
+                    event: event,
                     preset: preset
                 )
                 if practiceSession.session.phase == .running
@@ -220,7 +236,7 @@ struct RootView: View {
                     || practiceSession.session.phase == .finished {
                     pendingPracticeLaunch = request
                 } else {
-                    launchPractice(request)
+                    preparePracticeLaunch(request)
                 }
             }
             .tag(RootTab.practice)
@@ -257,7 +273,8 @@ struct RootView: View {
             if let request = pendingPracticeLaunch {
                 Button("放弃本次并开始“\(request.eventName)”", role: .destructive) {
                     pendingPracticeLaunch = nil
-                    launchPractice(request)
+                    practiceSession.reset()
+                    preparePracticeLaunch(request)
                 }
             }
             Button("取消", role: .cancel) {
@@ -265,6 +282,27 @@ struct RootView: View {
             }
         } message: {
             Text("当前会话的次数和时长尚未保存。你可以返回节拍器完成或确认汇总，也可以明确放弃后开始新的练习。")
+        }
+        .sheet(item: $pendingDailyGoalSetup) { setup in
+            DailyGoalSetupView(
+                eventName: setup.launch.eventName,
+                date: setup.date,
+                initialTargets: setup.initialTargets
+            ) { targets in
+                confirmDailyGoal(
+                    targets,
+                    for: setup.launch,
+                    at: .now
+                )
+            }
+        }
+        .alert("无法开始练习", isPresented: Binding(
+            get: { launchError != nil },
+            set: { if !$0 { launchError = nil } }
+        )) {
+            Button("好", role: .cancel) { launchError = nil }
+        } message: {
+            Text(launchError ?? "请稍后重试。")
         }
         .onChange(of: selectedTab) { _, tab in
             if tab == .metronome {
@@ -315,9 +353,100 @@ struct RootView: View {
         }
     }
 
-    private func launchPractice(_ request: PendingPracticeLaunch) {
+    private func preparePracticeLaunch(
+        _ request: PendingPracticeLaunch,
+        at date: Date = .now
+    ) {
+        guard let plan = request.event.goalPlan else {
+            launchPractice(request, goalContext: nil, at: date)
+            return
+        }
+
+        do {
+            if let dailyGoal = try PracticeDailyGoal.today(
+                for: request.eventID,
+                planID: plan.id,
+                at: date,
+                timeZone: .autoupdatingCurrent,
+                in: modelContext
+            ) {
+                let context = try PracticeGoalLaunchContext.capture(
+                    for: request.event,
+                    dailyGoal: dailyGoal,
+                    launchedAt: date,
+                    timeZone: .autoupdatingCurrent,
+                    in: modelContext
+                )
+                launchPractice(request, goalContext: context, at: date)
+                return
+            }
+
+            let previous = try PracticeDailyGoal.previous(
+                for: request.eventID,
+                planID: plan.id,
+                before: date,
+                timeZone: .autoupdatingCurrent,
+                in: modelContext
+            )
+            pendingDailyGoalSetup = PendingDailyGoalSetup(
+                launch: request,
+                date: date,
+                initialTargets: previous?.targets ?? plan.targets
+            )
+        } catch {
+            launchError = error.localizedDescription
+        }
+    }
+
+    private func confirmDailyGoal(
+        _ targets: PracticeGoalCounts,
+        for request: PendingPracticeLaunch,
+        at date: Date
+    ) -> Bool {
+        guard targets.total > 0 else { return false }
+        do {
+            guard let plan = request.event.goalPlan else {
+                launchPractice(request, goalContext: nil, at: date)
+                return true
+            }
+            let goal = try PracticeDailyGoal.create(
+                for: request.eventID,
+                planID: plan.id,
+                targets: targets,
+                at: date,
+                timeZone: .autoupdatingCurrent,
+                in: modelContext
+            )
+            let context = try PracticeGoalLaunchContext.capture(
+                for: request.event,
+                dailyGoal: goal,
+                launchedAt: date,
+                timeZone: .autoupdatingCurrent,
+                in: modelContext
+            )
+            try modelContext.save()
+            pendingDailyGoalSetup = nil
+            launchPractice(request, goalContext: context, at: date)
+            return true
+        } catch {
+            modelContext.rollback()
+            launchError = error.localizedDescription
+            return false
+        }
+    }
+
+    private func launchPractice(
+        _ request: PendingPracticeLaunch,
+        goalContext: PracticeGoalLaunchContext?,
+        at date: Date
+    ) {
         metronome.apply(request.preset)
-        practiceSession.begin(sourceEventID: request.eventID, preset: request.preset)
+        practiceSession.begin(
+            sourceEventID: request.eventID,
+            preset: request.preset,
+            goalContext: goalContext,
+            at: date
+        )
         selectedTab = .metronome
     }
 
@@ -432,7 +561,12 @@ struct RootView: View {
 #Preview {
     RootView()
         .modelContainer(
-            for: [PracticeEvent.self, PracticeAttempt.self],
+            for: [
+                PracticeEvent.self,
+                PracticeAttempt.self,
+                PracticeFolder.self,
+                PracticeDailyGoal.self
+            ],
             inMemory: true
         )
 }

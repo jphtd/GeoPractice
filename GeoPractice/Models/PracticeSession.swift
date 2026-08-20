@@ -139,6 +139,8 @@ struct PracticeSessionSummary: Codable, Equatable, Sendable {
     let right: HandPracticeStats
     let both: HandPracticeStats
     let completions: [PracticeCompletionSample]
+    let goalLaunchContext: PracticeGoalLaunchContext?
+    let goalReport: PracticeGoalReportSnapshot?
 
     init(
         sessionID: UUID = UUID(),
@@ -148,7 +150,9 @@ struct PracticeSessionSummary: Codable, Equatable, Sendable {
         left: HandPracticeStats = HandPracticeStats(),
         right: HandPracticeStats = HandPracticeStats(),
         both: HandPracticeStats = HandPracticeStats(),
-        completions: [PracticeCompletionSample] = []
+        completions: [PracticeCompletionSample] = [],
+        goalLaunchContext: PracticeGoalLaunchContext? = nil,
+        goalReport: PracticeGoalReportSnapshot? = nil
     ) {
         self.sessionID = sessionID
         self.sourceEventID = sourceEventID
@@ -158,6 +162,8 @@ struct PracticeSessionSummary: Codable, Equatable, Sendable {
         self.right = right
         self.both = both
         self.completions = completions
+        self.goalLaunchContext = goalLaunchContext
+        self.goalReport = goalReport
     }
 
     func stats(for hand: PracticeHand) -> HandPracticeStats {
@@ -170,6 +176,10 @@ struct PracticeSessionSummary: Codable, Equatable, Sendable {
 
     func speedSummary(for hand: PracticeHand) -> PracticeHandSpeedSummary {
         PracticeHandSpeedSummary(samples: completions, for: hand)
+    }
+
+    func goalProgress(for scope: PracticeGoalScope) -> PracticeGoalProgress? {
+        goalReport?.progress(for: scope)
     }
 
     var totalCount: Int {
@@ -194,6 +204,7 @@ struct PracticeSessionSummary: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case sessionID, sourceEventID, startedAt, finishedAt
         case left, right, both, completions
+        case goalLaunchContext, goalReport
     }
 
     init(from decoder: Decoder) throws {
@@ -212,6 +223,14 @@ struct PracticeSessionSummary: Codable, Equatable, Sendable {
             [PracticeCompletionSample].self,
             forKey: .completions
         ) ?? []
+        goalLaunchContext = try container.decodeIfPresent(
+            PracticeGoalLaunchContext.self,
+            forKey: .goalLaunchContext
+        )
+        goalReport = try container.decodeIfPresent(
+            PracticeGoalReportSnapshot.self,
+            forKey: .goalReport
+        )
     }
 }
 
@@ -233,6 +252,7 @@ struct PracticeSession: Codable, Equatable, Sendable {
     private(set) var currentHand: PracticeHand = .both
     private(set) var startedAt: Date?
     private(set) var segmentStartedAt: Date?
+    private(set) var goalLaunchContext: PracticeGoalLaunchContext? = nil
 
     private var left = HandPracticeStats()
     private var right = HandPracticeStats()
@@ -247,10 +267,19 @@ struct PracticeSession: Codable, Equatable, Sendable {
         phase == .finished ? completedSummary : nil
     }
 
-    mutating func begin(sourceEventID: UUID? = nil, at date: Date) {
+    mutating func begin(
+        sourceEventID: UUID? = nil,
+        goalContext: PracticeGoalLaunchContext? = nil,
+        at date: Date
+    ) {
         guard phase == .idle else { return }
         sessionID = UUID()
         self.sourceEventID = sourceEventID
+        if let goalContext, goalContext.eventID == sourceEventID {
+            goalLaunchContext = goalContext
+        } else {
+            goalLaunchContext = nil
+        }
         currentHand = .both
         startedAt = date
         segmentStartedAt = date
@@ -327,6 +356,24 @@ struct PracticeSession: Codable, Equatable, Sendable {
         return result
     }
 
+    func goalProgress(
+        for scope: PracticeGoalScope,
+        at date: Date
+    ) -> PracticeGoalProgress? {
+        if phase == .finished {
+            return completedSummary?.goalProgress(for: scope)
+        }
+        guard let goalLaunchContext else { return nil }
+        return goalLaunchContext.progress(
+            for: scope,
+            sessionCompleted: PracticeGoalCounts(
+                left: stats(for: .left, at: date).count,
+                right: stats(for: .right, at: date).count,
+                both: stats(for: .both, at: date).count
+            )
+        )
+    }
+
     func currentSegmentMilliseconds(at date: Date) -> Int64 {
         guard phase == .running, let segmentStartedAt else { return 0 }
         return Self.milliseconds(from: segmentStartedAt, to: date)
@@ -347,6 +394,18 @@ struct PracticeSession: Codable, Equatable, Sendable {
         }
 
         phase = .finished
+        let sessionCompleted = PracticeGoalCounts(
+            left: left.count,
+            right: right.count,
+            both: both.count
+        )
+        let goalReport = goalLaunchContext.map {
+            PracticeGoalReportSnapshot(
+                launchContext: $0,
+                sessionCompleted: sessionCompleted,
+                generatedAt: finishedAt
+            )
+        }
         let summary = PracticeSessionSummary(
             sessionID: sessionID,
             sourceEventID: sourceEventID,
@@ -355,7 +414,9 @@ struct PracticeSession: Codable, Equatable, Sendable {
             left: left,
             right: right,
             both: both,
-            completions: completions
+            completions: completions,
+            goalLaunchContext: goalLaunchContext,
+            goalReport: goalReport
         )
         completedSummary = summary
         return summary
@@ -411,7 +472,7 @@ struct PracticeSession: Codable, Equatable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case sessionID, phase, sourceEventID, currentHand, startedAt, segmentStartedAt
-        case left, right, both, completions, completedSummary
+        case left, right, both, completions, completedSummary, goalLaunchContext
     }
 
     init(from decoder: Decoder) throws {
@@ -422,6 +483,10 @@ struct PracticeSession: Codable, Equatable, Sendable {
             ?? .both
         startedAt = try container.decodeIfPresent(Date.self, forKey: .startedAt)
         segmentStartedAt = try container.decodeIfPresent(Date.self, forKey: .segmentStartedAt)
+        goalLaunchContext = try container.decodeIfPresent(
+            PracticeGoalLaunchContext.self,
+            forKey: .goalLaunchContext
+        )
         left = try container.decodeIfPresent(HandPracticeStats.self, forKey: .left)
             ?? HandPracticeStats()
         right = try container.decodeIfPresent(HandPracticeStats.self, forKey: .right)

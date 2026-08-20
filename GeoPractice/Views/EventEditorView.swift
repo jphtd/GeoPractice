@@ -5,9 +5,14 @@ struct PracticeEventEditorView: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.modelContext) private var modelContext
     @Query(sort: \PracticeEvent.updatedAt, order: .reverse) private var existingEvents: [PracticeEvent]
+    @Query(sort: [
+        SortDescriptor(\PracticeFolder.sortIndex),
+        SortDescriptor(\PracticeFolder.createdAt)
+    ]) private var folders: [PracticeFolder]
 
     private let event: PracticeEvent?
     private let currentPreset: MetronomePreset
+    private let requestedInitialFolderID: UUID?
 
     @AppStorage(PracticePreferenceKeys.tempoScrubDirection)
     private var tempoScrubDirectionRaw = TempoScrubDirection.horizontal.rawValue
@@ -16,14 +21,29 @@ struct PracticeEventEditorView: View {
     @State private var inheritanceSource: String
     @State private var persistenceError: String?
     @State private var isTempoScrubbing = false
+    @State private var folderID: UUID?
+    @State private var didResolveExistingFolder = false
+    @State private var goalEnabled: Bool
+    @State private var goalTargets: PracticeGoalCounts
 
-    init(event: PracticeEvent? = nil, currentPreset: MetronomePreset) {
+    init(
+        event: PracticeEvent? = nil,
+        currentPreset: MetronomePreset,
+        initialFolderID: UUID? = nil
+    ) {
         self.event = event
         self.currentPreset = currentPreset
+        self.requestedInitialFolderID = initialFolderID
         _name = State(initialValue: event?.name ?? "")
         _preset = State(initialValue: event?.preset ?? currentPreset)
         _inheritanceSource = State(initialValue: event == nil ? "current" : "keep")
         _persistenceError = State(initialValue: nil)
+        _folderID = State(initialValue: initialFolderID)
+        _goalEnabled = State(initialValue: event?.hasGoalPlan ?? false)
+        _goalTargets = State(
+            initialValue: event?.goalPlan?.targets
+                ?? PracticeGoalCounts(left: 10, right: 10, both: 10)
+        )
     }
 
     private var trimmedName: String {
@@ -45,6 +65,37 @@ struct PracticeEventEditorView: View {
                         Text("练习次数和时长将在节拍器练习中记录。")
                             .font(.footnote)
                             .foregroundStyle(.secondary)
+
+                        Picker("目录", selection: $folderID) {
+                            Text("未分类")
+                                .tag(Optional<UUID>.none)
+                            ForEach(folders, id: \.id) { folder in
+                                Text(folder.name)
+                                    .tag(Optional(folder.id))
+                            }
+                        }
+                    }
+
+                    Section("练习目标") {
+                        Toggle("开启目标", isOn: $goalEnabled)
+                            .tint(.white)
+
+                        if goalEnabled {
+                            PracticeGoalTargetsEditor(
+                                targets: $goalTargets,
+                                title: "计划总目标"
+                            )
+                            .listRowInsets(EdgeInsets(
+                                top: 8,
+                                leading: 0,
+                                bottom: 8,
+                                trailing: 0
+                            ))
+
+                            Text("计划从开启时开始累计；以后修改目标不会重算已完成次数。每天首次从此项目开始练习时，可以确认或修改当天目标。")
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                        }
                     }
 
                     Section("继承节拍器预设") {
@@ -128,6 +179,15 @@ struct PracticeEventEditorView: View {
                 }
                 .scrollDisabled(isTempoScrubbing)
                 .scrollContentBackground(.hidden)
+                .onAppear {
+                    resolveInitialFolderIfNeeded()
+                }
+                .onChange(of: folders.map(\.id)) { _, availableFolderIDs in
+                    resolveInitialFolderIfNeeded()
+                    if let folderID, !availableFolderIDs.contains(folderID) {
+                        self.folderID = nil
+                    }
+                }
             }
             .navigationTitle(event == nil ? "新建打卡" : "编辑打卡")
             .navigationBarTitleDisplayMode(.inline)
@@ -142,7 +202,7 @@ struct PracticeEventEditorView: View {
                         save()
                     }
                     .fontWeight(.bold)
-                    .disabled(trimmedName.isEmpty)
+                    .disabled(trimmedName.isEmpty || (goalEnabled && goalTargets.total == 0))
                 }
             }
         }
@@ -156,6 +216,21 @@ struct PracticeEventEditorView: View {
             }
         } message: {
             Text(persistenceError ?? "请稍后重试。")
+        }
+    }
+
+    private func resolveInitialFolderIfNeeded() {
+        guard !didResolveExistingFolder else { return }
+        defer { didResolveExistingFolder = true }
+
+        if let event {
+            folderID = PracticeFolder.folder(
+                containing: event.id,
+                in: folders
+            )?.id
+        } else if let requestedInitialFolderID,
+                  folders.contains(where: { $0.id == requestedInitialFolderID }) {
+            folderID = requestedInitialFolderID
         }
     }
 
@@ -188,36 +263,67 @@ struct PracticeEventEditorView: View {
 
     private func save() {
         var insertedEvent: PracticeEvent?
+        let folderSnapshots = folders.map {
+            (folder: $0, eventIDs: $0.eventIDs, updatedAt: $0.updatedAt)
+        }
         var previousValues: (
             name: String,
             preset: MetronomePreset,
+            goalPlan: PracticeGoalPlan?,
             updatedAt: Date
         )?
+        let savedEvent: PracticeEvent
         if let event {
             previousValues = (
                 event.name,
                 event.preset,
+                event.goalPlan,
                 event.updatedAt
             )
             event.name = trimmedName
             event.apply(preset: preset)
+            if goalEnabled {
+                event.updateGoalPlanTargets(goalTargets)
+            } else {
+                event.disableGoalPlan()
+            }
+            savedEvent = event
         } else {
             let newEvent = PracticeEvent(
                 name: trimmedName,
                 preset: preset
             )
             modelContext.insert(newEvent)
+            if goalEnabled {
+                newEvent.enableGoalPlan(targets: goalTargets)
+            }
             insertedEvent = newEvent
+            savedEvent = newEvent
         }
+
+        let destination = folders.first { $0.id == folderID }
+        PracticeFolder.move(
+            eventID: savedEvent.id,
+            to: destination,
+            among: folders
+        )
+
         do {
             try modelContext.save()
             dismiss()
         } catch {
+            for snapshot in folderSnapshots {
+                snapshot.folder.setEventIDs(
+                    snapshot.eventIDs,
+                    now: snapshot.updatedAt
+                )
+            }
             if let insertedEvent {
                 modelContext.delete(insertedEvent)
             } else if let event, let previousValues {
                 event.name = previousValues.name
                 event.apply(preset: previousValues.preset)
+                event.setGoalPlan(previousValues.goalPlan)
                 event.updatedAt = previousValues.updatedAt
             }
             persistenceError = error.localizedDescription

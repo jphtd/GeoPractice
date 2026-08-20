@@ -81,6 +81,7 @@ final class PracticeEvent {
     var referenceNoteRaw: String?
     var createdAt: Date
     var updatedAt: Date
+    private var goalPlanData: Data?
 
     init(
         id: UUID = UUID(),
@@ -112,6 +113,7 @@ final class PracticeEvent {
         self.referenceNoteRaw = preset.referenceNoteRaw
         self.createdAt = createdAt
         self.updatedAt = updatedAt
+        self.goalPlanData = nil
     }
 
     var preset: MetronomePreset {
@@ -135,6 +137,64 @@ final class PracticeEvent {
             durationMilliseconds(for: .right),
             durationMilliseconds(for: .both)
         ])
+    }
+
+    var goalPlan: PracticeGoalPlan? {
+        guard let goalPlanData else { return nil }
+        return try? JSONDecoder().decode(
+            PracticeGoalPlan.self,
+            from: goalPlanData
+        )
+    }
+
+    var hasGoalPlan: Bool { goalPlan != nil }
+
+    func enableGoalPlan(
+        targets: PracticeGoalCounts,
+        at date: Date = .now
+    ) {
+        let plan = PracticeGoalPlan(
+            targets: targets,
+            baseline: PracticeGoalCounts(
+                left: leftCount,
+                right: rightCount,
+                both: bothCount
+            ),
+            enabledAt: date
+        )
+        goalPlanData = try? JSONEncoder().encode(plan)
+        updatedAt = date
+    }
+
+    func updateGoalPlanTargets(
+        _ targets: PracticeGoalCounts,
+        at date: Date = .now
+    ) {
+        if let current = goalPlan {
+            setGoalPlan(
+                PracticeGoalPlan(
+                    id: current.id,
+                    targets: targets,
+                    baseline: current.baseline,
+                    enabledAt: current.enabledAt
+                ),
+                at: date
+            )
+        } else {
+            enableGoalPlan(targets: targets, at: date)
+        }
+    }
+
+    func setGoalPlan(
+        _ plan: PracticeGoalPlan?,
+        at date: Date = .now
+    ) {
+        goalPlanData = plan.flatMap { try? JSONEncoder().encode($0) }
+        updatedAt = date
+    }
+
+    func disableGoalPlan(at date: Date = .now) {
+        setGoalPlan(nil, at: date)
     }
 
     func apply(preset: MetronomePreset) {

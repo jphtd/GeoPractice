@@ -200,8 +200,9 @@ struct TempoScrubber: View {
     @State private var draftBPM: Int?
     @State private var dragStartBPM: Int?
     @State private var isScrubbing = false
-    @State private var suppressTap = false
-    @State private var tapResetTask: Task<Void, Never>?
+    @State private var didDrag = false
+    @State private var isWaitingForSecondTap = false
+    @State private var pendingSingleTapTask: Task<Void, Never>?
     @State private var isShowingDirectEntry = false
     @State private var directEntryText = ""
 
@@ -248,7 +249,7 @@ struct TempoScrubber: View {
             }
         }
         .onDisappear {
-            tapResetTask?.cancel()
+            cancelPendingTap()
             cancelDraft()
             isShowingDirectEntry = false
         }
@@ -296,7 +297,6 @@ struct TempoScrubber: View {
                 .contentTransition(.numericText())
                 .frame(minWidth: compact ? 48 : 96, minHeight: compact ? 44 : 76)
                 .contentShape(Rectangle())
-                .gesture(tempoTapGesture)
                 .highPriorityGesture(scrubGesture)
 
             tempoStepButton(delta: 1, compact: compact)
@@ -334,15 +334,25 @@ struct TempoScrubber: View {
     }
 
     private var scrubGesture: some Gesture {
-        DragGesture(minimumDistance: 4, coordinateSpace: .local)
+        // A zero-distance high-priority gesture reserves only the number area
+        // from touch-down. The editor can therefore disable its Form before
+        // the parent scroll view consumes the first few points of a BPM drag;
+        // beginning a scroll anywhere outside the number remains unchanged.
+        DragGesture(minimumDistance: 0, coordinateSpace: .local)
             .onChanged { value in
+                setScrubbing(true)
+                let travelled = hypot(
+                    value.translation.width,
+                    value.translation.height
+                )
+                guard travelled >= 4 else { return }
+
+                didDrag = true
                 if dragStartBPM == nil {
                     dragStartBPM = bpm
                     draftBPM = bpm
-                    setScrubbing(true)
                 }
                 guard let dragStartBPM else { return }
-                suppressTap = true
                 let primaryTranslation = direction.primaryTranslation(
                     horizontal: value.translation.width,
                     vertical: value.translation.height
@@ -353,26 +363,38 @@ struct TempoScrubber: View {
                 )
             }
             .onEnded { _ in
+                let completedDrag = didDrag
                 let committed = draftBPM
-                cancelDraft(keepTapSuppressed: suppressTap)
-                if let committed, committed != bpm {
+                cancelDraft()
+                if completedDrag, let committed, committed != bpm {
                     onCommit(committed)
+                } else if !completedDrag {
+                    registerTap()
                 }
             }
     }
 
-    private var tempoTapGesture: some Gesture {
-        TapGesture(count: 2)
-            .exclusively(before: TapGesture(count: 1))
-            .onEnded { result in
-                guard !suppressTap else { return }
-                switch result {
-                case .first:
-                    beginDirectEntry()
-                case .second:
-                    onTap?()
-                }
-            }
+    private func registerTap() {
+        if isWaitingForSecondTap {
+            cancelPendingTap()
+            beginDirectEntry()
+            return
+        }
+
+        isWaitingForSecondTap = true
+        pendingSingleTapTask = Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 280_000_000)
+            guard !Task.isCancelled else { return }
+            isWaitingForSecondTap = false
+            pendingSingleTapTask = nil
+            onTap?()
+        }
+    }
+
+    private func cancelPendingTap() {
+        pendingSingleTapTask?.cancel()
+        pendingSingleTapTask = nil
+        isWaitingForSecondTap = false
     }
 
     private var validatedDirectEntry: Int? {
@@ -380,6 +402,7 @@ struct TempoScrubber: View {
     }
 
     private func beginDirectEntry() {
+        cancelPendingTap()
         cancelDraft()
         directEntryText = ""
         isShowingDirectEntry = true
@@ -404,22 +427,11 @@ struct TempoScrubber: View {
         min(TempoScrubModel.maximumBPM, max(TempoScrubModel.minimumBPM, value))
     }
 
-    private func cancelDraft(keepTapSuppressed: Bool = false) {
-        tapResetTask?.cancel()
-        tapResetTask = nil
+    private func cancelDraft() {
         draftBPM = nil
         dragStartBPM = nil
+        didDrag = false
         setScrubbing(false)
-        if keepTapSuppressed {
-            tapResetTask = Task { @MainActor in
-                try? await Task.sleep(nanoseconds: 120_000_000)
-                guard !Task.isCancelled else { return }
-                suppressTap = false
-                tapResetTask = nil
-            }
-        } else {
-            suppressTap = false
-        }
     }
 
     private func setScrubbing(_ active: Bool) {

@@ -5,6 +5,7 @@ import UIKit
 
 enum RootTab: Hashable {
     case practice
+    case statistics
     case metronome
 }
 
@@ -243,6 +244,12 @@ struct RootView: View {
             .tabItem {
                 Label("打卡", systemImage: "checkmark.circle")
             }
+
+            StatisticsView()
+                .tag(RootTab.statistics)
+                .tabItem {
+                    Label("统计", systemImage: "chart.bar.xaxis")
+                }
 
             MetronomeView(
                 engine: metronome,

@@ -268,7 +268,11 @@ final class PracticeEvent {
             return existing
         }
 
-        let attempt = PracticeAttempt(eventID: id, summary: summary)
+        let attempt = PracticeAttempt(
+            eventID: id,
+            eventNameSnapshot: name,
+            summary: summary
+        )
         append(summary: summary)
         context.insert(attempt)
         return attempt
@@ -313,7 +317,11 @@ final class PracticeEvent {
         }
 
         let snapshot = aggregateSnapshot()
-        let attempt = PracticeAttempt(eventID: id, summary: summary)
+        let attempt = PracticeAttempt(
+            eventID: id,
+            eventNameSnapshot: name,
+            summary: summary
+        )
         append(summary: summary)
         context.insert(attempt)
         do {

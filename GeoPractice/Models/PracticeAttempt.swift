@@ -10,6 +10,12 @@ final class PracticeAttempt {
     @Attribute(.unique) var id: UUID
     @Attribute(.unique) var sessionID: UUID
     var eventID: UUID
+    /// The event name at the moment this result was confirmed.
+    ///
+    /// This is optional so stores created before time-based statistics can be
+    /// migrated additively. Callers presenting an older attempt should resolve
+    /// the missing value from its current `PracticeEvent` name.
+    var eventNameSnapshot: String?
     var startedAt: Date
     var finishedAt: Date
     var createdAt: Date
@@ -42,12 +48,14 @@ final class PracticeAttempt {
     init(
         id: UUID = UUID(),
         eventID: UUID,
+        eventNameSnapshot: String? = nil,
         summary: PracticeSessionSummary,
         createdAt: Date = .now
     ) {
         self.id = id
         sessionID = summary.sessionID
         self.eventID = eventID
+        self.eventNameSnapshot = eventNameSnapshot
         self.createdAt = createdAt
         startedAt = summary.startedAt ?? summary.finishedAt ?? createdAt
         finishedAt = summary.finishedAt ?? createdAt
@@ -83,6 +91,61 @@ final class PracticeAttempt {
     }
 
     var recordedAt: Date { createdAt }
+
+    /// Resolves the historical name while keeping pre-statistics attempts
+    /// readable. New attempts always return their immutable saved name.
+    func resolvedEventName(fallback: String) -> String {
+        if let eventNameSnapshot,
+           !eventNameSnapshot.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return eventNameSnapshot
+        }
+        if !fallback.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return fallback
+        }
+        return "未命名练习"
+    }
+
+    /// Pure value consumed by `PracticeStatisticsEngine`.
+    ///
+    /// The no-argument form is safe when an event has already been deleted.
+    /// Statistics screens that also fetched `PracticeEvent` should call
+    /// `makeStatisticsSnapshot(eventNameFallback:)` so pre-statistics records
+    /// can display the current event name.
+    var statisticsSnapshot: PracticeHistoryRecordSnapshot {
+        makeStatisticsSnapshot(eventNameFallback: "未命名练习")
+    }
+
+    func makeStatisticsSnapshot(
+        eventNameFallback: String
+    ) -> PracticeHistoryRecordSnapshot {
+        let latestPreset = completions.enumerated().max { lhs, rhs in
+            if lhs.element.completedAt != rhs.element.completedAt {
+                return lhs.element.completedAt < rhs.element.completedAt
+            }
+            return lhs.offset < rhs.offset
+        }?.element.preset.normalized
+
+        return PracticeHistoryRecordSnapshot(
+            id: id,
+            sourceEventID: eventID,
+            eventNameSnapshot: resolvedEventName(fallback: eventNameFallback),
+            startedAt: startedAt,
+            finishedAt: finishedAt,
+            leftCount: leftCount,
+            rightCount: rightCount,
+            bothCount: bothCount,
+            leftDurationMilliseconds: leftDurationMilliseconds,
+            rightDurationMilliseconds: rightDurationMilliseconds,
+            bothDurationMilliseconds: bothDurationMilliseconds,
+            bpm: latestPreset?.bpm,
+            beats: latestPreset?.beats,
+            subdivision: latestPreset?.subdivision,
+            directionRawValue: latestPreset?.direction.rawValue,
+            grouping: latestPreset?.grouping,
+            referenceNoteRaw: latestPreset?.referenceNoteRaw,
+            sessionID: sessionID
+        )
+    }
 
     var completions: [PracticeCompletionSample] {
         Self.decode([PracticeCompletionSample].self, from: completionSamplesData) ?? []

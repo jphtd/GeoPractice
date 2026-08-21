@@ -2530,6 +2530,25 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(firstAttempt.mostPracticedPreset(for: .both), bothPreset.normalized)
         XCTAssertEqual(secondAttempt.mostPracticedPreset(for: .right), rightPreset.normalized)
 
+        let statisticsSnapshot = firstAttempt.statisticsSnapshot
+        XCTAssertEqual(statisticsSnapshot.sourceEventID, event.id)
+        XCTAssertEqual(statisticsSnapshot.eventNameSnapshot, "音阶")
+        XCTAssertEqual(statisticsSnapshot.sessionID, firstSummary.sessionID)
+        XCTAssertEqual(statisticsSnapshot.startedAt, firstSummary.startedAt)
+        XCTAssertEqual(statisticsSnapshot.finishedAt, firstSummary.finishedAt)
+        XCTAssertEqual(statisticsSnapshot.leftCount, 1)
+        XCTAssertEqual(statisticsSnapshot.bothCount, 1)
+        XCTAssertEqual(statisticsSnapshot.bpm, bothPreset.normalized.bpm)
+        XCTAssertEqual(statisticsSnapshot.beats, bothPreset.normalized.beats)
+        XCTAssertEqual(
+            statisticsSnapshot.directionRawValue,
+            bothPreset.normalized.direction.rawValue
+        )
+        XCTAssertEqual(
+            statisticsSnapshot.referenceNoteRaw,
+            bothPreset.normalized.referenceNoteRaw
+        )
+
         XCTAssertEqual(
             try PracticeAttempt.latest(for: event.id, hand: .left, in: context)?.id,
             firstAttempt.id,
@@ -2547,6 +2566,98 @@ final class MetronomePresetTests: XCTestCase {
             try event.inheritedPreset(for: .both, in: context),
             bothPreset.normalized
         )
+    }
+
+    @MainActor
+    func testPracticeAttemptCapturesEventNameAndDoesNotFollowLaterRename() throws {
+        let container = try makeInMemoryPracticeContainer()
+        let context = container.mainContext
+        let event = PracticeEvent(name: "旧名称")
+        context.insert(event)
+        try context.save()
+
+        let firstSummary = PracticeSessionSummary(
+            sourceEventID: event.id,
+            finishedAt: Date(timeIntervalSinceReferenceDate: 16_500),
+            left: HandPracticeStats(count: 1)
+        )
+        let firstAttempt = try event.commit(
+            summary: firstSummary,
+            in: context
+        ).attempt
+
+        event.name = "新名称"
+        try context.save()
+
+        XCTAssertEqual(firstAttempt.eventNameSnapshot, "旧名称")
+        XCTAssertEqual(
+            firstAttempt.statisticsSnapshot.eventNameSnapshot,
+            "旧名称"
+        )
+        XCTAssertEqual(
+            firstAttempt.resolvedEventName(fallback: event.name),
+            "旧名称",
+            "A rename must not rewrite an already-confirmed historical fact"
+        )
+        let replayedFirstAttempt = try event.commit(
+            summary: firstSummary,
+            in: context
+        ).attempt
+        XCTAssertEqual(replayedFirstAttempt.id, firstAttempt.id)
+        XCTAssertEqual(replayedFirstAttempt.eventNameSnapshot, "旧名称")
+
+        let secondSummary = PracticeSessionSummary(
+            sourceEventID: event.id,
+            finishedAt: Date(timeIntervalSinceReferenceDate: 16_501),
+            right: HandPracticeStats(count: 1)
+        )
+        let secondAttempt = try event.commit(
+            summary: secondSummary,
+            in: context
+        ).attempt
+
+        XCTAssertEqual(secondAttempt.eventNameSnapshot, "新名称")
+        XCTAssertEqual(firstAttempt.eventNameSnapshot, "旧名称")
+    }
+
+    @MainActor
+    func testPracticeAttemptWithoutNameSnapshotUsesCurrentEventNameFallback() throws {
+        let container = try makeInMemoryPracticeContainer()
+        let context = container.mainContext
+        let event = PracticeEvent(name: "升级后的名称")
+        let legacyAttempt = PracticeAttempt(
+            eventID: event.id,
+            summary: PracticeSessionSummary(
+                sourceEventID: event.id,
+                finishedAt: Date(timeIntervalSinceReferenceDate: 16_750),
+                both: HandPracticeStats(count: 1)
+            )
+        )
+        context.insert(event)
+        context.insert(legacyAttempt)
+        try context.save()
+
+        let restored = try XCTUnwrap(
+            PracticeAttempt.find(
+                sessionID: legacyAttempt.sessionID,
+                in: context
+            )
+        )
+        XCTAssertNil(restored.eventNameSnapshot)
+        XCTAssertEqual(
+            restored.statisticsSnapshot.eventNameSnapshot,
+            "未命名练习"
+        )
+        XCTAssertEqual(
+            restored.resolvedEventName(fallback: event.name),
+            "升级后的名称"
+        )
+        let statisticsSnapshot = restored.makeStatisticsSnapshot(
+            eventNameFallback: event.name
+        )
+        XCTAssertEqual(statisticsSnapshot.eventNameSnapshot, "升级后的名称")
+        XCTAssertEqual(statisticsSnapshot.sourceEventID, event.id)
+        XCTAssertEqual(statisticsSnapshot.sessionID, legacyAttempt.sessionID)
     }
 
     @MainActor

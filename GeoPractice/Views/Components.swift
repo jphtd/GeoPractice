@@ -456,7 +456,7 @@ struct GeoSegmentButton: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
             }
-            .font(.system(size: 12, weight: .bold))
+            .font(.caption.weight(.bold))
             .foregroundStyle(isActive ? GeoTheme.text : GeoTheme.muted)
             .frame(maxWidth: .infinity, minHeight: 44)
             .padding(.horizontal, 5)

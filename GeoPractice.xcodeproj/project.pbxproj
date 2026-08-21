@@ -31,6 +31,9 @@
 		A00000000000000000000016 /* PracticeGoalViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000019 /* PracticeGoalViews.swift */; };
 		A00000000000000000000017 /* PracticeFolderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001A /* PracticeFolderTests.swift */; };
 		A00000000000000000000018 /* V52VisualLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001B /* V52VisualLifecycleTests.swift */; };
+		A00000000000000000000019 /* PracticeStatistics.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001C /* PracticeStatistics.swift */; };
+		A0000000000000000000001A /* StatisticsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001D /* StatisticsView.swift */; };
+		A0000000000000000000001B /* PracticeStatisticsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001E /* PracticeStatisticsTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -71,6 +74,9 @@
 		B00000000000000000000019 /* PracticeGoalViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeGoalViews.swift; sourceTree = "<group>"; };
 		B0000000000000000000001A /* PracticeFolderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeFolderTests.swift; sourceTree = "<group>"; };
 		B0000000000000000000001B /* V52VisualLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V52VisualLifecycleTests.swift; sourceTree = "<group>"; };
+		B0000000000000000000001C /* PracticeStatistics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeStatistics.swift; sourceTree = "<group>"; };
+		B0000000000000000000001D /* StatisticsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StatisticsView.swift; sourceTree = "<group>"; };
+		B0000000000000000000001E /* PracticeStatisticsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeStatisticsTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -134,6 +140,7 @@
 			isa = PBXGroup;
 			children = (
 				B00000000000000000000004 /* MetronomeEngine.swift */,
+				B0000000000000000000001C /* PracticeStatistics.swift */,
 				B00000000000000000000018 /* PracticeReportExporter.swift */,
 			);
 			path = Services;
@@ -149,6 +156,7 @@
 				B00000000000000000000008 /* PracticeEventsView.swift */,
 				B00000000000000000000009 /* EventEditorView.swift */,
 				B00000000000000000000019 /* PracticeGoalViews.swift */,
+				B0000000000000000000001D /* StatisticsView.swift */,
 			);
 			path = Views;
 			sourceTree = "<group>";
@@ -159,6 +167,7 @@
 				B0000000000000000000000A /* MetronomePresetTests.swift */,
 				B0000000000000000000001A /* PracticeFolderTests.swift */,
 				B0000000000000000000001B /* V52VisualLifecycleTests.swift */,
+				B0000000000000000000001E /* PracticeStatisticsTests.swift */,
 			);
 			path = GeoPracticeTests;
 			sourceTree = "<group>";
@@ -297,6 +306,8 @@
 				A00000000000000000000014 /* PracticeGoals.swift in Sources */,
 				A00000000000000000000015 /* PracticeReportExporter.swift in Sources */,
 				A00000000000000000000016 /* PracticeGoalViews.swift in Sources */,
+				A00000000000000000000019 /* PracticeStatistics.swift in Sources */,
+				A0000000000000000000001A /* StatisticsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -307,6 +318,7 @@
 				A0000000000000000000000A /* MetronomePresetTests.swift in Sources */,
 				A00000000000000000000017 /* PracticeFolderTests.swift in Sources */,
 				A00000000000000000000018 /* V52VisualLifecycleTests.swift in Sources */,
+				A0000000000000000000001B /* PracticeStatisticsTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

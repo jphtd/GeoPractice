@@ -1,5 +1,21 @@
+import CoreTransferable
 import SwiftData
 import SwiftUI
+import UniformTypeIdentifiers
+
+struct PracticeEventDragPayload: Codable, Hashable, Sendable, Transferable {
+    let eventID: UUID
+
+    static var transferRepresentation: some TransferRepresentation {
+        CodableRepresentation(contentType: .geoPracticeEvent)
+    }
+}
+
+private extension UTType {
+    static let geoPracticeEvent = UTType(
+        exportedAs: "com.kuoxiyu.geopractice.practice-event"
+    )
+}
 
 enum PracticeNavigationRoute: Hashable {
     case folder(UUID)
@@ -34,6 +50,7 @@ struct PracticeEventsView: View {
     @State private var folderNameDraft = ""
     @State private var showsFolderEditor = false
     @State private var deleteError: String?
+    @State private var dropTargetFolderID: UUID?
 
     private var unclassifiedEvents: [PracticeEvent] {
         events.filter { event in
@@ -82,8 +99,28 @@ struct PracticeEventsView: View {
                                             folder: folder,
                                             eventCount: events.lazy.filter {
                                                 folder.contains(eventID: $0.id)
-                                            }.count
+                                            }.count,
+                                            isDropTarget: dropTargetFolderID == folder.id
                                         )
+                                    }
+                                    .dropDestination(for: PracticeEventDragPayload.self) {
+                                        payloads,
+                                        _ in
+                                        guard let payload = payloads.first else {
+                                            return false
+                                        }
+                                        return classifyUnclassifiedEvent(
+                                            payload.eventID,
+                                            into: folder
+                                        )
+                                    } isTargeted: { isTargeted in
+                                        withAnimation(.easeOut(duration: 0.14)) {
+                                            if isTargeted {
+                                                dropTargetFolderID = folder.id
+                                            } else if dropTargetFolderID == folder.id {
+                                                dropTargetFolderID = nil
+                                            }
+                                        }
                                     }
                                     .listRowBackground(Color.clear)
                                     .swipeActions(edge: .leading, allowsFullSwipe: false) {
@@ -116,11 +153,7 @@ struct PracticeEventsView: View {
                         if !unclassifiedEvents.isEmpty {
                             Section("未分类 · \(unclassifiedEvents.count)") {
                                 ForEach(unclassifiedEvents, id: \.id) { event in
-                                    PracticeEventNavigationRow(
-                                        event: event,
-                                        protectedEventID: protectedEventID,
-                                        onDelete: { pendingDelete = event }
-                                    )
+                                    unclassifiedEventRow(event)
                                 }
                             }
                         }
@@ -320,6 +353,83 @@ struct PracticeEventsView: View {
             deleteError = error.localizedDescription
         }
     }
+
+    @ViewBuilder
+    private func unclassifiedEventRow(_ event: PracticeEvent) -> some View {
+        if folders.isEmpty {
+            PracticeEventNavigationRow(
+                event: event,
+                protectedEventID: protectedEventID,
+                onDelete: { pendingDelete = event }
+            )
+        } else {
+            PracticeEventNavigationRow(
+                event: event,
+                protectedEventID: protectedEventID,
+                onDelete: { pendingDelete = event }
+            )
+            .draggable(
+                PracticeEventDragPayload(eventID: event.id)
+            ) {
+                PracticeEventDragPreview(name: event.name)
+            }
+            .accessibilityHint(
+                "长按并拖到目录可以设置分类，也可以在操作中选择要移入的目录"
+            )
+            .accessibilityActions {
+                ForEach(folders, id: \.id) { folder in
+                    Button("移到\(folder.name)") {
+                        _ = classifyUnclassifiedEvent(
+                            event.id,
+                            into: folder
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private func classifyUnclassifiedEvent(
+        _ eventID: UUID,
+        into destination: PracticeFolder
+    ) -> Bool {
+        let snapshots = folders.map { folder in
+            (
+                folder: folder,
+                eventIDs: folder.eventIDs,
+                updatedAt: folder.updatedAt
+            )
+        }
+        let result = PracticeFolder.classifyUnclassified(
+            eventID: eventID,
+            toFolderID: destination.id,
+            knownEventIDs: Set(events.map(\.id)),
+            among: folders
+        )
+        guard result == .moved else {
+            dropTargetFolderID = nil
+            return false
+        }
+
+        do {
+            try modelContext.save()
+            dropTargetFolderID = nil
+            return true
+        } catch {
+            let message = error.localizedDescription
+            modelContext.rollback()
+            for snapshot in snapshots {
+                snapshot.folder.setEventIDs(
+                    snapshot.eventIDs,
+                    now: snapshot.updatedAt
+                )
+                snapshot.folder.updatedAt = snapshot.updatedAt
+            }
+            dropTargetFolderID = nil
+            deleteError = message
+            return false
+        }
+    }
 }
 
 private struct PracticeFolderEventsView: View {
@@ -453,6 +563,7 @@ private struct PracticeEventNavigationRow: View {
 private struct PracticeFolderRow: View {
     let folder: PracticeFolder
     let eventCount: Int
+    var isDropTarget = false
 
     var body: some View {
         HStack(spacing: 13) {
@@ -469,9 +580,44 @@ private struct PracticeFolderRow: View {
                     .font(.system(size: 11, weight: .semibold))
                     .foregroundStyle(GeoTheme.muted)
             }
+            Spacer(minLength: 0)
         }
         .padding(.vertical, 8)
+        .padding(.horizontal, 8)
+        .background(
+            Color.white.opacity(isDropTarget ? 0.12 : 0),
+            in: RoundedRectangle(cornerRadius: 14, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                .stroke(
+                    Color.white.opacity(isDropTarget ? 0.78 : 0),
+                    lineWidth: 1.25
+                )
+        }
+        .scaleEffect(isDropTarget ? 1.012 : 1)
         .accessibilityElement(children: .combine)
+    }
+}
+
+private struct PracticeEventDragPreview: View {
+    let name: String
+
+    var body: some View {
+        Label(name, systemImage: "folder.badge.plus")
+            .font(.system(size: 15, weight: .bold, design: .rounded))
+            .foregroundStyle(GeoTheme.text)
+            .lineLimit(1)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 48)
+            .background(
+                GeoTheme.panelRaised,
+                in: RoundedRectangle(cornerRadius: 15, style: .continuous)
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 15, style: .continuous)
+                    .stroke(Color.white.opacity(0.2), lineWidth: 1)
+            }
     }
 }
 

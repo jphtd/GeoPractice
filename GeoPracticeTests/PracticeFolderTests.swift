@@ -3,6 +3,19 @@ import XCTest
 @testable import GeoPractice
 
 final class PracticeFolderTests: XCTestCase {
+    func testPracticeEventDragPayloadRoundTripsItsIdentifier() throws {
+        let payload = PracticeEventDragPayload(eventID: UUID())
+        let encoded = try JSONEncoder().encode(payload)
+
+        XCTAssertEqual(
+            try JSONDecoder().decode(
+                PracticeEventDragPayload.self,
+                from: encoded
+            ),
+            payload
+        )
+    }
+
     func testFolderAndEventRoutesRemainDistinctForTheSameIdentifier() {
         let sharedID = UUID()
 
@@ -50,6 +63,133 @@ final class PracticeFolderTests: XCTestCase {
                 containing: eventID,
                 in: [first, second]
             )
+        )
+    }
+
+    func testClassifyingUnclassifiedEventRejectsStaleDrops() {
+        let eventID = UUID()
+        let initialUpdate = Date(timeIntervalSince1970: 100)
+        let firstDropDate = Date(timeIntervalSince1970: 200)
+        let duplicateDropDate = Date(timeIntervalSince1970: 300)
+        let destination = PracticeFolder(
+            name: "目标目录",
+            updatedAt: initialUpdate
+        )
+        let other = PracticeFolder(name: "其他目录")
+        let folders = [destination, other]
+        let missingEventID = UUID()
+
+        XCTAssertEqual(
+            PracticeFolder.classifyUnclassified(
+                eventID: missingEventID,
+                toFolderID: destination.id,
+                knownEventIDs: [eventID],
+                among: folders
+            ),
+            .eventNotFound
+        )
+        XCTAssertTrue(destination.eventIDs.isEmpty)
+
+        XCTAssertEqual(
+            PracticeFolder.classifyUnclassified(
+                eventID: eventID,
+                toFolderID: UUID(),
+                knownEventIDs: [eventID],
+                among: folders
+            ),
+            .folderNotFound
+        )
+        XCTAssertTrue(destination.eventIDs.isEmpty)
+
+        XCTAssertEqual(
+            PracticeFolder.classifyUnclassified(
+                eventID: eventID,
+                toFolderID: destination.id,
+                knownEventIDs: [eventID],
+                among: folders,
+                now: firstDropDate
+            ),
+            .moved
+        )
+        XCTAssertTrue(destination.contains(eventID: eventID))
+        XCTAssertEqual(destination.updatedAt, firstDropDate)
+
+        XCTAssertEqual(
+            PracticeFolder.classifyUnclassified(
+                eventID: eventID,
+                toFolderID: other.id,
+                knownEventIDs: [eventID],
+                among: folders,
+                now: duplicateDropDate
+            ),
+            .alreadyClassified
+        )
+        XCTAssertTrue(destination.contains(eventID: eventID))
+        XCTAssertFalse(other.contains(eventID: eventID))
+        XCTAssertEqual(destination.updatedAt, firstDropDate)
+    }
+
+    @MainActor
+    func testClassifyingEventPreservesItsDataAndAttemptHistory() throws {
+        let schema = Schema([
+            PracticeEvent.self,
+            PracticeAttempt.self,
+            PracticeFolder.self
+        ])
+        let configuration = ModelConfiguration(
+            schema: schema,
+            isStoredInMemoryOnly: true
+        )
+        let container = try ModelContainer(
+            for: schema,
+            configurations: [configuration]
+        )
+        let context = container.mainContext
+        let event = PracticeEvent(
+            name: "德彪西练习",
+            leftCount: 2,
+            rightCount: 3,
+            bothCount: 4
+        )
+        let folder = PracticeFolder(name: "印象派")
+        context.insert(event)
+        context.insert(folder)
+        _ = try event.commit(
+            summary: PracticeSessionSummary(
+                sourceEventID: event.id,
+                left: HandPracticeStats(count: 1)
+            ),
+            in: context
+        )
+        try context.save()
+        let originalCounts = (
+            left: event.leftCount,
+            right: event.rightCount,
+            both: event.bothCount
+        )
+        let originalAttempts = try PracticeAttempt.history(
+            for: event.id,
+            in: context
+        ).map(\.id)
+
+        XCTAssertEqual(
+            PracticeFolder.classifyUnclassified(
+                eventID: event.id,
+                toFolderID: folder.id,
+                knownEventIDs: [event.id],
+                among: [folder]
+            ),
+            .moved
+        )
+        try context.save()
+
+        XCTAssertTrue(folder.contains(eventID: event.id))
+        XCTAssertEqual(event.leftCount, originalCounts.left)
+        XCTAssertEqual(event.rightCount, originalCounts.right)
+        XCTAssertEqual(event.bothCount, originalCounts.both)
+        XCTAssertEqual(
+            try PracticeAttempt.history(for: event.id, in: context).map(\.id),
+            originalAttempts
         )
     }
 

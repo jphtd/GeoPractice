@@ -10,6 +10,13 @@ import SwiftData
 /// event naturally appearing in “未分类”.
 @Model
 final class PracticeFolder {
+    enum UnclassifiedMoveResult: Equatable {
+        case moved
+        case eventNotFound
+        case alreadyClassified
+        case folderNotFound
+    }
+
     @Attribute(.unique) var id: UUID
     var name: String
     var sortIndex: Int
@@ -82,6 +89,37 @@ final class PracticeFolder {
             folder.remove(eventID: eventID, now: now)
         }
         destination?.add(eventID: eventID, now: now)
+    }
+
+    /// Classifies an event only while it is still live and unclassified.
+    ///
+    /// Drag-and-drop can finish after its source or destination has changed.
+    /// Keeping these checks beside the membership model makes a stale drop a
+    /// no-op instead of silently moving or resurrecting an event.
+    static func classifyUnclassified(
+        eventID: UUID,
+        toFolderID destinationID: UUID,
+        knownEventIDs: Set<UUID>,
+        among folders: [PracticeFolder],
+        now: Date = .now
+    ) -> UnclassifiedMoveResult {
+        guard knownEventIDs.contains(eventID) else {
+            return .eventNotFound
+        }
+        guard folder(containing: eventID, in: folders) == nil else {
+            return .alreadyClassified
+        }
+        guard let destination = folders.first(where: { $0.id == destinationID }) else {
+            return .folderNotFound
+        }
+
+        move(
+            eventID: eventID,
+            to: destination,
+            among: folders,
+            now: now
+        )
+        return .moved
     }
 
     private static func encode(_ eventIDs: [UUID]) -> String {

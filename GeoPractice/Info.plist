@@ -8,5 +8,18 @@
 	<array>
 		<string>audio</string>
 	</array>
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.data</string>
+			</array>
+			<key>UTTypeDescription</key>
+			<string>GeoPractice Practice Event</string>
+			<key>UTTypeIdentifier</key>
+			<string>com.kuoxiyu.geopractice.practice-event</string>
+		</dict>
+	</array>
 </dict>
 </plist>

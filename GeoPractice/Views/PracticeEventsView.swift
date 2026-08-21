@@ -88,78 +88,101 @@ struct PracticeEventsView: View {
                         .foregroundStyle(.black)
                     }
                 } else {
-                    List {
-                        if !folders.isEmpty {
-                            Section("目录") {
-                                ForEach(folders, id: \.id) { folder in
-                                    NavigationLink(
-                                        value: PracticeNavigationRoute.folder(folder.id)
-                                    ) {
-                                        PracticeFolderRow(
-                                            folder: folder,
-                                            eventCount: events.lazy.filter {
-                                                folder.contains(eventID: $0.id)
-                                            }.count,
-                                            isDropTarget: dropTargetFolderID == folder.id
-                                        )
-                                    }
-                                    .dropDestination(for: PracticeEventDragPayload.self) {
-                                        payloads,
-                                        _ in
-                                        guard let payload = payloads.first else {
-                                            return false
-                                        }
-                                        return classifyUnclassifiedEvent(
-                                            payload.eventID,
-                                            into: folder
-                                        )
-                                    } isTargeted: { isTargeted in
-                                        withAnimation(.easeOut(duration: 0.14)) {
-                                            if isTargeted {
-                                                dropTargetFolderID = folder.id
-                                            } else if dropTargetFolderID == folder.id {
-                                                dropTargetFolderID = nil
+                    ScrollView {
+                        LazyVStack(alignment: .leading, spacing: 0) {
+                            if !folders.isEmpty {
+                                practiceSectionHeader("目录")
+
+                                VStack(spacing: 0) {
+                                    ForEach(Array(folders.enumerated()), id: \.element.id) { index, folder in
+                                        HStack(spacing: 4) {
+                                            NavigationLink(
+                                                value: PracticeNavigationRoute.folder(folder.id)
+                                            ) {
+                                                PracticeFolderRow(
+                                                    folder: folder,
+                                                    eventCount: events.lazy.filter {
+                                                        folder.contains(eventID: $0.id)
+                                                    }.count,
+                                                    isDropTarget: dropTargetFolderID == folder.id
+                                                )
+                                                .frame(maxWidth: .infinity)
+                                                .contentShape(Rectangle())
+                                            }
+                                            .buttonStyle(.plain)
+
+                                            Menu {
+                                                Button {
+                                                    beginRenaming(folder)
+                                                } label: {
+                                                    Label("目录改名", systemImage: "pencil")
+                                                }
+                                                Button(role: .destructive) {
+                                                    pendingFolderDelete = folder
+                                                } label: {
+                                                    Label("删除目录", systemImage: "trash")
+                                                }
+                                            } label: {
+                                                Image(systemName: "ellipsis")
+                                                    .font(.system(size: 16, weight: .bold))
+                                                    .foregroundStyle(GeoTheme.muted)
+                                                    .frame(width: 44, height: 44)
+                                                    .contentShape(Rectangle())
+                                            }
+                                            .accessibilityLabel("更多操作，\(folder.name)")
+                                            .accessibilityActions {
+                                                Button("目录改名") {
+                                                    beginRenaming(folder)
+                                                }
+                                                Button("删除目录") {
+                                                    pendingFolderDelete = folder
+                                                }
                                             }
                                         }
-                                    }
-                                    .listRowBackground(Color.clear)
-                                    .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                                        Button("改名") {
-                                            beginRenaming(folder)
+                                        .dropDestination(for: PracticeEventDragPayload.self) {
+                                            payloads,
+                                            _ in
+                                            guard let payload = payloads.first else {
+                                                return false
+                                            }
+                                            return classifyUnclassifiedEvent(
+                                                payload.eventID,
+                                                into: folder
+                                            )
+                                        } isTargeted: { isTargeted in
+                                            withAnimation(.easeOut(duration: 0.14)) {
+                                                if isTargeted {
+                                                    dropTargetFolderID = folder.id
+                                                } else if dropTargetFolderID == folder.id {
+                                                    dropTargetFolderID = nil
+                                                }
+                                            }
                                         }
-                                        .tint(Color(white: 0.34))
-                                    }
-                                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                                        Button("删除", role: .destructive) {
-                                            pendingFolderDelete = folder
-                                        }
-                                    }
-                                    .contextMenu {
-                                        Button {
-                                            beginRenaming(folder)
-                                        } label: {
-                                            Label("目录改名", systemImage: "pencil")
-                                        }
-                                        Button(role: .destructive) {
-                                            pendingFolderDelete = folder
-                                        } label: {
-                                            Label("删除目录", systemImage: "trash")
+                                        if index < folders.count - 1 {
+                                            Divider()
+                                                .overlay(Color.white.opacity(0.07))
+                                                .padding(.leading, 55)
                                         }
                                     }
                                 }
+                                .padding(.horizontal, 16)
                             }
-                        }
 
-                        if !unclassifiedEvents.isEmpty {
-                            Section("未分类 · \(unclassifiedEvents.count)") {
-                                ForEach(unclassifiedEvents, id: \.id) { event in
-                                    unclassifiedEventRow(event)
+                            if !unclassifiedEvents.isEmpty {
+                                practiceSectionHeader("未分类 · \(unclassifiedEvents.count)")
+                                    .padding(.top, folders.isEmpty ? 0 : 18)
+
+                                LazyVStack(spacing: 14) {
+                                    ForEach(unclassifiedEvents, id: \.id) { event in
+                                        unclassifiedEventRow(event)
+                                    }
                                 }
+                                .padding(.horizontal, 16)
                             }
                         }
+                        .padding(.top, 8)
+                        .padding(.bottom, 32)
                     }
-                    .listStyle(.plain)
-                    .scrollContentBackground(.hidden)
                 }
             }
             .navigationTitle("练习打卡")
@@ -354,38 +377,33 @@ struct PracticeEventsView: View {
         }
     }
 
+    private func practiceSectionHeader(_ title: String) -> some View {
+        Text(title)
+            .font(.system(size: 12, weight: .bold, design: .rounded))
+            .foregroundStyle(GeoTheme.muted)
+            .textCase(.uppercase)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 10)
+            .accessibilityAddTraits(.isHeader)
+    }
+
     @ViewBuilder
     private func unclassifiedEventRow(_ event: PracticeEvent) -> some View {
-        if folders.isEmpty {
-            PracticeEventNavigationRow(
-                event: event,
-                protectedEventID: protectedEventID,
-                onDelete: { pendingDelete = event }
+        PracticeEventNavigationRow(
+            event: event,
+            protectedEventID: protectedEventID,
+            onDelete: { pendingDelete = event },
+            showsInlineChevron: true,
+            showsInlineActions: true,
+            dragPayload: folders.isEmpty
+                ? nil
+                : PracticeEventDragPayload(eventID: event.id),
+            moveFolders: folders
+        ) { folder in
+            _ = classifyUnclassifiedEvent(
+                event.id,
+                into: folder
             )
-        } else {
-            PracticeEventNavigationRow(
-                event: event,
-                protectedEventID: protectedEventID,
-                onDelete: { pendingDelete = event }
-            )
-            .draggable(
-                PracticeEventDragPayload(eventID: event.id)
-            ) {
-                PracticeEventDragPreview(name: event.name)
-            }
-            .accessibilityHint(
-                "长按并拖到目录可以设置分类，也可以在操作中选择要移入的目录"
-            )
-            .accessibilityActions {
-                ForEach(folders, id: \.id) { folder in
-                    Button("移到\(folder.name)") {
-                        _ = classifyUnclassifiedEvent(
-                            event.id,
-                            into: folder
-                        )
-                    }
-                }
-            }
         }
     }
 
@@ -540,11 +558,31 @@ private struct PracticeEventNavigationRow: View {
     let event: PracticeEvent
     let protectedEventID: UUID?
     let onDelete: () -> Void
+    var showsInlineChevron = false
+    var showsInlineActions = false
+    var dragPayload: PracticeEventDragPayload?
+    var moveFolders: [PracticeFolder] = []
+    var onMove: ((PracticeFolder) -> Void)?
 
     var body: some View {
-        NavigationLink(value: PracticeNavigationRoute.event(event.id)) {
-            PracticeEventRow(event: event)
+        HStack(spacing: 8) {
+            eventNavigationLink
+
+            if showsInlineActions {
+                Menu {
+                    Button("删除", role: .destructive, action: onDelete)
+                        .disabled(event.id == protectedEventID)
+                } label: {
+                    Image(systemName: "ellipsis")
+                        .font(.system(size: 16, weight: .bold))
+                        .foregroundStyle(GeoTheme.muted)
+                        .frame(width: 44, height: 44)
+                        .contentShape(Rectangle())
+                }
+                .accessibilityLabel("更多操作，\(event.name)")
+            }
         }
+        .frame(maxWidth: .infinity)
         .listRowInsets(EdgeInsets(top: 7, leading: 16, bottom: 7, trailing: 16))
         .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
@@ -557,6 +595,45 @@ private struct PracticeEventNavigationRow: View {
                     : ""
                 )
         }
+    }
+
+    @ViewBuilder
+    private var eventNavigationLink: some View {
+        if let dragPayload {
+            navigationLink
+                .draggable(dragPayload) {
+                    PracticeEventDragPreview(name: event.name)
+                }
+                .accessibilityHint(
+                    "长按并拖到目录可以设置分类，也可以在操作中选择要移入的目录"
+                )
+                .accessibilityActions {
+                    ForEach(moveFolders, id: \.id) { folder in
+                        Button("移到\(folder.name)") {
+                            onMove?(folder)
+                        }
+                    }
+                }
+        } else {
+            navigationLink
+        }
+    }
+
+    private var navigationLink: some View {
+        NavigationLink(value: PracticeNavigationRoute.event(event.id)) {
+            HStack(spacing: 10) {
+                PracticeEventRow(event: event)
+                if showsInlineChevron {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 15, weight: .bold))
+                        .foregroundStyle(GeoTheme.muted)
+                        .accessibilityHidden(true)
+                }
+            }
+            .frame(maxWidth: .infinity)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 
@@ -581,6 +658,10 @@ private struct PracticeFolderRow: View {
                     .foregroundStyle(GeoTheme.muted)
             }
             Spacer(minLength: 0)
+            Image(systemName: "chevron.right")
+                .font(.system(size: 14, weight: .bold))
+                .foregroundStyle(GeoTheme.muted)
+                .accessibilityHidden(true)
         }
         .padding(.vertical, 8)
         .padding(.horizontal, 8)

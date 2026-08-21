@@ -311,7 +311,7 @@ struct RootView: View {
                 }
                 practiceSession.startIfNeeded(preset: metronome.preset)
             } else {
-                metronome.stop()
+                metronome.pause()
                 practiceSession.pause()
             }
             synchronizeIdleTimer()
@@ -493,7 +493,7 @@ struct RootView: View {
             practiceSession.startIfNeeded(preset: metronome.preset, at: date)
             practiceSession.persistSnapshot(at: date)
         case .stopAndPause:
-            metronome.stop()
+            metronome.pause()
             practiceSession.pause(at: date)
             practiceSession.persistSnapshot(at: date)
         }

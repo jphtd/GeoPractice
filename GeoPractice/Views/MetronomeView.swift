@@ -29,16 +29,75 @@ private enum MetronomePanel: String, Identifiable {
 private struct BeatVisualPulseSnapshot: Equatable {
     let beat: Int
     let subdivision: Int
+    let cycle: Int
+    let sequence: UInt64
+    let pulsesPerBeat: Int
     let pulseDate: Date
     let kind: BeatPulseKind
     let eventInterval: TimeInterval
+    var builtEdgeIndex: Int?
+
+    /// A pause captures the presentation instant without destroying the last
+    /// engine-authored event. The canvas can therefore keep both the geometry
+    /// and the ball exactly where the musician stopped them.
+    let capturedAt: Date?
+
+    func captured(at date: Date) -> Self {
+        Self(
+            beat: beat,
+            subdivision: subdivision,
+            cycle: cycle,
+            sequence: sequence,
+            pulsesPerBeat: pulsesPerBeat,
+            pulseDate: pulseDate,
+            kind: kind,
+            eventInterval: eventInterval,
+            builtEdgeIndex: builtEdgeIndex,
+            capturedAt: capturedAt ?? date
+        )
+    }
 }
 
 private struct BeatVisualFinishAnimation: Equatable {
     let id: UUID
     let startedAt: Date
+    let centerReturnDuration: TimeInterval
+    let edgeDuration: TimeInterval
+    let builtEdgeIndices: [Int]
+    let capturedBallPhase: Double?
+    let capturedBallRadialProgress: Double
+
+    var dismantlingOrder: [Int] {
+        Array(builtEdgeIndices.reversed())
+    }
+}
+
+private struct BeatVisualTopologyTransition: Equatable {
+    let id: UUID
+    let startedAt: Date
     let duration: TimeInterval
-    let visibleBeatIndices: [Int]
+    let sourceBeatCount: Int
+    let destinationBeatCount: Int
+    let direction: RotationDirection
+    let sourceEdgeIndices: [Int]
+}
+
+private enum BeatVisualPresentationTiming {
+    static let teardownEdgeDuration: TimeInterval = 0.105
+
+    static func constructionProgress(
+        elapsed: TimeInterval,
+        eventInterval: TimeInterval,
+        reduceMotion: Bool
+    ) -> Double {
+        guard !reduceMotion else { return 1 }
+        // Keep construction inside its authoritative event interval. This
+        // remains visible at high density while never spilling into the next
+        // scheduler event.
+        let duration = min(0.095, max(0.028, eventInterval * 0.42))
+        let raw = min(1, max(0, elapsed / duration))
+        return raw * raw * (3 - 2 * raw)
+    }
 }
 
 private struct PracticeRecordFeedback: Equatable {
@@ -104,6 +163,7 @@ struct MetronomeView: View {
     @State private var visualLifecycle = BeatVisualLifecycle()
     @State private var visualPulse: BeatVisualPulseSnapshot?
     @State private var visualFinish: BeatVisualFinishAnimation?
+    @State private var visualTopologyTransition: BeatVisualTopologyTransition?
     @State private var pendingReviewSummary: PracticeSessionSummary?
     @State private var visualSessionStartedAt: Date?
     @State private var isTempoScrubbing = false
@@ -233,6 +293,7 @@ struct MetronomeView: View {
             }
         }
         .onChange(of: engine.preset.beats) { _, beats in
+            beginTopologyTransition(to: beats)
             visualLifecycle.reconfigure(beats: beats)
             visualPulse = nil
         }
@@ -244,7 +305,7 @@ struct MetronomeView: View {
             if isPlaying {
                 visualLifecycle.resume()
             } else if wasPlaying {
-                visualPulse = nil
+                visualPulse = visualPulse?.captured(at: .now)
                 visualLifecycle.pause()
             }
         }
@@ -398,10 +459,10 @@ struct MetronomeView: View {
             ZStack {
                 MetronomeCanvas(
                     preset: engine.preset,
-                    playbackPlan: engine.playbackPlan,
                     lifecycle: visualLifecycle,
                     pulse: visualPulse,
                     finishAnimation: visualFinish,
+                    topologyTransition: visualTopologyTransition,
                     isPlaying: engine.isPlaying,
                     reduceMotion: reduceMotion,
                     dimFlashingLights: dimFlashingLights
@@ -1830,6 +1891,7 @@ struct MetronomeView: View {
         visualSessionStartedAt = startedAt
         visualPulse = nil
         visualFinish = nil
+        visualTopologyTransition = nil
         pendingReviewSummary = nil
         visualLifecycle.reset(beats: engine.preset.beats)
         if practiceSession.session.phase == .finished {
@@ -1839,19 +1901,71 @@ struct MetronomeView: View {
 
     private func recordVisualTick(pulse: BeatPlaybackPulse?) {
         guard visualFinish == nil, let pulse else { return }
-        let snapshot = BeatVisualPulseSnapshot(
+        var snapshot = BeatVisualPulseSnapshot(
             beat: pulse.beat,
             subdivision: pulse.subdivision,
+            cycle: pulse.cycle,
+            sequence: pulse.sequence,
+            pulsesPerBeat: engine.playbackPlan.pulsesPerBeat,
             pulseDate: pulse.presentedAt,
             kind: pulse.kind,
-            eventInterval: pulse.eventInterval
+            eventInterval: pulse.eventInterval,
+            builtEdgeIndex: nil,
+            capturedAt: nil
         )
-        visualPulse = snapshot
+        let previousBuiltEdgeCount = visualLifecycle.builtEdgeCount
         visualLifecycle.record(
             beat: snapshot.beat,
             subdivision: snapshot.subdivision,
-            cycle: pulse.cycle,
+            cycle: snapshot.cycle,
+            beats: engine.preset.beats,
+            pulsesPerBeat: snapshot.pulsesPerBeat
+        )
+        if visualLifecycle.builtEdgeCount > previousBuiltEdgeCount {
+            snapshot.builtEdgeIndex = visualLifecycle.latestBuiltEdgeIndex
+        }
+        visualPulse = snapshot
+    }
+
+    private func capturedBallPhase(
+        from pulse: BeatVisualPulseSnapshot?,
+        at date: Date
+    ) -> Double? {
+        guard let pulse else { return nil }
+        if reduceMotion {
+            return BeatPulseVisualModel.address(
+                beat: pulse.beat,
+                subdivision: pulse.subdivision,
+                beats: engine.preset.beats,
+                pulsesPerBeat: pulse.pulsesPerBeat
+            )?.phase
+        }
+        let sampleDate = pulse.capturedAt ?? date
+        return BeatVisualMotionModel.sample(
+            beat: pulse.beat,
+            subdivision: pulse.subdivision,
+            elapsed: sampleDate.timeIntervalSince(pulse.pulseDate),
+            eventInterval: pulse.eventInterval,
+            pulsesPerBeat: pulse.pulsesPerBeat,
+            eventsPerMeasure: engine.preset.beats * pulse.pulsesPerBeat,
             beats: engine.preset.beats
+        )?.perimeterPhase
+    }
+
+    private func capturedBallRadialProgress(
+        from pulse: BeatVisualPulseSnapshot?,
+        at date: Date
+    ) -> Double {
+        guard visualLifecycle.builtEdgeCount == 1,
+              let pulse,
+              pulse.builtEdgeIndex == 0
+        else { return 1 }
+
+        let sampleDate = pulse.capturedAt ?? date
+        return BeatVisualPresentationTiming.constructionProgress(
+            elapsed: sampleDate.timeIntervalSince(pulse.pulseDate),
+            eventInterval: pulse.eventInterval,
+            reduceMotion: reduceMotion
         )
     }
 
@@ -1861,12 +1975,40 @@ struct MetronomeView: View {
         else { return }
 
         if engine.isPlaying {
-            visualPulse = nil
+            visualPulse = visualPulse?.captured(at: .now)
             visualLifecycle.pause()
-            engine.stop()
+            engine.pause()
         } else {
             visualLifecycle.resume()
             engine.start()
+        }
+    }
+
+    private func beginTopologyTransition(to destinationBeatCount: Int) {
+        let sourceEdges = visualLifecycle.visibleEdgeIndices
+        guard !reduceMotion,
+              !sourceEdges.isEmpty,
+              destinationBeatCount != visualLifecycle.beatCount
+        else {
+            visualTopologyTransition = nil
+            return
+        }
+
+        let transition = BeatVisualTopologyTransition(
+            id: UUID(),
+            startedAt: .now,
+            duration: 0.28,
+            sourceBeatCount: visualLifecycle.beatCount,
+            destinationBeatCount: min(max(destinationBeatCount, 3), 9),
+            direction: engine.preset.direction,
+            sourceEdgeIndices: sourceEdges
+        )
+        visualTopologyTransition = transition
+
+        Task { @MainActor in
+            try? await Task.sleep(for: .seconds(transition.duration))
+            guard visualTopologyTransition?.id == transition.id else { return }
+            visualTopologyTransition = nil
         }
     }
 
@@ -1883,15 +2025,30 @@ struct MetronomeView: View {
         // beginning the visible collapse so the user can see it from frame one.
         let presentationDelay: TimeInterval = activePanel == nil ? 0 : 0.36
         activePanel = nil
-        let duration: TimeInterval = reduceMotion ? 0.34 : 1.18
+        let frozenPulse = visualPulse?.captured(at: now)
+        let builtEdges = visualLifecycle.visibleEdgeIndices
+        let centerReturnDuration: TimeInterval = reduceMotion ? 0.10 : 0.38
+        let edgeDuration: TimeInterval = reduceMotion
+            ? 0.025
+            : BeatVisualPresentationTiming.teardownEdgeDuration
         let finish = BeatVisualFinishAnimation(
             id: UUID(),
             startedAt: now.addingTimeInterval(presentationDelay),
-            duration: duration,
-            visibleBeatIndices: visualLifecycle.visibleBeatIndices
+            centerReturnDuration: centerReturnDuration,
+            edgeDuration: edgeDuration,
+            builtEdgeIndices: builtEdges,
+            capturedBallPhase: capturedBallPhase(
+                from: frozenPulse,
+                at: now
+            ) ?? visualLifecycle.ballPhase,
+            capturedBallRadialProgress: capturedBallRadialProgress(
+                from: frozenPulse,
+                at: now
+            )
         )
 
-        visualPulse = nil
+        visualPulse = frozenPulse
+        visualTopologyTransition = nil
         visualLifecycle.beginFinishing()
         visualFinish = finish
         pendingReviewSummary = summary
@@ -1899,10 +2056,23 @@ struct MetronomeView: View {
 
         Task { @MainActor in
             let centerHold: TimeInterval = reduceMotion ? 0.08 : 0.16
-            let nanoseconds = UInt64(
-                (presentationDelay + duration + centerHold) * 1_000_000_000
-            )
-            try? await Task.sleep(nanoseconds: nanoseconds)
+            try? await Task.sleep(for: .seconds(
+                presentationDelay + centerReturnDuration
+            ))
+            guard visualFinish?.id == finish.id else { return }
+
+            visualLifecycle.completeCenterReturn()
+            for expectedEdge in finish.dismantlingOrder {
+                try? await Task.sleep(for: .seconds(edgeDuration))
+                guard visualFinish?.id == finish.id else { return }
+                let removedEdge = visualLifecycle.removeNextDismantlingEdge()
+                assert(
+                    removedEdge == expectedEdge,
+                    "Visual teardown order must be the inverse of construction"
+                )
+            }
+
+            try? await Task.sleep(for: .seconds(centerHold))
             guard visualFinish?.id == finish.id else { return }
             visualLifecycle.settle()
             visualFinish = nil
@@ -1963,6 +2133,7 @@ struct MetronomeView: View {
         reviewSummary = nil
         pendingReviewSummary = nil
         visualFinish = nil
+        visualTopologyTransition = nil
         visualPulse = nil
         practiceSession.continueAfterReview()
         visualSessionStartedAt = practiceSession.session.startedAt
@@ -2741,20 +2912,20 @@ private struct BeatGroupingSwitch: View {
 
 private struct MetronomeCanvas: View {
     let preset: MetronomePreset
-    let playbackPlan: MetronomePlaybackPlan
     let lifecycle: BeatVisualLifecycle
     let pulse: BeatVisualPulseSnapshot?
     let finishAnimation: BeatVisualFinishAnimation?
+    let topologyTransition: BeatVisualTopologyTransition?
     let isPlaying: Bool
     let reduceMotion: Bool
     let dimFlashingLights: Bool
 
     private var timelineIsPaused: Bool {
-        if finishAnimation != nil || isPlaying { return false }
+        if finishAnimation != nil || topologyTransition != nil || isPlaying { return false }
         switch lifecycle.phase {
         case .origin, .settled:
             return reduceMotion
-        case .orbiting, .finishing:
+        case .building, .orbiting, .finishing, .dismantling:
             return true
         }
     }
@@ -2769,7 +2940,12 @@ private struct MetronomeCanvas: View {
                 let shortestSide = min(size.width, size.height)
                 let radius = shortestSide * 0.28
                 let effectScale = min(1, shortestSide / 360)
-                let points = polygonPoints(center: center, radius: radius)
+                let points = polygonPoints(
+                    center: center,
+                    radius: radius,
+                    beats: preset.beats,
+                    direction: preset.direction
+                )
 
                 if let finishAnimation {
                     drawFinishAnimation(
@@ -2780,30 +2956,67 @@ private struct MetronomeCanvas: View {
                         effectScale: effectScale,
                         in: &context
                     )
-                } else if lifecycle.phase == .origin || lifecycle.phase == .settled {
-                    drawWaitingPoint(
-                        at: center,
-                        date: timeline.date,
-                        effectScale: effectScale,
-                        in: &context
-                    )
                 } else {
-                    drawPlayingGeometry(
-                        pulse: isPlaying ? pulse : nil,
-                        at: timeline.date,
-                        points: points,
-                        effectScale: effectScale,
-                        in: &context
-                    )
+                    switch lifecycle.phase {
+                    case .origin, .settled:
+                        drawWaitingPoint(
+                            at: center,
+                            date: timeline.date,
+                            effectScale: effectScale,
+                            in: &context
+                        )
+                    case .building, .orbiting:
+                        drawPlayingGeometry(
+                            pulse: pulse,
+                            isPlaying: isPlaying,
+                            at: timeline.date,
+                            points: points,
+                            effectScale: effectScale,
+                            in: &context
+                        )
+                    case .finishing, .dismantling:
+                        // A finish snapshot is installed in the same MainActor
+                        // turn as these phases. Keep a quiet origin as a safe
+                        // fallback if SwiftUI observes the transition between
+                        // those two state writes.
+                        drawWaitingPoint(
+                            at: center,
+                            date: timeline.date,
+                            effectScale: effectScale,
+                            in: &context
+                        )
+                    }
+
+                    if let topologyTransition {
+                        drawTopologyTransition(
+                            topologyTransition,
+                            at: timeline.date,
+                            center: center,
+                            radius: radius,
+                            effectScale: effectScale,
+                            in: &context
+                        )
+                    }
                 }
             }
+            .accessibilityHidden(true)
         }
     }
 
-    private func polygonPoints(center: CGPoint, radius: CGFloat) -> [CGPoint] {
-        let directionSign: CGFloat = preset.direction == .counterclockwise ? -1 : 1
-        let step = CGFloat.pi * 2 / CGFloat(preset.beats)
-        return (0..<preset.beats).map { index in
+    private func polygonPoints(
+        center: CGPoint,
+        radius: CGFloat,
+        beats: Int,
+        direction: RotationDirection
+    ) -> [CGPoint] {
+        // The outline stays spatially stable for peripheral readability. The
+        // scheduler's single measure phase is expressed by the ball completing
+        // one directed perimeter cycle; rotating the outline independently
+        // would visually double the tempo.
+        let safeBeats = min(max(beats, 3), 9)
+        let directionSign: CGFloat = direction == .counterclockwise ? -1 : 1
+        let step = CGFloat.pi * 2 / CGFloat(safeBeats)
+        return (0..<safeBeats).map { index in
             let angle = -CGFloat.pi / 2 + directionSign * CGFloat(index) * step
             return CGPoint(
                 x: center.x + cos(angle) * radius,
@@ -2812,13 +3025,98 @@ private struct MetronomeCanvas: View {
         }
     }
 
+    private func drawTopologyTransition(
+        _ transition: BeatVisualTopologyTransition,
+        at date: Date,
+        center: CGPoint,
+        radius: CGFloat,
+        effectScale: CGFloat,
+        in context: inout GraphicsContext
+    ) {
+        let raw = transition.duration > 0
+            ? clamped(date.timeIntervalSince(transition.startedAt) / transition.duration)
+            : 1
+        guard raw < 1 else { return }
+        let progress = smoothStep(raw)
+        let sourcePoints = polygonPoints(
+            center: center,
+            radius: radius,
+            beats: transition.sourceBeatCount,
+            direction: transition.direction
+        )
+        let destinationPoints = polygonPoints(
+            center: center,
+            radius: radius,
+            beats: transition.destinationBeatCount,
+            direction: transition.direction
+        )
+        let sourceCount = Double(sourcePoints.count)
+        let destinationCount = Double(destinationPoints.count)
+
+        for edge in transition.sourceEdgeIndices where sourcePoints.indices.contains(edge) {
+            let sourceStart = sourcePoints[edge]
+            let sourceEnd = sourcePoints[(edge + 1) % sourcePoints.count]
+            let normalizedStart = Double(edge) / sourceCount
+            let normalizedEnd = Double(edge + 1) / sourceCount
+            guard let destinationStart = perimeterPosition(
+                for: normalizedStart * destinationCount,
+                points: destinationPoints
+            ), let destinationEnd = perimeterPosition(
+                for: normalizedEnd * destinationCount,
+                points: destinationPoints
+            ) else { continue }
+
+            var path = Path()
+            path.move(to: interpolate(
+                from: sourceStart,
+                to: destinationStart,
+                progress: progress
+            ))
+            path.addLine(to: interpolate(
+                from: sourceEnd,
+                to: destinationEnd,
+                progress: progress
+            ))
+            context.stroke(
+                path,
+                with: .color(.white.opacity(0.30 * (1 - raw))),
+                style: StrokeStyle(
+                    lineWidth: max(0.75, 1.25 * effectScale),
+                    lineCap: .round,
+                    lineJoin: .round
+                )
+            )
+        }
+    }
+
     private func drawPlayingGeometry(
         pulse: BeatVisualPulseSnapshot?,
+        isPlaying: Bool,
         at date: Date,
         points: [CGPoint],
         effectScale: CGFloat,
         in context: inout GraphicsContext
     ) {
+        let presentationDate = pulse?.capturedAt ?? date
+        let speedEnergy = pulse.map { controlledSpeedEnergy(for: $0.eventInterval) } ?? 0.35
+
+        for edgeIndex in lifecycle.visibleEdgeIndices {
+            let constructionProgress = edgeConstructionProgress(
+                edgeIndex: edgeIndex,
+                pulse: pulse,
+                at: presentationDate
+            )
+            drawEdge(
+                edgeIndex,
+                through: points,
+                progress: constructionProgress,
+                opacity: 0.30 + speedEnergy * 0.08,
+                width: 1.25 + CGFloat(speedEnergy) * 0.22,
+                effectScale: effectScale,
+                in: &context
+            )
+        }
+
         for index in lifecycle.visibleBeatIndices where points.indices.contains(index) {
             let style = BeatVisualHierarchyModel.anchorStyle(
                 for: index,
@@ -2833,45 +3131,202 @@ private struct MetronomeCanvas: View {
             )
         }
 
-        guard let pulse,
-              let address = BeatPulseVisualModel.address(
+        var ballPhase = lifecycle.ballPhase
+        var eventProgress = 0.0
+        if let pulse,
+           let sample = BeatVisualMotionModel.sample(
                 beat: pulse.beat,
                 subdivision: pulse.subdivision,
-                beats: preset.beats,
-                pulsesPerBeat: playbackPlan.pulsesPerBeat
-              ),
-              let position = pulsePosition(for: address, points: points)
+                elapsed: presentationDate.timeIntervalSince(pulse.pulseDate),
+                eventInterval: pulse.eventInterval,
+                pulsesPerBeat: pulse.pulsesPerBeat,
+                eventsPerMeasure: preset.beats * pulse.pulsesPerBeat,
+                beats: preset.beats
+           ) {
+            eventProgress = sample.eventProgress
+            if reduceMotion,
+               let address = BeatPulseVisualModel.address(
+                    beat: pulse.beat,
+                    subdivision: pulse.subdivision,
+                    beats: preset.beats,
+                    pulsesPerBeat: pulse.pulsesPerBeat
+               ) {
+                ballPhase = address.phase
+            } else {
+                ballPhase = sample.perimeterPhase
+            }
+        }
+
+        var feedbackEnvelope = 0.0
+        var feedbackKind = BeatPulseKind.weak
+        if isPlaying, let pulse {
+            let style = BeatVisualHierarchyModel.pulseStyle(
+                for: pulse.kind,
+                eventInterval: pulse.eventInterval,
+                dimFlashingLights: dimFlashingLights
+            )
+            let age = max(0, date.timeIntervalSince(pulse.pulseDate))
+            feedbackEnvelope = BeatPulseVisualModel.envelope(
+                age: age,
+                duration: style.duration
+            )
+            feedbackKind = pulse.kind
+
+            if feedbackEnvelope > 0,
+               let eventAddress = BeatPulseVisualModel.address(
+                    beat: pulse.beat,
+                    subdivision: pulse.subdivision,
+                    beats: preset.beats,
+                    pulsesPerBeat: pulse.pulsesPerBeat
+               ),
+               let eventPosition = perimeterPosition(
+                    for: eventAddress.phase,
+                    points: points
+               ) {
+                if pulse.kind != .subdivision,
+                   lifecycle.visibleEdgeIndices.contains(pulse.beat) {
+                    let edgeStrength: Double
+                    switch pulse.kind {
+                    case .strong:
+                        edgeStrength = 0.54
+                    case .secondary:
+                        edgeStrength = 0.40
+                    case .weak:
+                        edgeStrength = 0.28
+                    case .subdivision:
+                        edgeStrength = 0
+                    }
+                    let flashingScale = dimFlashingLights ? 0.55 : 1
+                    drawEdge(
+                        pulse.beat,
+                        through: points,
+                        progress: 1,
+                        opacity: edgeStrength * flashingScale * feedbackEnvelope,
+                        width: 1.85,
+                        effectScale: effectScale,
+                        in: &context
+                    )
+                }
+
+                drawHit(
+                    at: eventPosition,
+                    style: style,
+                    envelope: feedbackEnvelope,
+                    effectScale: effectScale,
+                    in: &context
+                )
+            }
+        }
+
+        guard let ballPhase,
+              let ballPosition = perimeterPosition(for: ballPhase, points: points)
         else { return }
 
-        let style = BeatVisualHierarchyModel.pulseStyle(
-            for: pulse.kind,
-            eventInterval: pulse.eventInterval,
-            dimFlashingLights: dimFlashingLights
-        )
-        let age = max(0, date.timeIntervalSince(pulse.pulseDate))
-        let envelope = BeatPulseVisualModel.envelope(age: age, duration: style.duration)
-        guard envelope > 0 else { return }
+        let displayedBallPosition: CGPoint
+        if lifecycle.builtEdgeCount == 1,
+           pulse?.builtEdgeIndex == 0,
+           let center = polygonCenter(points) {
+            displayedBallPosition = interpolate(
+                from: center,
+                to: ballPosition,
+                progress: edgeConstructionProgress(
+                    edgeIndex: 0,
+                    pulse: pulse,
+                    at: presentationDate
+                )
+            )
+        } else {
+            displayedBallPosition = ballPosition
+        }
 
-        drawHit(
-            at: position,
-            style: style,
-            envelope: envelope,
+        drawBall(
+            at: displayedBallPosition,
+            isPlaying: isPlaying,
+            eventProgress: eventProgress,
+            feedbackEnvelope: feedbackEnvelope,
+            feedbackKind: feedbackKind,
+            speedEnergy: speedEnergy,
             effectScale: effectScale,
             in: &context
         )
     }
 
-    private func pulsePosition(
-        for address: BeatPulseAddress,
+    private func edgeConstructionProgress(
+        edgeIndex: Int,
+        pulse: BeatVisualPulseSnapshot?,
+        at date: Date
+    ) -> CGFloat {
+        guard !reduceMotion,
+              let pulse,
+              pulse.builtEdgeIndex == edgeIndex
+        else { return 1 }
+
+        return CGFloat(BeatVisualPresentationTiming.constructionProgress(
+            elapsed: date.timeIntervalSince(pulse.pulseDate),
+            eventInterval: pulse.eventInterval,
+            reduceMotion: false
+        ))
+    }
+
+    private func drawEdge(
+        _ edgeIndex: Int,
+        through points: [CGPoint],
+        progress: CGFloat,
+        opacity: Double,
+        width: CGFloat,
+        effectScale: CGFloat,
+        in context: inout GraphicsContext
+    ) {
+        guard points.indices.contains(edgeIndex), !points.isEmpty else { return }
+        let nextIndex = (edgeIndex + 1) % points.count
+        let start = points[edgeIndex]
+        let end = interpolate(
+            from: start,
+            to: points[nextIndex],
+            progress: progress
+        )
+        guard progress > 0.001 else { return }
+
+        var path = Path()
+        path.move(to: start)
+        path.addLine(to: end)
+        context.stroke(
+            path,
+            with: .color(.white.opacity(opacity)),
+            style: StrokeStyle(
+                lineWidth: max(0.75, width * effectScale),
+                lineCap: .round,
+                lineJoin: .round
+            )
+        )
+    }
+
+    private func perimeterPosition(
+        for phase: Double,
         points: [CGPoint]
     ) -> CGPoint? {
-        guard points.indices.contains(address.beat) else { return nil }
-        let next = (address.beat + 1) % points.count
-        let fraction = CGFloat(address.phase - Double(address.beat))
+        guard !points.isEmpty, phase.isFinite else { return nil }
+        let period = Double(points.count)
+        let remainder = phase.truncatingRemainder(dividingBy: period)
+        let normalized = remainder >= 0 ? remainder : remainder + period
+        let edgeIndex = min(points.count - 1, Int(floor(normalized)))
+        let nextIndex = (edgeIndex + 1) % points.count
         return interpolate(
-            from: points[address.beat],
-            to: points[next],
-            progress: fraction
+            from: points[edgeIndex],
+            to: points[nextIndex],
+            progress: CGFloat(normalized - Double(edgeIndex))
+        )
+    }
+
+    private func polygonCenter(_ points: [CGPoint]) -> CGPoint? {
+        guard !points.isEmpty else { return nil }
+        let sum = points.reduce(into: CGPoint.zero) { result, point in
+            result.x += point.x
+            result.y += point.y
+        }
+        return CGPoint(
+            x: sum.x / CGFloat(points.count),
+            y: sum.y / CGFloat(points.count)
         )
     }
 
@@ -2892,6 +3347,50 @@ private struct MetronomeCanvas: View {
         context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(opacity)))
     }
 
+    private func drawBall(
+        at point: CGPoint,
+        isPlaying: Bool,
+        eventProgress: Double,
+        feedbackEnvelope: Double,
+        feedbackKind: BeatPulseKind,
+        speedEnergy: Double,
+        effectScale: CGFloat,
+        in context: inout GraphicsContext
+    ) {
+        let kindEnergy: Double
+        switch feedbackKind {
+        case .strong:
+            kindEnergy = 0.25
+        case .secondary:
+            kindEnergy = 0.18
+        case .weak:
+            kindEnergy = 0.12
+        case .subdivision:
+            kindEnergy = 0.07
+        }
+
+        let motionSettle = reduceMotion
+            ? 0
+            : sin(eventProgress * .pi) * 0.08
+        let flashEnergy = dimFlashingLights
+            ? feedbackEnvelope * kindEnergy * 0.55
+            : feedbackEnvelope * kindEnergy
+        let radius = (
+            5.35
+            + speedEnergy * 0.42
+            + motionSettle
+        ) * (1 + flashEnergy)
+        let opacity = isPlaying ? 0.94 : 0.74
+        let scaledRadius = CGFloat(radius) * effectScale
+        let rect = CGRect(
+            x: point.x - scaledRadius,
+            y: point.y - scaledRadius,
+            width: scaledRadius * 2,
+            height: scaledRadius * 2
+        )
+        context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(opacity)))
+    }
+
     private func drawHit(
         at point: CGPoint,
         style: BeatPulseStyle,
@@ -2899,9 +3398,9 @@ private struct MetronomeCanvas: View {
         effectScale: CGFloat,
         in context: inout GraphicsContext
     ) {
-        // A restrained drum-like Hit: immediate peak, then a fast monotonic
-        // falloff. There is no glow ring, travelling head, trail, or breath.
-        let radius = CGFloat(style.peakRadius * (0.58 + 0.42 * envelope)) * effectScale
+        let radius = CGFloat(
+            style.peakRadius * (0.58 + 0.42 * envelope)
+        ) * effectScale
         let opacity = style.peakOpacity * envelope
         let rect = CGRect(
             x: point.x - radius,
@@ -2918,6 +3417,19 @@ private struct MetronomeCanvas: View {
         effectScale: CGFloat,
         in context: inout GraphicsContext
     ) {
+        let baselineHalfWidth = 15 * effectScale
+        var baseline = Path()
+        baseline.move(to: CGPoint(x: point.x - baselineHalfWidth, y: point.y))
+        baseline.addLine(to: CGPoint(x: point.x + baselineHalfWidth, y: point.y))
+        context.stroke(
+            baseline,
+            with: .color(.white.opacity(0.11)),
+            style: StrokeStyle(
+                lineWidth: max(0.7, 0.9 * effectScale),
+                lineCap: .round
+            )
+        )
+
         let wave = reduceMotion
             ? 0.5
             : 0.5 + 0.5 * sin(date.timeIntervalSinceReferenceDate * 2 * .pi / 2.8)
@@ -2940,43 +3452,76 @@ private struct MetronomeCanvas: View {
         effectScale: CGFloat,
         in context: inout GraphicsContext
     ) {
-        guard !finish.visibleBeatIndices.isEmpty else {
-            drawWaitingPoint(
-                at: center,
-                date: date,
+        let elapsed = max(0, date.timeIntervalSince(finish.startedAt))
+        let returnRaw = finish.centerReturnDuration > 0
+            ? clamped(elapsed / finish.centerReturnDuration)
+            : 1
+        let returnProgress = smoothStep(returnRaw)
+        let dismantleElapsed = max(0, elapsed - finish.centerReturnDuration)
+        var survivingAnchors = Set<Int>()
+
+        for edgeIndex in finish.builtEdgeIndices {
+            let rank = finish.dismantlingOrder.firstIndex(of: edgeIndex) ?? 0
+            let removalRaw = finish.edgeDuration > 0
+                ? clamped(
+                    (dismantleElapsed - Double(rank) * finish.edgeDuration)
+                        / finish.edgeDuration
+                )
+                : 1
+            let removalProgress = smoothStep(removalRaw)
+            let remaining = max(0, 1 - removalProgress)
+            guard remaining > 0.001 else { continue }
+
+            drawEdge(
+                edgeIndex,
+                through: points,
+                progress: remaining,
+                opacity: 0.36 * Double(remaining),
+                width: 1.35,
                 effectScale: effectScale,
                 in: &context
             )
-            return
+            survivingAnchors.insert(edgeIndex)
+            survivingAnchors.insert((edgeIndex + 1) % max(1, points.count))
         }
 
-        let rawProgress = min(1, max(0, date.timeIntervalSince(finish.startedAt) / finish.duration))
-        let progress = CGFloat(rawProgress)
-        let eased = progress * progress * (3 - 2 * progress)
-        let remaining = Double(pow(max(0, 1 - eased), 1.35))
-        let visualScale = reduceMotion ? 1 : max(0.08, 1 - eased * 0.88)
-
-        for index in finish.visibleBeatIndices where points.indices.contains(index) {
-            let original = points[index]
-            let position = reduceMotion
-                ? original
-                : interpolate(from: original, to: center, progress: eased)
+        for index in survivingAnchors where points.indices.contains(index) {
             drawAnchor(
-                at: position,
-                opacity: 0.24 * remaining,
-                scale: effectScale * visualScale,
+                at: points[index],
+                opacity: 0.22,
+                radius: 3.6,
+                scale: effectScale,
                 in: &context
             )
         }
 
-        let centerProgress = min(1, max(0, (progress - 0.72) / 0.28))
-        if centerProgress > 0 {
+        if returnRaw < 1,
+           let phase = finish.capturedBallPhase,
+           let perimeterStart = perimeterPosition(for: phase, points: points) {
+            let start = interpolate(
+                from: center,
+                to: perimeterStart,
+                progress: CGFloat(finish.capturedBallRadialProgress)
+            )
+            drawBall(
+                at: interpolate(
+                    from: start,
+                    to: center,
+                    progress: returnProgress
+                ),
+                isPlaying: false,
+                eventProgress: 1,
+                feedbackEnvelope: 0,
+                feedbackKind: .weak,
+                speedEnergy: 0.25,
+                effectScale: effectScale,
+                in: &context
+            )
+        } else {
             drawOriginDisc(
                 at: center,
-                opacity: Double(centerProgress) * 0.72,
-                scale: reduceMotion
-                    ? effectScale
-                    : effectScale * (0.72 + centerProgress * 0.28),
+                opacity: 0.74,
+                scale: effectScale,
                 in: &context
             )
         }
@@ -2988,7 +3533,9 @@ private struct MetronomeCanvas: View {
         scale: CGFloat,
         in context: inout GraphicsContext
     ) {
-        let radius = 8.0 * scale
+        // Match the returning ball closely so reaching the origin does not
+        // introduce a one-frame size jump before dismantling begins.
+        let radius = 6.1 * scale
         let rect = CGRect(
             x: point.x - radius,
             y: point.y - radius,
@@ -2998,7 +3545,28 @@ private struct MetronomeCanvas: View {
         context.fill(Path(ellipseIn: rect), with: .color(.white.opacity(opacity)))
     }
 
-    private func interpolate(from start: CGPoint, to end: CGPoint, progress: CGFloat) -> CGPoint {
+    private func controlledSpeedEnergy(for eventInterval: TimeInterval) -> Double {
+        guard eventInterval.isFinite else { return 0.35 }
+        // The visual range is intentionally compressed: higher event density
+        // feels slightly tighter and brighter, but can never move the geometry
+        // farther or turn the stage into an unbounded physics simulation.
+        return clamped((0.52 - eventInterval) / 0.44)
+    }
+
+    private func clamped(_ value: Double) -> Double {
+        min(1, max(0, value.isFinite ? value : 1))
+    }
+
+    private func smoothStep(_ value: Double) -> CGFloat {
+        let value = clamped(value)
+        return CGFloat(value * value * (3 - 2 * value))
+    }
+
+    private func interpolate(
+        from start: CGPoint,
+        to end: CGPoint,
+        progress: CGFloat
+    ) -> CGPoint {
         let progress = min(1, max(0, progress))
         return CGPoint(
             x: start.x + (end.x - start.x) * progress,

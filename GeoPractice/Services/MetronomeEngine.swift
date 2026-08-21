@@ -191,6 +191,43 @@ struct BeatPlaybackPulse: Equatable, Sendable {
     let presentedAt: Date
 }
 
+/// The first musical address that should be heard after a user pause. Audio
+/// buffers are discarded while paused, but the transport itself must not jump
+/// back to the first beat when playback resumes.
+struct BeatPlaybackContinuation: Equatable, Sendable {
+    let eventIndex: Int
+    let cycle: Int
+
+    init(
+        afterBeat beat: Int,
+        subdivision: Int,
+        cycle: Int,
+        plan: MetronomePlaybackPlan
+    ) {
+        let eventCount = max(1, plan.eventsPerMeasure)
+        let pulsesPerBeat = max(1, plan.pulsesPerBeat)
+        let beatCount = max(1, eventCount / pulsesPerBeat)
+        let safeBeat = min(max(0, beat), beatCount - 1)
+        let safeSubdivision = min(max(0, subdivision), pulsesPerBeat - 1)
+        let currentIndex = min(
+            eventCount - 1,
+            safeBeat * pulsesPerBeat + safeSubdivision
+        )
+        if currentIndex + 1 >= eventCount {
+            eventIndex = 0
+            let safeCycle = max(0, cycle)
+            self.cycle = safeCycle == Int.max ? Int.max : safeCycle + 1
+        } else {
+            eventIndex = currentIndex + 1
+            self.cycle = max(0, cycle)
+        }
+    }
+
+    var frontier: BeatScheduleFrontier {
+        BeatScheduleFrontier(eventIndex: eventIndex, cycle: cycle)
+    }
+}
+
 @MainActor
 final class MetronomeEngine: ObservableObject {
     @Published private(set) var preset: MetronomePreset
@@ -206,6 +243,7 @@ final class MetronomeEngine: ObservableObject {
     private var scheduler = BeatAudioScheduler()
     private var playbackToken = UUID()
     private var lastAcceptedPulseSequence: UInt64?
+    private var pausedContinuation: BeatPlaybackContinuation?
     private var cancellables: Set<AnyCancellable> = []
     private var groupingPreferences: [Int: String] = [:]
 
@@ -245,6 +283,8 @@ final class MetronomeEngine: ObservableObject {
                 from: previousPlan,
                 previousPreset: previousPreset
             )
+        } else {
+            invalidatePausedContinuationIfTopologyChanged(from: previousPlan)
         }
     }
 
@@ -347,24 +387,44 @@ final class MetronomeEngine: ObservableObject {
     }
 
     func toggle() {
-        isPlaying ? stop() : start()
+        isPlaying ? pause() : start()
     }
 
     func start() {
         guard !isPlaying else { return }
+        let continuation = pausedContinuation
         do {
             try configureAudioSession()
             isPlaying = true
-            try beginScheduledPlayback()
+            try beginScheduledPlayback(frontier: continuation?.frontier ?? BeatScheduleFrontier())
+            pausedContinuation = nil
             errorMessage = nil
         } catch {
             isPlaying = false
             scheduler.stop()
+            pausedContinuation = continuation
             errorMessage = "无法启动声音：\(error.localizedDescription)"
         }
     }
 
+    /// Pauses audible playback without discarding the musical cursor. The
+    /// next start continues with the event after the last pulse the user
+    /// actually heard; final session completion still uses `stop()`.
+    func pause() {
+        guard isPlaying else { return }
+        pausedContinuation = continuationAfterLastPulse()
+        playbackToken = UUID()
+        lastAcceptedPulseSequence = nil
+        scheduler.stop()
+        isPlaying = false
+        try? AVAudioSession.sharedInstance().setActive(
+            false,
+            options: .notifyOthersOnDeactivation
+        )
+    }
+
     func stop() {
+        pausedContinuation = nil
         playbackToken = UUID()
         lastAcceptedPulseSequence = nil
         scheduler.stop()
@@ -376,20 +436,27 @@ final class MetronomeEngine: ObservableObject {
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
     }
 
-    private func restartPlayback() {
+    private func restartPlayback(preservingCursor: Bool = false) {
+        let continuation = preservingCursor ? continuationAfterLastPulse() : nil
+        pausedContinuation = nil
         playbackToken = UUID()
         lastAcceptedPulseSequence = nil
         scheduler.stop()
-        currentBeat = 0
-        currentSubdivision = 0
-        currentCycle = 0
-        lastPulse = nil
+        if !preservingCursor {
+            currentBeat = 0
+            currentSubdivision = 0
+            currentCycle = 0
+            lastPulse = nil
+        }
         do {
             try configureAudioSession()
-            try beginScheduledPlayback()
+            try beginScheduledPlayback(
+                frontier: continuation?.frontier ?? BeatScheduleFrontier()
+            )
         } catch {
             scheduler.stop()
             isPlaying = false
+            pausedContinuation = continuation
             try? AVAudioSession.sharedInstance().setActive(
                 false,
                 options: .notifyOthersOnDeactivation
@@ -432,17 +499,20 @@ final class MetronomeEngine: ObservableObject {
         ) else {
             // This is a recovery path for an inconsistent engine state, not the
             // normal tempo-change path.
-            restartPlayback()
+            restartPlayback(preservingCursor: true)
             return
         }
         errorMessage = nil
     }
 
-    private func beginScheduledPlayback() throws {
+    private func beginScheduledPlayback(
+        frontier: BeatScheduleFrontier = BeatScheduleFrontier()
+    ) throws {
         lastAcceptedPulseSequence = nil
         playbackToken = try scheduler.start(
             preset: preset,
-            plan: playbackPlan
+            plan: playbackPlan,
+            frontier: frontier
         ) { [weak self] token, pulse in
             guard let self, self.isPlaying, self.playbackToken == token else { return }
             if let lastSequence = self.lastAcceptedPulseSequence,
@@ -455,6 +525,31 @@ final class MetronomeEngine: ObservableObject {
             self.currentCycle = pulse.cycle
             self.lastPulse = pulse
         }
+    }
+
+    private func invalidatePausedContinuationIfTopologyChanged(
+        from previousPlan: MetronomePlaybackPlan
+    ) {
+        guard pausedContinuation != nil else { return }
+        let nextPlan = playbackPlan
+        guard nextPlan.eventsPerMeasure != previousPlan.eventsPerMeasure
+                || nextPlan.pulsesPerBeat != previousPlan.pulsesPerBeat
+        else { return }
+        pausedContinuation = nil
+        currentBeat = 0
+        currentSubdivision = 0
+        currentCycle = 0
+        lastPulse = nil
+    }
+
+    private func continuationAfterLastPulse() -> BeatPlaybackContinuation? {
+        guard let pulse = lastPulse else { return nil }
+        return BeatPlaybackContinuation(
+            afterBeat: pulse.beat,
+            subdivision: pulse.subdivision,
+            cycle: pulse.cycle,
+            plan: playbackPlan
+        )
     }
 
     private func configureAudioSession() throws {
@@ -471,7 +566,7 @@ final class MetronomeEngine: ObservableObject {
                         let rawValue = notification.userInfo?[AVAudioSessionInterruptionTypeKey] as? UInt,
                         AVAudioSession.InterruptionType(rawValue: rawValue) == .began
                     else { return }
-                    self?.stop()
+                    self?.pause()
                 }
             }
             .store(in: &cancellables)
@@ -493,7 +588,7 @@ final class MetronomeEngine: ObservableObject {
                             .routeConfigurationChange
                         ].contains(reason)
                     else { return }
-                    self.restartPlayback()
+                    self.restartPlayback(preservingCursor: true)
                 }
             }
             .store(in: &cancellables)
@@ -502,15 +597,13 @@ final class MetronomeEngine: ObservableObject {
             .sink { [weak self] _ in
                 Task { @MainActor [weak self] in
                     guard let self else { return }
+                    let continuation = self.continuationAfterLastPulse()
                     self.playbackToken = UUID()
                     self.lastAcceptedPulseSequence = nil
+                    self.pausedContinuation = continuation
                     self.scheduler.stop()
                     self.scheduler = BeatAudioScheduler()
                     self.isPlaying = false
-                    self.currentBeat = 0
-                    self.currentSubdivision = 0
-                    self.currentCycle = 0
-                    self.lastPulse = nil
                     self.errorMessage = "音频服务已重置，请重新点击播放。"
                 }
             }
@@ -551,6 +644,7 @@ private final class BeatAudioScheduler: @unchecked Sendable {
     func start(
         preset: MetronomePreset,
         plan: MetronomePlaybackPlan,
+        frontier: BeatScheduleFrontier = BeatScheduleFrontier(),
         onTick: @escaping @MainActor @Sendable (UUID, BeatPlaybackPulse) -> Void
     ) throws -> UUID {
         return try schedulingQueue.sync {
@@ -576,7 +670,7 @@ private final class BeatAudioScheduler: @unchecked Sendable {
                 startHostTime: startHostTime,
                 presentationLatency: presentationLatency,
                 onTick: onTick,
-                frontier: BeatScheduleFrontier()
+                frontier: frontier
             )
 
             scheduleAheadLocked()

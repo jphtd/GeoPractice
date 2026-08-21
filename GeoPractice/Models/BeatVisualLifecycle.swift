@@ -91,25 +91,104 @@ enum BeatPulseVisualModel {
     }
 }
 
-/// Playback and visual lifecycle are intentionally separate. Waiting is a
-/// single breathing point; the first valid audio event establishes one fixed
-/// N-point structure which survives pauses and audio rescheduling.
+/// Renderer-neutral position authored from the scheduler's current event.
+/// `perimeterPhase` is measured in main-beat units while `measurePhase` is a
+/// normalized turn. Both are wrapped half-open values, so the end of the final
+/// event is exactly the beginning of the next measure rather than a duplicate
+/// terminal position.
+struct BeatVisualMotionSample: Equatable, Sendable {
+    let eventProgress: Double
+    let perimeterPhase: Double
+    let measurePhase: Double
+}
+
+enum BeatVisualMotionModel {
+    static func sample(
+        beat: Int,
+        subdivision: Int,
+        elapsed: TimeInterval,
+        eventInterval: TimeInterval,
+        pulsesPerBeat: Int,
+        eventsPerMeasure: Int,
+        beats: Int
+    ) -> BeatVisualMotionSample? {
+        guard beats > 0,
+              pulsesPerBeat > 0,
+              beats <= Int.max / pulsesPerBeat,
+              eventsPerMeasure == beats * pulsesPerBeat,
+              beat >= 0, beat < beats,
+              subdivision >= 0, subdivision < pulsesPerBeat,
+              eventInterval.isFinite, eventInterval > 0,
+              !elapsed.isNaN
+        else { return nil }
+
+        let eventProgress: Double
+        if elapsed == .infinity {
+            eventProgress = 1
+        } else {
+            eventProgress = min(1, max(0, elapsed / eventInterval))
+        }
+
+        let eventIndex = beat * pulsesPerBeat + subdivision
+        let unwrappedMeasurePhase = (
+            Double(eventIndex) + eventProgress
+        ) / Double(eventsPerMeasure)
+        let measurePhase = wrapped(unwrappedMeasurePhase, period: 1)
+        let perimeterPhase = wrapped(measurePhase * Double(beats), period: Double(beats))
+
+        return BeatVisualMotionSample(
+            eventProgress: eventProgress,
+            perimeterPhase: perimeterPhase,
+            measurePhase: measurePhase
+        )
+    }
+
+    private static func wrapped(_ value: Double, period: Double) -> Double {
+        let remainder = value.truncatingRemainder(dividingBy: period)
+        return remainder >= 0 ? remainder : remainder + period
+    }
+}
+
+/// Playback and visual lifecycle are intentionally separate. The audio engine
+/// supplies the event addresses; this value only remembers the durable visual
+/// facts which must survive a pause or an interval-only tempo change.
+///
+/// An edge is identified by its starting vertex. Edge `0` joins vertex `0` to
+/// vertex `1`; the final edge joins the final vertex back to vertex `0`.
 struct BeatVisualLifecycle: Equatable, Sendable {
     enum Phase: Equatable, Sendable {
+        /// Idle: only the origin ball is visible.
         case origin
+        /// Main beats are adding one polygon edge at a time.
+        case building
+        /// The polygon is complete and remains stable across measures.
         case orbiting
+        /// Audio has stopped and the ball is returning to the origin.
         case finishing
+        /// The ball is at the origin and edges are removed in reverse order.
+        case dismantling
+        /// The practice has ended and the completed stage has been cleared.
         case settled
     }
 
     private(set) var phase: Phase = .origin
     private(set) var beatCount: Int
-    private(set) var revealedBeats: Set<Int> = []
+    /// Actual build order. Geometry is constructed in the renderer's configured
+    /// direction; every authoritative main-beat event appends the next missing
+    /// edge until this collection reaches `beatCount`.
+    private(set) var visibleEdgeIndices: [Int] = []
     /// The main-beat vertex which owns the most recent valid pulse. It
     /// deliberately survives pauses and interval-only tempo changes so
     /// peripheral vision can still locate the current beat after the short Hit
     /// has decayed. Subdivision pulses select their containing main beat.
     private(set) var currentBeatIndex: Int?
+    /// Last engine-authored position around the polygon, measured in main-beat
+    /// units. This is a snapshot rather than a visual clock. Renderers may
+    /// interpolate from it but must never feed a derived value back into BPM.
+    private(set) var ballPhase: Double?
+    /// Immutable start position for the return-to-origin animation.
+    private(set) var returnStartBallPhase: Double?
+    private(set) var ballIsAtOrigin = true
     private(set) var isPaused = true
 
     init(beats: Int = 4) {
@@ -117,15 +196,35 @@ struct BeatVisualLifecycle: Equatable, Sendable {
     }
 
     var hasEstablishedStructure: Bool {
-        phase == .orbiting || (phase == .finishing && revealedBeats.count == beatCount)
+        visibleEdgeIndices.count == beatCount
+            && phase != .origin
+            && phase != .settled
     }
 
+    var builtEdgeCount: Int { visibleEdgeIndices.count }
+
+    var latestBuiltEdgeIndex: Int? { visibleEdgeIndices.last }
+
+    /// Snapshot used by a renderer to schedule reverse teardown without
+    /// mutating this model on every animation frame.
+    var dismantlingOrder: [Int] { Array(visibleEdgeIndices.reversed()) }
+
+    var nextEdgeToDismantle: Int? {
+        phase == .dismantling ? visibleEdgeIndices.last : nil
+    }
+
+    /// Compatibility view for renderers which still draw vertex anchors.
+    /// Unlike `visibleEdgeIndices`, this is a set of visible edge endpoints and
+    /// deliberately carries no construction-order semantics.
     var visibleBeatIndices: [Int] {
         switch phase {
         case .origin, .settled:
-            []
-        case .orbiting, .finishing:
-            revealedBeats.sorted()
+            return []
+        case .building, .orbiting, .finishing, .dismantling:
+            guard !visibleEdgeIndices.isEmpty else { return [] }
+            return Set(visibleEdgeIndices.flatMap { edge in
+                [edge, (edge + 1) % beatCount]
+            }).sorted()
         }
     }
 
@@ -137,25 +236,30 @@ struct BeatVisualLifecycle: Equatable, Sendable {
         let normalized = Self.normalizedBeatCount(beats)
         guard normalized != beatCount else { return }
 
-        // A live topology change swaps one fixed geometry for another without
-        // collapsing the stage to the waiting point. A session that has not
-        // started still remains in its single-point waiting state.
-        if phase == .orbiting {
-            beatCount = normalized
-            revealedBeats = Set(0..<normalized)
-            currentBeatIndex = nil
-        } else {
-            reset(beats: normalized)
-        }
+        // A changed time signature is a new topology and therefore starts a
+        // new construction lifecycle. Preserve only whether playback was live;
+        // same-topology tempo changes never enter this branch.
+        let wasPlaying = !isPaused
+            && phase != .finishing
+            && phase != .dismantling
+            && phase != .settled
+        self = BeatVisualLifecycle(beats: normalized)
+        isPaused = !wasPlaying
     }
 
     mutating func resume() {
-        guard phase != .finishing, phase != .settled else { return }
+        guard phase != .finishing,
+              phase != .dismantling,
+              phase != .settled
+        else { return }
         isPaused = false
     }
 
     mutating func pause() {
-        guard phase != .finishing, phase != .settled else { return }
+        guard phase != .finishing,
+              phase != .dismantling,
+              phase != .settled
+        else { return }
         isPaused = true
     }
 
@@ -167,37 +271,131 @@ struct BeatVisualLifecycle: Equatable, Sendable {
     }
 
     mutating func record(beat: Int, subdivision: Int, cycle: Int, beats: Int) {
+        record(
+            beat: beat,
+            subdivision: subdivision,
+            cycle: cycle,
+            beats: beats,
+            pulsesPerBeat: nil
+        )
+    }
+
+    /// Records one event from the authoritative scheduler. The legacy overload
+    /// above remains source-compatible; new call sites should provide
+    /// `pulsesPerBeat` so subdivision positions are exact.
+    mutating func record(
+        beat: Int,
+        subdivision: Int,
+        cycle: Int,
+        beats: Int,
+        pulsesPerBeat: Int
+    ) {
+        record(
+            beat: beat,
+            subdivision: subdivision,
+            cycle: cycle,
+            beats: beats,
+            pulsesPerBeat: Optional(pulsesPerBeat)
+        )
+    }
+
+    private mutating func record(
+        beat: Int,
+        subdivision: Int,
+        cycle: Int,
+        beats: Int,
+        pulsesPerBeat: Int?
+    ) {
         reconfigure(beats: beats)
-        guard phase != .finishing, phase != .settled,
+        guard phase != .finishing,
+              phase != .dismantling,
+              phase != .settled,
               beat >= 0, beat < beatCount,
-              subdivision >= 0
+              subdivision >= 0,
+              pulsesPerBeat.map({ $0 > 0 && subdivision < $0 }) ?? true
         else { return }
 
         isPaused = false
-
-        // Geometry is a stable frame for the pulses, not something that is
-        // progressively drawn by a travelling point. Even a first subdivision
-        // event establishes all main-beat anchors at once.
-        revealedBeats = Set(0..<beatCount)
         currentBeatIndex = beat
-        phase = .orbiting
+        ballIsAtOrigin = false
+
+        let inferredPulsesPerBeat = pulsesPerBeat ?? max(1, subdivision + 1)
+        ballPhase = Self.normalizedBallPhase(
+            Double(beat) + Double(subdivision) / Double(inferredPulsesPerBeat),
+            beats: beatCount
+        )
+
+        // A subdivision moves/pulses the ball but can never create geometry.
+        guard subdivision == 0 else { return }
+
+        // Bind geometry to the authoritative musical address. Replayed or
+        // duplicated callbacks for the same main beat must never fabricate a
+        // later edge; this also keeps a transport recovery from advancing the
+        // polygon before that later beat is actually heard.
+        if !visibleEdgeIndices.contains(beat) {
+            visibleEdgeIndices.append(beat)
+        }
+        phase = visibleEdgeIndices.count == beatCount ? .orbiting : .building
     }
 
     mutating func beginFinishing() {
-        guard phase != .finishing, phase != .settled else { return }
+        guard phase != .finishing,
+              phase != .dismantling,
+              phase != .settled
+        else { return }
         isPaused = true
         currentBeatIndex = nil
+        returnStartBallPhase = ballPhase
         phase = .finishing
+    }
+
+    /// Marks completion of the ball's return. Edge teardown cannot begin
+    /// before this transition, including under Reduce Motion; accessibility
+    /// settings shorten presentation duration, not lifecycle semantics.
+    mutating func completeCenterReturn() {
+        guard phase == .finishing else { return }
+        ballPhase = nil
+        ballIsAtOrigin = true
+        if visibleEdgeIndices.isEmpty {
+            settle()
+        } else {
+            phase = .dismantling
+        }
+    }
+
+    /// Removes exactly the most recently constructed remaining edge.
+    /// Returning the edge index lets a renderer verify that its animation and
+    /// the model committed the same reverse-order step.
+    @discardableResult
+    mutating func removeNextDismantlingEdge() -> Int? {
+        guard phase == .dismantling,
+              let removed = visibleEdgeIndices.popLast()
+        else { return nil }
+
+        if visibleEdgeIndices.isEmpty {
+            settle()
+        }
+        return removed
     }
 
     mutating func settle() {
         isPaused = true
         currentBeatIndex = nil
+        ballPhase = nil
+        returnStartBallPhase = nil
+        ballIsAtOrigin = true
+        visibleEdgeIndices.removeAll(keepingCapacity: false)
         phase = .settled
     }
 
     private static func normalizedBeatCount(_ beats: Int) -> Int {
         min(max(beats, 3), 9)
+    }
+
+    private static func normalizedBallPhase(_ phase: Double, beats: Int) -> Double {
+        let period = Double(beats)
+        let remainder = phase.truncatingRemainder(dividingBy: period)
+        return remainder >= 0 ? remainder : remainder + period
     }
 }
 
@@ -237,7 +435,7 @@ enum BeatVisualHierarchyModel {
         for beatIndex: Int,
         lifecycle: BeatVisualLifecycle
     ) -> BeatAnchorVisualStyle {
-        guard lifecycle.phase == .orbiting,
+        guard (lifecycle.phase == .building || lifecycle.phase == .orbiting),
               lifecycle.currentBeatIndex == beatIndex
         else { return inactiveAnchorStyle }
 
@@ -373,9 +571,15 @@ struct MetronomeGlanceStatus: Equatable, Sendable {
         isFinished: Bool
     ) -> State {
         if isFinished || lifecycle.phase == .settled { return .finished }
-        if isFinishing || lifecycle.phase == .finishing { return .finishing }
+        if isFinishing
+            || lifecycle.phase == .finishing
+            || lifecycle.phase == .dismantling {
+            return .finishing
+        }
         if isPlaying { return .playing }
-        if lifecycle.phase == .orbiting { return .paused }
+        if lifecycle.phase == .building || lifecycle.phase == .orbiting {
+            return .paused
+        }
         return .ready
     }
 }

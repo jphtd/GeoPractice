@@ -30,6 +30,7 @@
 		A00000000000000000000015 /* PracticeReportExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000018 /* PracticeReportExporter.swift */; };
 		A00000000000000000000016 /* PracticeGoalViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000019 /* PracticeGoalViews.swift */; };
 		A00000000000000000000017 /* PracticeFolderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001A /* PracticeFolderTests.swift */; };
+		A00000000000000000000018 /* V52VisualLifecycleTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B0000000000000000000001B /* V52VisualLifecycleTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -69,6 +70,7 @@
 		B00000000000000000000018 /* PracticeReportExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeReportExporter.swift; sourceTree = "<group>"; };
 		B00000000000000000000019 /* PracticeGoalViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeGoalViews.swift; sourceTree = "<group>"; };
 		B0000000000000000000001A /* PracticeFolderTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeFolderTests.swift; sourceTree = "<group>"; };
+		B0000000000000000000001B /* V52VisualLifecycleTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = V52VisualLifecycleTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -156,6 +158,7 @@
 			children = (
 				B0000000000000000000000A /* MetronomePresetTests.swift */,
 				B0000000000000000000001A /* PracticeFolderTests.swift */,
+				B0000000000000000000001B /* V52VisualLifecycleTests.swift */,
 			);
 			path = GeoPracticeTests;
 			sourceTree = "<group>";
@@ -303,6 +306,7 @@
 			files = (
 				A0000000000000000000000A /* MetronomePresetTests.swift in Sources */,
 				A00000000000000000000017 /* PracticeFolderTests.swift in Sources */,
+				A00000000000000000000018 /* V52VisualLifecycleTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -435,7 +439,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = XKY44WW2XC;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = GeoPractice/Info.plist;
@@ -448,7 +452,7 @@
 				INFOPLIST_KEY_UIRequiresFullScreen = NO;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 4.2;
+				MARKETING_VERSION = 5.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kuoxiyu.GeoPractice;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -464,7 +468,7 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_STYLE = Automatic;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = XKY44WW2XC;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_FILE = GeoPractice/Info.plist;
@@ -477,7 +481,7 @@
 				INFOPLIST_KEY_UIRequiresFullScreen = NO;
 				INFOPLIST_KEY_UISupportedInterfaceOrientations = "UIInterfaceOrientationPortrait UIInterfaceOrientationPortraitUpsideDown UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight";
 				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
-				MARKETING_VERSION = 4.2;
+				MARKETING_VERSION = 5.2;
 				PRODUCT_BUNDLE_IDENTIFIER = com.kuoxiyu.GeoPractice;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

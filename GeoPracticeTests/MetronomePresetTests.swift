@@ -370,7 +370,7 @@ final class MetronomePresetTests: XCTestCase {
         }
     }
 
-    func testFirstPulseEstablishesFixedGeometryAndKeepsItAcrossCycles() {
+    func testFirstMeasureBuildsGeometryAndKeepsItAcrossCycles() {
         var lifecycle = BeatVisualLifecycle(beats: 4)
 
         XCTAssertEqual(lifecycle.phase, .origin)
@@ -379,16 +379,22 @@ final class MetronomePresetTests: XCTestCase {
 
         lifecycle.resume()
         lifecycle.record(beat: 0, subdivision: 1, cycle: 0, beats: 4)
+        XCTAssertEqual(lifecycle.phase, .origin)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [])
+        XCTAssertFalse(lifecycle.hasEstablishedStructure)
+
+        for beat in 0..<4 {
+            lifecycle.record(beat: beat, subdivision: 0, cycle: 0, beats: 4)
+        }
+
         XCTAssertEqual(lifecycle.phase, .orbiting)
         XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3])
         XCTAssertTrue(lifecycle.hasEstablishedStructure)
 
         lifecycle.record(beat: 0, subdivision: 0, cycle: 1, beats: 4)
         lifecycle.record(beat: 2, subdivision: 0, cycle: 100, beats: 4)
-        lifecycle.record(beat: 0, subdivision: 0, cycle: 0, beats: 4)
 
-        XCTAssertEqual(lifecycle.phase, .orbiting)
-        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3])
+        XCTAssertEqual(lifecycle.visibleEdgeIndices, [0, 1, 2, 3])
         XCTAssertTrue(lifecycle.hasEstablishedStructure)
     }
 
@@ -1375,29 +1381,34 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertTrue(lifecycle.isPaused)
     }
 
-    func testBeatVisualLifecycleLiveTopologyChangeKeepsEstablishedShape() {
+    func testBeatVisualLifecycleLiveTopologyChangeStartsNewBuild() {
         var lifecycle = BeatVisualLifecycle(beats: 5)
-        lifecycle.record(beat: 0, subdivision: 0, cycle: 1, beats: 5)
+        for beat in 0..<5 {
+            lifecycle.record(beat: beat, subdivision: 0, cycle: 0, beats: 5)
+        }
         XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3, 4])
 
         lifecycle.reconfigure(beats: 5)
         XCTAssertEqual(lifecycle.phase, .orbiting)
 
         lifecycle.reconfigure(beats: 7)
-        XCTAssertEqual(lifecycle.phase, .orbiting)
+        XCTAssertEqual(lifecycle.phase, .origin)
         XCTAssertEqual(lifecycle.beatCount, 7)
-        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3, 4, 5, 6])
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [])
         XCTAssertNil(lifecycle.currentBeatIndex)
 
         lifecycle.record(beat: -1, subdivision: 0, cycle: 0, beats: 7)
         lifecycle.record(beat: 9, subdivision: 0, cycle: 0, beats: 7)
-        XCTAssertEqual(lifecycle.phase, .orbiting)
-        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3, 4, 5, 6])
+        XCTAssertEqual(lifecycle.phase, .origin)
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [])
     }
 
     func testBeatVisualLifecycleCanClearOnlyStaleCurrentBeatLocation() {
         var lifecycle = BeatVisualLifecycle(beats: 4)
-        lifecycle.record(beat: 2, subdivision: 0, cycle: 1, beats: 4)
+        for beat in 0..<4 {
+            lifecycle.record(beat: beat, subdivision: 0, cycle: 0, beats: 4)
+        }
+        lifecycle.record(beat: 2, subdivision: 1, cycle: 1, beats: 4)
         XCTAssertEqual(lifecycle.currentBeatIndex, 2)
 
         lifecycle.clearCurrentBeatLocation()
@@ -1571,7 +1582,7 @@ final class MetronomePresetTests: XCTestCase {
         lifecycle.record(beat: 4, subdivision: 1, cycle: 0, beats: 7)
 
         XCTAssertEqual(lifecycle.currentBeatIndex, 4)
-        XCTAssertEqual(lifecycle.visibleBeatIndices, [0, 1, 2, 3, 4, 5, 6])
+        XCTAssertEqual(lifecycle.visibleBeatIndices, [])
     }
 
     func testCurrentAnchorRemainsDominantWhilePlayingAndPaused() {

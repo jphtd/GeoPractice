@@ -1,0 +1,115 @@
+// GeoBeat 无声动画预览：1–2 拍圆球，3–9 拍圆角多边形。
+let tempo, meter, playButton, state = 'idle', beat = 0;
+let shown = null, morphFrom = null, morphStart = -1000;
+const reduced = window\.matchMedia('(prefers-reduced-motion: reduce)');
+function setup() {
+createCanvas(windowWidth, Math.max(360, windowHeight - 110));
+textAlign(CENTER, CENTER); rectMode(CENTER);
+const bar = createDiv();
+bar.style('display', 'flex'); bar.style('gap', '12px');
+bar.style('flex-wrap', 'wrap'); bar.style('justify-content', 'center');
+bar.style('align-items', 'center'); bar.style('font-family', 'system-ui');
+meter = createSelect().parent(bar);
+for (let n = 1; n <= 9; n++) meter.option(n + ' 拍', n);
+meter.selected('1'); meter.attribute('aria-label', '每小节拍数');
+meter.changed(() => {
+morphFrom = shown && shown.map(p => ({ ...p }));
+morphStart = millis();
+});
+tempo = createSlider(40, 180, 80, 1).parent(bar);
+tempo.attribute('aria-label', '每分钟拍数');
+playButton = createButton('播放').parent(bar);
+playButton.mousePressed(() => {
+state = state === 'playing' ? 'paused' : 'playing';
+playButton.html(state === 'playing' ? '暂停' : '继续');
+});
+const stop = createButton('停止').parent(bar);
+stop.mousePressed(() => { state = 'idle'; beat = 0; playButton.html('播放'); });
+for (const control of [meter, playButton, stop]) {
+control.style('min-height', '44px'); control.style('font-size', '16px');
+}
+describe('待机圆球轻微呼吸。一拍和两拍为圆球上下弹动，三拍以上为圆角多边形。拍点只突出当前拍，无阴影。');
+}
+function draw() {
+const dark = window\.matchMedia('(prefers-color-scheme: dark)').matches;
+const ink = dark ? 242 : 20, muted = dark ? 105 : 175;
+background(dark ? 18 : 250);
+if (state === 'playing') beat += Math.min(deltaTime, 80) / 60000 \* Number(tempo.value());
+const n = Number(meter.value()), phase = beat % 1, current = Math.floor(beat) % n;
+const size = Math.min(74, width \* 0.2), y = height / 2;
+const speed = constrain((Number(tempo.value()) - 100) / 60, 0, 1);
+const speedMix = speed \* speed \* (3 - 2 \* speed);
+const t = constrain(phase / lerp(0.90, 0.82, speedMix), 0, 1);
+const ease = t \* t \* (3 - 2 \* t);
+const pulse = Math.pow(1 - phase, 4);
+const amplitude = size \* lerp(0.045, 0.23, speedMix) \* (current === 0 ? 1.45 : 1);
+noStroke(); fill(ink);
+const idle = state === 'idle';
+const breathing = idle && !reduced.matches ? 1 + 0.035 \* Math.sin(millis() / 1000 \* TWO\_PI / 3.5) : 1;
+const angle = idle || n <= 2 || reduced.matches ? 0 : (Math.floor(beat) + ease) \* TWO\_PI / n;
+const offset = idle || reduced.matches ? 0 : Math.sin(PI \* t) \* (n <= 2 ? size \* 0.1 + amplitude : -amplitude);
+const target = contour(idle ? 1 : n).map(p => ({
+x: (p.x \* Math.cos(angle) - p.y \* Math.sin(angle)) \* size \* breathing,
+y: (p.x \* Math.sin(angle) + p.y \* Math.cos(angle)) \* size \* breathing + offset
+}));
+const progress = reduced.matches ? 1 : constrain((millis() - morphStart) / 420, 0, 1);
+const soft = progress \* progress \* progress \* (progress \* (progress \* 6 - 15) + 10);
+shown = target.map((p, i) => morphFrom && progress < 1 ? {
+x: lerp(morphFrom[i].x, p.x, soft), y: lerp(morphFrom[i].y, p.y, soft)
+} : p);
+beginShape();
+for (const p of shown) vertex(width / 2 + p.x, y + p.y);
+endShape(CLOSE);
+for (let i = 0; i < n; i++) {
+const active = state !== 'idle' && i === current;
+fill(active ? ink : muted);
+const diameter = active ? (reduced.matches ? 9 : 8 + 3 \* pulse) : 5;
+circle(width / 2 + (i - (n - 1) / 2) \* 24, y + 108, diameter);
+}
+fill(dark ? 185 : 90); textSize(14);
+text(tempo.value() + ' BPM', width / 2, y + 148);
+}
+// All outlines have 180 corresponding points, including circles.
+// Snapshot the displayed outline on every change so rapid switching never snaps.
+const contourCache = new Map();
+function contour(n) {
+if (contourCache.has(n)) return contourCache.get(n);
+let raw = [];
+if (n <= 2) {
+raw = Array.from({ length: 180 }, (*, i) => {
+const a = i \* Math.PI \* 2 / 180 - Math.PI / 2;
+return { x: Math.cos(a) \* 0.4, y: Math.sin(a) \* 0.4 };
+});
+} else {
+const corners = Array.from({ length: n }, (*, i) => {
+const a = i \* Math.PI \* 2 / n + Math.PI / 2 - Math.PI / n;
+return { x: Math.cos(a) \* 0.65, y: Math.sin(a) \* 0.65 };
+});
+const mix = (a, b, t) => ({ x: a.x + (b.x-a.x)\*t, y: a.y + (b.y-a.y)*t });
+for (let i=0; i\<n; i++) {
+const p=corners[i], next=corners[(i+1)%n], prev=corners[(i+n-1)%n];
+const enter=mix(p,prev,0.16), leave=mix(p,next,0.16);
+for(let j=0;j<12;j++) {
+const t=j/12;
+raw\.push(mix(mix(enter,p,t),mix(p,leave,t),t));
+}
+const nextEnter=mix(next,p,0.16);
+for(let j=0;j<20;j++) raw\.push(mix(leave,nextEnter,j/20));
+}
+const lengths=[0];
+for(let i=0;i\<raw\.length;i++) {
+const a=raw[i],b=raw[(i+1)%raw\.length];
+lengths.push(lengths[i]+Math.hypot(b.x-a.x,b.y-a.y));
+}
+let edge=0;
+const perimeter=lengths[lengths.length-1];
+raw=Array.from({length:180},(\_,i)=>{
+const arcPosition=i*perimeter/180;
+while(lengths[edge+1]\<arcPosition) edge++;
+return mix(raw[edge],raw[(edge+1)%raw\.length],(arcPosition-lengths[edge])/(lengths[edge+1]-lengths[edge]));
+});
+}
+contourCache.set(n,raw);
+return raw;
+}
+function windowResized() { resizeCanvas(windowWidth, Math.max(360, windowHeight - 110)); }

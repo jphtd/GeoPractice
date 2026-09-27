@@ -8,6 +8,8 @@ import SwiftData
 final class PracticeSong {
     @Attribute(.unique) var id: UUID
     var name: String
+    /// Explicit v1.1 metadata; nil means unmapped legacy data (SG-04).
+    var coreStructureData: Data?
     var group: String
     var isArchived: Bool
     var multiplier: Int
@@ -1812,6 +1814,7 @@ private struct PracticeLibraryBackupDocument: Codable {
     struct Song: Codable {
         let id: UUID
         let name: String
+        let coreStructureData: Data?
         let group: String
         let isArchived: Bool
         let multiplier: Int
@@ -1824,6 +1827,7 @@ private struct PracticeLibraryBackupDocument: Codable {
         init(_ value: PracticeSong) {
             id = value.id
             name = value.name
+            coreStructureData = value.coreStructureData
             group = value.group
             isArchived = value.isArchived
             multiplier = 1
@@ -1835,7 +1839,7 @@ private struct PracticeLibraryBackupDocument: Codable {
         }
 
         func makeModel() -> PracticeSong {
-            PracticeSong(
+            let value = PracticeSong(
                 id: id,
                 name: name,
                 group: group,
@@ -1847,9 +1851,12 @@ private struct PracticeLibraryBackupDocument: Codable {
                 createdAt: createdAt,
                 updatedAt: updatedAt
             )
+            value.coreStructureData = coreStructureData
+            return value
         }
 
         func apply(to value: PracticeSong) {
+            value.coreStructureData = coreStructureData
             value.id = id
             value.name = name
             value.group = group
@@ -1868,6 +1875,7 @@ private struct PracticeLibraryBackupDocument: Codable {
         let songID: UUID?
         let sectionSortIndex: Int?
         let name: String
+        let coreDefinitionData: Data?
         let leftCount: Int
         let rightCount: Int
         let bothCount: Int
@@ -1884,6 +1892,7 @@ private struct PracticeLibraryBackupDocument: Codable {
             songID = value.songID
             sectionSortIndex = value.sectionSortIndex
             name = value.name
+            coreDefinitionData = value.coreDefinitionData
             leftCount = value.leftCount
             rightCount = value.rightCount
             bothCount = value.bothCount
@@ -1912,6 +1921,7 @@ private struct PracticeLibraryBackupDocument: Codable {
                 createdAt: createdAt,
                 updatedAt: updatedAt
             )
+            value.coreDefinitionData = coreDefinitionData
             value.setGoalPlan(goalPlan, at: updatedAt)
             return value
         }
@@ -1929,6 +1939,7 @@ private struct PracticeLibraryBackupDocument: Codable {
             value.bothDurationMilliseconds = bothDurationMilliseconds.map { max(0, $0) }
             value.apply(preset: preset)
             value.createdAt = createdAt
+            value.coreDefinitionData = coreDefinitionData
             value.setGoalPlan(goalPlan, at: updatedAt)
         }
     }
@@ -1937,6 +1948,7 @@ private struct PracticeLibraryBackupDocument: Codable {
         let id: UUID
         let sessionID: UUID
         let eventID: UUID
+        let coreContextData: Data?
         let eventNameSnapshot: String?
         let startedAt: Date
         let finishedAt: Date
@@ -1961,6 +1973,7 @@ private struct PracticeLibraryBackupDocument: Codable {
             id = value.id
             sessionID = value.sessionID
             eventID = value.eventID
+            coreContextData = value.coreContextData
             eventNameSnapshot = value.eventNameSnapshot
             startedAt = value.startedAt
             finishedAt = value.finishedAt
@@ -2012,6 +2025,7 @@ private struct PracticeLibraryBackupDocument: Codable {
         }
 
         func apply(to value: PracticeAttempt) {
+            value.coreContextData = coreContextData
             value.replacePersistedStateForRestore(
                 id: id,
                 sessionID: sessionID,

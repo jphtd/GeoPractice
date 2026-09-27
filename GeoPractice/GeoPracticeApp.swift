@@ -8,6 +8,7 @@ import UIKit
 struct GeoPracticeApp: App {
     private let persistentContainer: ModelContainer?
     private let persistenceFailureMessage: String?
+    private var coreFixture: CoreFixture? = nil
     @StateObject private var subscriptionStore = SubscriptionStore()
 
     init() {
@@ -15,7 +16,22 @@ struct GeoPracticeApp: App {
         GeoAppearance.configureNavigationBars()
 
         do {
+#if DEBUG
+            if let name = CoreFixture.requested {
+                let container = try ModelContainer(for: PracticeSong.self, PracticeEvent.self, PracticeAttempt.self, PracticeFolder.self, PracticeDailyGoal.self,
+                    // In-memory fixtures must also opt out of automatic CloudKit.
+                    // Signed Xcode runs carry the app's iCloud entitlements.
+                    configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none))
+                coreFixture = try CoreFixture.make(name, context: container.mainContext)
+                persistentContainer = container
+            } else {
+                coreFixture = nil
+                persistentContainer = try GeoPracticePersistence.makeContainer()
+            }
+#else
+            coreFixture = nil
             persistentContainer = try GeoPracticePersistence.makeContainer()
+#endif
             persistenceFailureMessage = nil
         } catch {
             // Never silently fall back to an empty in-memory store. That makes
@@ -30,7 +46,7 @@ struct GeoPracticeApp: App {
         WindowGroup {
             Group {
                 if let persistentContainer {
-                    ProductPrototypeRootView()
+                    PracticeCoreRootView(fixture: coreFixture)
                         .modelContainer(persistentContainer)
                 } else {
                     PersistenceUnavailableView(

@@ -1,7 +1,7 @@
 import Foundation
 
 enum TempoScrubModel {
-    static let minimumBPM = 30
+    static let minimumBPM = 20
     static let maximumBPM = 240
     static let pointsPerBPM: Double = 3
 
@@ -76,6 +76,7 @@ enum TempoSemantics: String, CaseIterable, Identifiable, Sendable {
 }
 
 enum TempoReferenceNote: String, CaseIterable, Codable, Identifiable, Sendable {
+    case whole
     case half
     case dottedHalf
     case quarter
@@ -109,6 +110,7 @@ enum TempoReferenceNote: String, CaseIterable, Codable, Identifiable, Sendable {
     /// corresponding base note.
     var durationInQuarterNotes: Double {
         switch self {
+        case .whole: 4
         case .half: 2
         case .dottedHalf: 3
         case .quarter: 1
@@ -141,6 +143,7 @@ enum TempoReferenceNote: String, CaseIterable, Codable, Identifiable, Sendable {
 
     var title: String {
         switch self {
+        case .whole: "全音符"
         case .half: "二分音符"
         case .dottedHalf: "附点二分音符"
         case .quarter: "四分音符"
@@ -153,6 +156,7 @@ enum TempoReferenceNote: String, CaseIterable, Codable, Identifiable, Sendable {
 
     var shortTitle: String {
         switch self {
+        case .whole: "全音符"
         case .half: "2 分"
         case .dottedHalf: "附点 2 分"
         case .quarter: "4 分"
@@ -166,6 +170,7 @@ enum TempoReferenceNote: String, CaseIterable, Codable, Identifiable, Sendable {
     /// Bravura Text SMuFL glyph used by the selectors and BPM mark.
     var symbol: String {
         switch self {
+        case .whole: "\u{ECA2}"
         case .half: "\u{ECA3}"
         case .dottedHalf: "\u{ECA3}\(Self.augmentationDotSymbol)"
         case .quarter: "\u{ECA5}"
@@ -392,7 +397,7 @@ struct MetronomePreset: Codable, Hashable, Sendable {
     var normalized: MetronomePreset {
         var result = self
         result.bpm = min(max(result.bpm, TempoScrubModel.minimumBPM), TempoScrubModel.maximumBPM)
-        result.beats = min(max(result.beats, 3), 9)
+        result.beats = min(max(result.beats, 1), 9)
         if !Self.supportedSubdivisions.contains(result.subdivision) {
             result.subdivision = 1
         }

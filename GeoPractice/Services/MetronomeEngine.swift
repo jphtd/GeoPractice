@@ -387,7 +387,7 @@ final class MetronomeEngine: ObservableObject {
 
     func setBeats(_ beats: Int) {
         var updated = preset
-        let normalizedBeats = min(max(beats, 3), 9)
+        let normalizedBeats = min(max(beats, 1), 9)
         let validGroupings = MetronomePreset.groupings(for: normalizedBeats)
         updated.beats = normalizedBeats
         updated.grouping = groupingPreferences[normalizedBeats]

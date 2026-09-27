@@ -43,6 +43,13 @@
 		A00000000000000000000022 /* ICloudSyncMergeTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000026 /* ICloudSyncMergeTests.swift */; };
 		A00000000000000000000023 /* SubscriptionStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000027 /* SubscriptionStore.swift */; };
 		A00000000000000000000024 /* SubscriptionStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000028 /* SubscriptionStoreTests.swift */; };
+		A00000000000000000000030 /* PracticeCore/PracticeCoreDomain.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000030 /* PracticeCore/PracticeCoreDomain.swift */; };
+		A00000000000000000000031 /* PracticeCore/PracticeCoreComponents.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000031 /* PracticeCore/PracticeCoreComponents.swift */; };
+		A00000000000000000000032 /* PracticeCore/PracticeCoreViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000032 /* PracticeCore/PracticeCoreViews.swift */; };
+		A00000000000000000000033 /* PracticeCore/PracticeCoreIntegration.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000033 /* PracticeCore/PracticeCoreIntegration.swift */; };
+		A00000000000000000000034 /* PracticeCoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000034 /* PracticeCoreTests.swift */; };
+		A00000000000000000000035 /* PracticeCore/PracticeCoreSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000035; };
+		A00000000000000000000036 /* PracticeCore/PracticeCoreFlowViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = B00000000000000000000036; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -96,6 +103,13 @@
 		B00000000000000000000026 /* ICloudSyncMergeTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ICloudSyncMergeTests.swift; sourceTree = "<group>"; };
 		B00000000000000000000027 /* SubscriptionStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionStore.swift; sourceTree = "<group>"; };
 		B00000000000000000000028 /* SubscriptionStoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubscriptionStoreTests.swift; sourceTree = "<group>"; };
+		B00000000000000000000030 /* PracticeCore/PracticeCoreDomain.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeCore/PracticeCoreDomain.swift; sourceTree = "<group>"; };
+		B00000000000000000000031 /* PracticeCore/PracticeCoreComponents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeCore/PracticeCoreComponents.swift; sourceTree = "<group>"; };
+		B00000000000000000000032 /* PracticeCore/PracticeCoreViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeCore/PracticeCoreViews.swift; sourceTree = "<group>"; };
+		B00000000000000000000033 /* PracticeCore/PracticeCoreIntegration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeCore/PracticeCoreIntegration.swift; sourceTree = "<group>"; };
+		B00000000000000000000034 /* PracticeCoreTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeCoreTests.swift; sourceTree = "<group>"; };
+		B00000000000000000000035 /* PracticeCore/PracticeCoreSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeCore/PracticeCoreSession.swift; sourceTree = "<group>"; };
+		B00000000000000000000036 /* PracticeCore/PracticeCoreFlowViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PracticeCore/PracticeCoreFlowViews.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -172,6 +186,12 @@
 		C00000000000000000000004 /* Views */ = {
 			isa = PBXGroup;
 			children = (
+				B00000000000000000000035 /* PracticeCore/PracticeCoreSession.swift */,
+				B00000000000000000000036 /* PracticeCore/PracticeCoreFlowViews.swift */,
+				B00000000000000000000033 /* PracticeCore/PracticeCoreIntegration.swift */,
+				B00000000000000000000032 /* PracticeCore/PracticeCoreViews.swift */,
+				B00000000000000000000031 /* PracticeCore/PracticeCoreComponents.swift */,
+				B00000000000000000000030 /* PracticeCore/PracticeCoreDomain.swift */,
 				C00000000000000000000007 /* ProductPrototype */,
 				B00000000000000000000005 /* Components.swift */,
 				B00000000000000000000011 /* LiquidControlComponents.swift */,
@@ -188,6 +208,7 @@
 		C00000000000000000000005 /* GeoPracticeTests */ = {
 			isa = PBXGroup;
 			children = (
+				B00000000000000000000034 /* PracticeCoreTests.swift */,
 				B00000000000000000000026 /* ICloudSyncMergeTests.swift */,
 				B0000000000000000000000A /* MetronomePresetTests.swift */,
 				B0000000000000000000001A /* PracticeFolderTests.swift */,
@@ -334,6 +355,12 @@
 			buildActionMask = 2147483647;
 			files = (
 				A00000000000000000000001 /* GeoPracticeApp.swift in Sources */,
+				A00000000000000000000035 /* PracticeCore/PracticeCoreSession.swift in Sources */,
+				A00000000000000000000036 /* PracticeCore/PracticeCoreFlowViews.swift in Sources */,
+				A00000000000000000000033 /* PracticeCore/PracticeCoreIntegration.swift in Sources */,
+				A00000000000000000000032 /* PracticeCore/PracticeCoreViews.swift in Sources */,
+				A00000000000000000000031 /* PracticeCore/PracticeCoreComponents.swift in Sources */,
+				A00000000000000000000030 /* PracticeCore/PracticeCoreDomain.swift in Sources */,
 				A00000000000000000000002 /* MetronomePreset.swift in Sources */,
 				A00000000000000000000003 /* PracticeEvent.swift in Sources */,
 				A00000000000000000000004 /* MetronomeEngine.swift in Sources */,
@@ -368,6 +395,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A0000000000000000000000A /* MetronomePresetTests.swift in Sources */,
+				A00000000000000000000034 /* PracticeCoreTests.swift in Sources */,
 				A00000000000000000000017 /* PracticeFolderTests.swift in Sources */,
 				A00000000000000000000018 /* V52VisualLifecycleTests.swift in Sources */,
 				A0000000000000000000001B /* PracticeStatisticsTests.swift in Sources */,
@@ -513,6 +541,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "节拍打卡";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "仅在您打开练习总结分享预览时获取当前位置，用于在小票图片中显示英文城市与地区；位置不会写入练习记录。";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "用于把结构化练习结果卡保存到您的照片中。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;
@@ -543,6 +573,8 @@
 				INFOPLIST_KEY_CFBundleDisplayName = "节拍打卡";
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.music";
+				INFOPLIST_KEY_NSLocationWhenInUseUsageDescription = "仅在您打开练习总结分享预览时获取当前位置，用于在小票图片中显示英文城市与地区；位置不会写入练习记录。";
+				INFOPLIST_KEY_NSPhotoLibraryAddUsageDescription = "用于把结构化练习结果卡保存到您的照片中。";
 				INFOPLIST_KEY_UIApplicationSceneManifest_Generation = YES;
 				INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents = YES;
 				INFOPLIST_KEY_UILaunchScreen_Generation = YES;

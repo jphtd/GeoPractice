@@ -14,10 +14,6 @@
 			<string>None</string>
 		</dict>
 	</dict>
-	<key>NSLocationWhenInUseUsageDescription</key>
-	<string>仅在您打开练习总结分享预览时获取当前位置，用于在小票图片中显示英文城市与地区；位置不会写入练习记录。</string>
-	<key>NSPhotoLibraryAddUsageDescription</key>
-	<string>用于把结构化练习结果卡保存到您的照片中。</string>
 	<key>UIBackgroundModes</key>
 	<array>
 		<string>audio</string>

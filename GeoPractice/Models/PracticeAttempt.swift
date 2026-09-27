@@ -10,6 +10,8 @@ final class PracticeAttempt {
     @Attribute(.unique) var id: UUID
     @Attribute(.unique) var sessionID: UUID
     var eventID: UUID
+    /// Explicit planned-practice provenance; nil legacy attempts are not inferred.
+    var coreContextData: Data?
     /// The event name at the moment this result was confirmed.
     ///
     /// This is optional so stores created before time-based statistics can be

@@ -74,6 +74,8 @@ final class PracticeEvent {
     /// migration reason as `songID`.
     var sectionSortIndex: Int?
     var name: String
+    /// Explicit structure/hand/goal facts, never inferred from legacy names.
+    var coreDefinitionData: Data?
     var leftCount: Int
     var rightCount: Int
     var bothCount: Int
@@ -296,9 +298,10 @@ final class PracticeEvent {
     @discardableResult
     func commit(
         summary: PracticeSessionSummary,
-        in context: ModelContext
+        in context: ModelContext,
+        coreContextData: Data? = nil
     ) throws -> PracticeAttemptCommitResult {
-        try commit(summary: summary, in: context) {
+        try commit(summary: summary, in: context, coreContextData: coreContextData) {
             try context.save()
         }
     }
@@ -308,6 +311,7 @@ final class PracticeEvent {
     func commit(
         summary: PracticeSessionSummary,
         in context: ModelContext,
+        coreContextData: Data? = nil,
         saving: () throws -> Void
     ) throws -> PracticeAttemptCommitResult {
         if let sourceEventID = summary.sourceEventID, sourceEventID != id {
@@ -333,6 +337,7 @@ final class PracticeEvent {
             eventNameSnapshot: name,
             summary: summary
         )
+        attempt.coreContextData = coreContextData
         append(summary: summary)
         context.insert(attempt)
         do {

@@ -138,11 +138,9 @@ struct ProductPrototypeRootView: View {
             restorePersistedPracticeIfNeeded()
             synchronizeRuntimeState()
         }
-        .onChange(of: selectedTab) { _, tab in
-            if tab != .metronome {
-                metronome.pause()
-                practiceSession.pause()
-            }
+        .onChange(of: selectedTab) { _, _ in
+            // Navigation changes neither the active recording nor the audio
+            // clock. Explicit pause/finish and background policy own transport.
             synchronizeRuntimeState()
         }
         .onChange(of: practiceSession.session) { _, _ in
@@ -535,7 +533,6 @@ private struct PrototypeMetronomeView: View {
                                 pulse: engine.lastPulse,
                                 isPlaying: engine.isPlaying
                             )
-                            .id(practiceSession.session.sessionID)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                             .contentShape(Rectangle())
                             .onTapGesture(perform: togglePlayback)
@@ -705,7 +702,7 @@ private struct PrototypeMetronomeView: View {
             value: "\(engine.preset.beats)",
             symbol: "circle.grid.cross"
         ) {
-            ForEach(3...9, id: \.self) { value in
+            ForEach(1...9, id: \.self) { value in
                 Button("\(value) 拍") {
                     engine.setBeats(value)
                     rememberCurrentPreset()
@@ -1012,690 +1009,135 @@ private struct PrototypeMetronomeView: View {
     }
 }
 
-private struct PrototypeStageContactGeometry {
-    let start: CGPoint
-    let end: CGPoint
-    let point: CGPoint
-    let inwardNormal: CGVector
-    /// Distance from the boundary point along `inwardNormal` which keeps the
-    /// entire ball outside every edge participating in a vertex contact.
-    let minimumInwardOffset: CGFloat
-    let edgeToCenterDistance: CGFloat
+/// Direct port of Documentation/GeoBeat/sketch.js. Musical time comes only
+/// from the existing audible scheduler, never from the recording context.
+enum GeoBeatAnimation {
+    static func mix(_ a: CGPoint, _ b: CGPoint, _ t: Double) -> CGPoint {
+        CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
+    }
+
+    static let contours: [[CGPoint]] = (1...9).map { n in
+        if n <= 2 {
+            return (0..<180).map { i in
+                let a = Double(i) * .pi * 2 / 180 - .pi / 2
+                return CGPoint(x: cos(a) * 0.4, y: sin(a) * 0.4)
+            }
+        }
+        let corners = (0..<n).map { i in
+            let a = Double(i) * .pi * 2 / Double(n) + .pi / 2 - .pi / Double(n)
+            return CGPoint(x: cos(a) * 0.65, y: sin(a) * 0.65)
+        }
+        var raw: [CGPoint] = []
+        for i in 0..<n {
+            let p = corners[i], next = corners[(i + 1) % n]
+            let enter = mix(p, corners[(i + n - 1) % n], 0.16)
+            let leave = mix(p, next, 0.16)
+            for j in 0..<12 {
+                let t = Double(j) / 12
+                raw.append(mix(mix(enter, p, t), mix(p, leave, t), t))
+            }
+            let nextEnter = mix(next, p, 0.16)
+            for j in 0..<20 { raw.append(mix(leave, nextEnter, Double(j) / 20)) }
+        }
+        var lengths = [0.0]
+        for i in raw.indices {
+            let a = raw[i], b = raw[(i + 1) % raw.count]
+            lengths.append(lengths.last! + hypot(b.x - a.x, b.y - a.y))
+        }
+        var edge = 0
+        return (0..<180).map { i in
+            let arc = Double(i) * lengths.last! / 180
+            while lengths[edge + 1] < arc { edge += 1 }
+            return mix(raw[edge], raw[(edge + 1) % raw.count],
+                       (arc - lengths[edge]) / (lengths[edge + 1] - lengths[edge]))
+        }
+    }
+
+    static func beat(pulse: BeatPlaybackPulse?, pulsesPerBeat: Int, at date: Date) -> Double {
+        guard let pulse, pulse.eventInterval > 0, pulse.eventInterval.isFinite else { return 0 }
+        let progress = min(1, max(0, date.timeIntervalSince(pulse.presentedAt) / pulse.eventInterval))
+        return Double(pulse.beat) + (Double(pulse.subdivision) + progress) / Double(max(1, pulsesPerBeat))
+    }
+
+    static func outline(beats: Int, bpm: Int, beat: Double, idle: Bool,
+                        date: Date, reduceMotion: Bool) -> [CGPoint] {
+        let n = min(9, max(1, beats))
+        let phase = beat - floor(beat)
+        let speed = min(1, max(0, Double(bpm - 100) / 60))
+        let blend = speed * speed * (3 - 2 * speed)
+        let t = min(1, phase / (0.90 - 0.08 * blend))
+        let ease = t * t * (3 - 2 * t)
+        let amplitude = (0.045 + 0.185 * blend) * (Int(floor(beat)) % n == 0 ? 1.45 : 1)
+        let breathing = idle && !reduceMotion
+            ? 1 + 0.035 * sin(date.timeIntervalSinceReferenceDate * .pi * 2 / 3.5) : 1
+        let angle = idle || n <= 2 || reduceMotion ? 0 : (floor(beat) + ease) * .pi * 2 / Double(n)
+        let offset = idle || reduceMotion ? 0 : sin(.pi * t) * (n <= 2 ? 0.1 + amplitude : -amplitude)
+        return contours[(idle ? 1 : n) - 1].map { p in
+            CGPoint(x: (p.x * cos(angle) - p.y * sin(angle)) * breathing,
+                    y: (p.x * sin(angle) + p.y * cos(angle)) * breathing + offset)
+        }
+    }
 }
 
-private struct PrototypePulseStage: View {
+struct PrototypePulseStage: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.accessibilityDimFlashingLights) private var dimFlashingLights
-
     let preset: MetronomePreset
     let pulse: BeatPlaybackPulse?
     let isPlaying: Bool
-
-    /// Keep the renderer's committed preset in state so a beat-count change can
-    /// reset the visual lifecycle and its scheduler cursor in one transaction.
-    @State private var visualPreset: MetronomePreset
-    @State private var lifecycle: BeatVisualLifecycle
-    @State private var acceptedPulse: BeatPlaybackPulse?
-    @State private var lastAcceptedAddress: BeatPresentationEventAddress?
     @State private var frozenAt: Date?
-    @State private var frozenEdgePresentations: [BeatEdgePresentation]?
-    @State private var frozenBallNormalizedHeight: Double?
-    @State private var edgeResumeBridge: BeatEdgeResumeBridge?
+    @State private var morphFrom: [CGPoint]?
+    @State private var morphStart = Date.distantPast
 
-    init(
-        preset: MetronomePreset,
-        pulse: BeatPlaybackPulse?,
-        isPlaying: Bool
-    ) {
-        self.preset = preset
-        self.pulse = pulse
-        self.isPlaying = isPlaying
-        let normalized = preset.normalized
-        _visualPreset = State(initialValue: normalized)
-        _lifecycle = State(initialValue: BeatVisualLifecycle(beats: normalized.beats))
+    private func outline(at date: Date, preset: MetronomePreset) -> [CGPoint] {
+        let presentationDate = frozenAt ?? date
+        let beat = GeoBeatAnimation.beat(pulse: pulse, pulsesPerBeat: preset.pulsesPerBeat, at: presentationDate)
+        let target = GeoBeatAnimation.outline(beats: preset.beats, bpm: preset.bpm,
+            beat: beat, idle: pulse == nil && !isPlaying, date: presentationDate, reduceMotion: reduceMotion)
+        let t = reduceMotion ? 1 : min(1, max(0, date.timeIntervalSince(morphStart) / 0.420))
+        let soft = t * t * t * (t * (t * 6 - 15) + 10)
+        guard let morphFrom, t < 1 else { return target }
+        return zip(morphFrom, target).map { GeoBeatAnimation.mix($0, $1, soft) }
     }
 
     var body: some View {
-        let normalizedPreset = visualPreset.normalized
-        let count = normalizedPreset.beats
-        let safePulsesPerBeat = normalizedPreset.pulsesPerBeat
-
-        TimelineView(.animation(paused: !isPlaying)) { timeline in
-            let renderedPulse = acceptedPulse
-            let beatIndex = min(count - 1, max(0, renderedPulse?.beat ?? 0))
-            let subdivision = min(
-                safePulsesPerBeat - 1,
-                max(0, renderedPulse?.subdivision ?? 0)
-            )
-            let presentationDate = frozenAt ?? timeline.date
-            let trainingEventProgress = eventProgress(
-                for: renderedPulse,
-                at: presentationDate
-            )
-            let intervalGeometry = renderedPulse.map {
-                BeatPolygonPresentationModel.intervalGeometry(
-                    lifecycle: lifecycle,
-                    beat: $0.beat,
-                    subdivision: $0.subdivision,
-                    cycle: $0.cycle,
-                    pulsesPerBeat: safePulsesPerBeat,
-                    reduceMotion: reduceMotion
-                )
-            } ?? BeatVisualIntervalGeometry(
-                placements: lifecycle.visibleEdgePlacements,
-                transition: nil
-            )
-            let currentTransition = intervalGeometry.transition
-            let targetPresentations: [BeatEdgePresentation] = BeatPolygonPresentationModel.edgePresentations(
-                placements: intervalGeometry.placements,
-                transition: currentTransition,
-                eventProgress: trainingEventProgress,
-                strongBeatIndices: normalizedPreset.strongBeatIndices,
-                secondaryAccentIndices: normalizedPreset.secondaryAccentIndices,
-                startsFromOrigin: false,
-                reduceMotion: reduceMotion
-            )
-            let edgePresentations = resolvedPresentations(
-                target: targetPresentations,
-                pulse: renderedPulse,
-                eventProgress: trainingEventProgress,
-                preset: normalizedPreset
-            )
-
+        TimelineView(.animation(paused: reduceMotion ? !isPlaying : false)) { timeline in
             Canvas { context, size in
-                let dimension = min(size.width, size.height)
-                // The stage expands to the remaining device viewport. Scale
-                // the complete visual system with it so the polygon, ball and
-                // collision feedback retain the same proportions on compact
-                // and large iPhones instead of only moving farther apart.
-                let visualScale = min(1.55, max(0.86, dimension / 300))
-                let safetyInset = max(14, dimension * 0.08)
-                let radius = max(0, dimension / 2 - safetyInset)
-                let center = CGPoint(x: size.width / 2, y: size.height / 2)
-                let halfInteriorAngle = Double.pi / Double(count)
-                let apothem = radius * CGFloat(cos(halfInteriorAngle))
-                let halfEdge = radius * CGFloat(sin(halfInteriorAngle))
-                let baselineY = center.y + apothem
-                let step = CGFloat.pi * 2 / CGFloat(count)
-
-                for edge in edgePresentations {
-                    drawPrototypeEdge(
-                        slot: CGFloat(edge.slot),
-                        center: center,
-                        baselineY: baselineY,
-                        halfEdge: halfEdge,
-                        step: step,
-                        opacity: edge.opacity,
-                        lineWidth: CGFloat(edge.lineWidth) * visualScale,
-                        progress: CGFloat(edge.drawProgress),
-                        in: &context
-                    )
+                let date = timeline.date
+                let points = outline(at: date, preset: preset)
+                let scale = min(74, size.width * 0.2, size.height * 0.30)
+                let center = CGPoint(x: size.width / 2, y: size.height / 2 - min(20, size.height * 0.08))
+                var path = Path()
+                path.addLines(points.map { CGPoint(x: center.x + $0.x * scale, y: center.y + $0.y * scale) })
+                path.closeSubpath()
+                context.fill(path, with: .color(GeoTheme.text))
+                let n = preset.normalized.beats
+                let beat = GeoBeatAnimation.beat(pulse: pulse, pulsesPerBeat: preset.pulsesPerBeat, at: frozenAt ?? date)
+                let current = Int(floor(beat)) % n
+                let phase = beat - floor(beat)
+                for i in 0..<n {
+                    let active = pulse != nil && i == current
+                    let diameter = active ? (reduceMotion ? 9.0 : 8 + 3 * pow(1 - phase, 4)) : 5
+                    let x = center.x + Double(i) * 24 - Double(n - 1) * 12
+                    let y = center.y + min(108, size.height * 0.36)
+                    context.fill(Path(ellipseIn: CGRect(x: x - diameter / 2, y: y - diameter / 2,
+                        width: diameter, height: diameter)), with: .color(active ? GeoTheme.text : GeoTheme.muted))
                 }
-
-                var targetBallNormalizedHeight = lifecycle.ballIsAtOrigin ? 1.0 : 0.0
-                if let target = BeatBounceMotionModel.nextTarget(
-                    afterBeat: beatIndex,
-                    subdivision: subdivision,
-                    beats: count,
-                    pulsesPerBeat: safePulsesPerBeat,
-                    strongBeatIndices: normalizedPreset.strongBeatIndices,
-                    secondaryAccentIndices: normalizedPreset.secondaryAccentIndices
-                ) {
-                    targetBallNormalizedHeight = BeatBounceMotionModel.normalizedAudibleEventHeight(
-                        eventProgress: trainingEventProgress,
-                        toward: target.heightTier,
-                        motionScale: reduceMotion ? 0.30 : 1
-                    )
-                }
-                let normalizedHeight = resolvedBallNormalizedHeight(
-                    targetHeight: targetBallNormalizedHeight,
-                    pulse: renderedPulse,
-                    eventProgress: trainingEventProgress
-                )
-
-                let feedbackStyle = renderedPulse.map {
-                    BeatPulseVisualModel.style(
-                        for: $0.kind,
-                        eventInterval: $0.eventInterval,
-                        dimFlashingLights: dimFlashingLights
-                    )
-                }
-                let collisionAge = renderedPulse.map { value in
-                    BeatCollisionVisualModel.collisionAge(
-                        eventAge: presentationDate.timeIntervalSince(value.presentedAt),
-                        eventInterval: value.eventInterval,
-                        startsFromOrigin: false
-                    )
-                } ?? -.infinity
-                let collisionDuration: TimeInterval
-                if let renderedPulse, let feedbackStyle {
-                    collisionDuration = BeatCollisionVisualModel.effectDuration(
-                        styleDuration: feedbackStyle.duration,
-                        eventInterval: renderedPulse.eventInterval,
-                        startsFromOrigin: false
-                    )
-                } else {
-                    collisionDuration = 0
-                }
-                let feedbackEnvelope = feedbackStyle.map { _ in
-                    BeatPulseVisualModel.envelope(
-                        age: collisionAge,
-                        duration: collisionDuration
-                    )
-                } ?? 0
-                let resumeBridgeMatchesPulse = renderedPulse.map { pulse in
-                    edgeResumeBridge?.matches(
-                        beat: pulse.beat,
-                        subdivision: pulse.subdivision,
-                        cycle: pulse.cycle,
-                        sequence: pulse.sequence
-                    ) ?? false
-                } ?? false
-                let suppressTransientCollision = frozenAt != nil
-                    || resumeBridgeMatchesPulse
-                let collisionSample: BeatCollisionVisualSample
-                if isPlaying, let renderedPulse, feedbackStyle != nil {
-                    collisionSample = BeatCollisionVisualModel.sample(
-                        for: renderedPulse.kind,
-                        age: collisionAge,
-                        duration: collisionDuration,
-                        reduceMotion: reduceMotion,
-                        dimFlashingLights: dimFlashingLights,
-                        suppressTransientFeedback: suppressTransientCollision
-                    )
-                } else {
-                    collisionSample = .empty
-                }
-                let ballRadius: CGFloat = 6.4 * visualScale
-                    + CGFloat(feedbackEnvelope)
-                    * CGFloat(feedbackStyle?.peakOpacity ?? 0)
-                    * CGFloat(1.35)
-                    * visualScale
-                let edgeStrokeWidth = BeatPolygonPresentationModel.contactLineWidth(
-                    presentations: edgePresentations,
-                    beatCount: count
-                ) * Double(visualScale)
-                let visibleClearance = ballRadius
-                    + CGFloat(edgeStrokeWidth) / 2
-                let contact = PrototypeStageContactGeometry(
-                    start: CGPoint(x: center.x - halfEdge, y: baselineY),
-                    end: CGPoint(x: center.x + halfEdge, y: baselineY),
-                    point: CGPoint(x: center.x, y: baselineY),
-                    inwardNormal: CGVector(dx: 0, dy: -1),
-                    minimumInwardOffset: visibleClearance,
-                    edgeToCenterDistance: apothem
-                )
-                let clampedHeight = CGFloat(min(1, max(0, normalizedHeight)))
-                let restingPosition = CGPoint(
-                    x: contact.point.x
-                        + contact.inwardNormal.dx * contact.minimumInwardOffset,
-                    y: contact.point.y
-                        + contact.inwardNormal.dy * contact.minimumInwardOffset
-                )
-                let position = CGPoint(
-                    x: restingPosition.x
-                        + (center.x - restingPosition.x) * clampedHeight,
-                    y: restingPosition.y
-                        + (center.y - restingPosition.y) * clampedHeight
-                )
-                let inwardOffset = Double(
-                    contact.minimumInwardOffset
-                        + max(
-                            0,
-                            contact.edgeToCenterDistance
-                                - contact.minimumInwardOffset
-                        ) * clampedHeight
-                )
-
-                drawPrototypeCollision(
-                    collisionSample,
-                    contact: contact,
-                    edgeStrokeWidth: CGFloat(edgeStrokeWidth),
-                    in: &context
-                )
-
-                if let feedbackStyle, feedbackEnvelope > 0 {
-                    let requestedHaloRadius = ballRadius
-                        + CGFloat(feedbackStyle.peakRadius * feedbackEnvelope * 0.58)
-                            * visualScale
-                    let maximumHaloRadius = CGFloat(
-                        BeatBounceContactGeometry.maximumNonPenetratingRadius(
-                            inwardCenterOffset: inwardOffset,
-                            edgeStrokeWidth: edgeStrokeWidth
-                        )
-                    )
-                    let haloRadius = min(requestedHaloRadius, maximumHaloRadius)
-                    context.fill(
-                        Path(ellipseIn: CGRect(
-                            x: position.x - haloRadius,
-                            y: position.y - haloRadius,
-                            width: haloRadius * 2,
-                            height: haloRadius * 2
-                        )),
-                        with: .color(
-                            Color(red: 0.70, green: 0.64, blue: 1)
-                                .opacity(
-                                    0.17
-                                        * feedbackStyle.peakOpacity
-                                        * feedbackEnvelope
-                                )
-                        )
-                    )
-                }
-                context.fill(
-                    Path(ellipseIn: CGRect(
-                        x: position.x - ballRadius,
-                        y: position.y - ballRadius,
-                        width: ballRadius * 2,
-                        height: ballRadius * 2
-                    )),
-                    with: .color(GeoTheme.text.opacity(0.96))
-                )
             }
         }
-        .background {
-            GeometryReader { proxy in
-                let dimension = min(proxy.size.width, proxy.size.height)
-                RadialGradient(
-                    colors: [GeoTheme.surfaceInk.opacity(isPlaying ? 0.075 : 0.035), .clear],
-                    center: .center,
-                    startRadius: 0,
-                    endRadius: max(1, dimension * 0.56)
-                )
-            }
-        }
-        .onAppear {
-            synchronizeBeatCount()
-            frozenAt = isPlaying ? nil : .now
-            consume(pulse)
-            if !isPlaying, let frozenAt {
-                freezePresentation(at: frozenAt)
-            }
-        }
-        .onChange(of: preset) { _, nextPreset in
-            synchronizePreset(nextPreset.normalized)
-        }
-        .onChange(of: pulse) { _, nextPulse in
-            consume(nextPulse)
+        .onChange(of: preset.beats) { previous, _ in
+            var oldPreset = preset
+            oldPreset.beats = previous
+            let now = Date.now
+            morphFrom = outline(at: now, preset: oldPreset)
+            morphStart = now
         }
         .onChange(of: isPlaying) { _, playing in
-            if playing {
-                // Keep the captured presentation until the scheduler delivers
-                // the next authoritative event that will drive the bridge.
-                if frozenEdgePresentations == nil {
-                    frozenAt = nil
-                }
-            } else {
-                freezePresentation(at: .now)
-            }
+            frozenAt = playing || pulse == nil ? nil : .now
+        }
+        .onChange(of: pulse) { _, next in
+            if next == nil || isPlaying { frozenAt = nil }
         }
     }
-
-    private func synchronizePreset(_ nextPreset: MetronomePreset) {
-        let current = visualPreset.normalized
-        if nextPreset.beats != current.beats {
-            visualPreset = nextPreset
-            synchronizeBeatCount()
-            return
-        }
-
-        visualPreset = nextPreset
-        if nextPreset.pulsesPerBeat != current.pulsesPerBeat {
-            resynchronizeSchedulePreservingGeometry()
-        }
-    }
-
-    private func synchronizeBeatCount() {
-        let beats = visualPreset.normalized.beats
-        guard lifecycle.beatCount != beats else { return }
-        lifecycle.reconfigure(beats: beats)
-        acceptedPulse = nil
-        lastAcceptedAddress = nil
-        frozenEdgePresentations = nil
-        frozenBallNormalizedHeight = nil
-        edgeResumeBridge = nil
-        frozenAt = isPlaying ? nil : .now
-    }
-
-    private func resynchronizeSchedulePreservingGeometry() {
-        lifecycle.resetScheduleTopology(
-            beats: visualPreset.normalized.beats,
-            isPlaying: isPlaying
-        )
-        acceptedPulse = nil
-        lastAcceptedAddress = nil
-        frozenEdgePresentations = nil
-        frozenBallNormalizedHeight = nil
-        edgeResumeBridge = nil
-        frozenAt = isPlaying ? nil : .now
-    }
-
-    private func consume(_ nextPulse: BeatPlaybackPulse?) {
-        guard let nextPulse else {
-            acceptedPulse = nil
-            frozenEdgePresentations = nil
-            frozenBallNormalizedHeight = nil
-            edgeResumeBridge = nil
-            return
-        }
-
-        if preset.normalized.beats != visualPreset.normalized.beats {
-            // Publisher delivery order is not a rendering contract. Commit the
-            // new topology before accepting the new scheduler's first pulse.
-            synchronizePreset(preset.normalized)
-        }
-        synchronizeBeatCount()
-        let nextAddress = eventAddress(nextPulse)
-        // Sequence is local to one scheduler run and intentionally returns to
-        // zero after pause -> start. Musical address is the only valid ordering
-        // key; an explicit pulsesPerBeat change resets this cursor separately.
-        guard lastAcceptedAddress.map({ $0 < nextAddress }) ?? true else { return }
-
-        lifecycle.record(
-            beat: nextPulse.beat,
-            subdivision: nextPulse.subdivision,
-            cycle: nextPulse.cycle,
-            beats: visualPreset.normalized.beats,
-            pulsesPerBeat: visualPreset.normalized.pulsesPerBeat
-        )
-        lastAcceptedAddress = nextAddress
-        // The first pulse after resume is already audible and therefore owns a
-        // real landing. Bridging from a paused mid-air frame would put that
-        // sound ahead of the ball and edge again.
-        edgeResumeBridge = nil
-        frozenEdgePresentations = nil
-        frozenBallNormalizedHeight = nil
-        frozenAt = isPlaying ? nil : (frozenAt ?? .now)
-        acceptedPulse = nextPulse
-    }
-
-    private func eventProgress(
-        for pulse: BeatPlaybackPulse?,
-        at date: Date
-    ) -> Double {
-        guard let pulse,
-              pulse.eventInterval.isFinite,
-              pulse.eventInterval > 0
-        else { return 0 }
-        return min(
-            1,
-            max(0, date.timeIntervalSince(pulse.presentedAt) / pulse.eventInterval)
-        )
-    }
-
-    private func resolvedPresentations(
-        target: [BeatEdgePresentation],
-        pulse: BeatPlaybackPulse?,
-        eventProgress: Double,
-        preset: MetronomePreset
-    ) -> [BeatEdgePresentation] {
-        guard let pulse,
-              let edgeResumeBridge,
-              edgeResumeBridge.matches(
-                beat: pulse.beat,
-                subdivision: pulse.subdivision,
-                cycle: pulse.cycle,
-                sequence: pulse.sequence
-              )
-        else { return target }
-
-        let geometry = BeatPolygonPresentationModel.intervalGeometry(
-            lifecycle: lifecycle,
-            beat: pulse.beat,
-            subdivision: pulse.subdivision,
-            cycle: pulse.cycle,
-            pulsesPerBeat: preset.pulsesPerBeat,
-            reduceMotion: reduceMotion
-        )
-        let destination = BeatPolygonPresentationModel.edgePresentations(
-            placements: geometry.placements,
-            transition: geometry.transition,
-            eventProgress: 1,
-            strongBeatIndices: preset.strongBeatIndices,
-            secondaryAccentIndices: preset.secondaryAccentIndices,
-            startsFromOrigin: false,
-            reduceMotion: reduceMotion
-        )
-        return BeatPolygonPresentationModel.resumePresentations(
-            from: edgeResumeBridge.sourcePresentations,
-            toward: destination,
-            beatCount: preset.beats,
-            eventProgress: eventProgress,
-            reduceMotion: reduceMotion
-        )
-    }
-
-    private func presentedEdges(
-        at date: Date,
-        preset: MetronomePreset
-    ) -> [BeatEdgePresentation] {
-        let normalizedPreset = preset.normalized
-        let renderedPulse = acceptedPulse
-        let geometry = renderedPulse.map {
-            BeatPolygonPresentationModel.intervalGeometry(
-                lifecycle: lifecycle,
-                beat: $0.beat,
-                subdivision: $0.subdivision,
-                cycle: $0.cycle,
-                pulsesPerBeat: normalizedPreset.pulsesPerBeat,
-                reduceMotion: reduceMotion
-            )
-        } ?? BeatVisualIntervalGeometry(
-            placements: lifecycle.visibleEdgePlacements,
-            transition: nil
-        )
-        let transition = geometry.transition
-        let progress = eventProgress(for: renderedPulse, at: date)
-        let target = BeatPolygonPresentationModel.edgePresentations(
-            placements: geometry.placements,
-            transition: transition,
-            eventProgress: progress,
-            strongBeatIndices: normalizedPreset.strongBeatIndices,
-            secondaryAccentIndices: normalizedPreset.secondaryAccentIndices,
-            startsFromOrigin: false,
-            reduceMotion: reduceMotion
-        )
-        return resolvedPresentations(
-            target: target,
-            pulse: renderedPulse,
-            eventProgress: progress,
-            preset: normalizedPreset
-        )
-    }
-
-    private func resolvedBallNormalizedHeight(
-        targetHeight: Double,
-        pulse: BeatPlaybackPulse?,
-        eventProgress: Double
-    ) -> Double {
-        guard let pulse,
-              let edgeResumeBridge,
-              edgeResumeBridge.matches(
-                beat: pulse.beat,
-                subdivision: pulse.subdivision,
-                cycle: pulse.cycle,
-                sequence: pulse.sequence
-              )
-        else { return targetHeight }
-
-        return BeatBounceMotionModel.resumeNormalizedHeight(
-            from: edgeResumeBridge.sourceBallNormalizedHeight,
-            toward: targetHeight,
-            eventProgress: eventProgress,
-            reduceMotion: reduceMotion
-        )
-    }
-
-    private func presentedBallNormalizedHeight(
-        at date: Date,
-        preset: MetronomePreset
-    ) -> Double {
-        let normalizedPreset = preset.normalized
-        let renderedPulse = acceptedPulse
-        let beat = min(
-            normalizedPreset.beats - 1,
-            max(0, renderedPulse?.beat ?? 0)
-        )
-        let subdivision = min(
-            normalizedPreset.pulsesPerBeat - 1,
-            max(0, renderedPulse?.subdivision ?? 0)
-        )
-        let progress = eventProgress(for: renderedPulse, at: date)
-        var targetHeight = lifecycle.ballIsAtOrigin ? 1.0 : 0.0
-        if let target = BeatBounceMotionModel.nextTarget(
-            afterBeat: beat,
-            subdivision: subdivision,
-            beats: normalizedPreset.beats,
-            pulsesPerBeat: normalizedPreset.pulsesPerBeat,
-            strongBeatIndices: normalizedPreset.strongBeatIndices,
-            secondaryAccentIndices: normalizedPreset.secondaryAccentIndices
-        ) {
-            targetHeight = BeatBounceMotionModel.normalizedAudibleEventHeight(
-                eventProgress: progress,
-                toward: target.heightTier,
-                motionScale: reduceMotion ? 0.30 : 1
-            )
-        }
-        return resolvedBallNormalizedHeight(
-            targetHeight: targetHeight,
-            pulse: renderedPulse,
-            eventProgress: progress
-        )
-    }
-
-    private func freezePresentation(at date: Date) {
-        let presentationDate = frozenAt ?? date
-        let presentations = presentedEdges(
-            at: presentationDate,
-            preset: visualPreset
-        )
-        let ballNormalizedHeight = presentedBallNormalizedHeight(
-            at: presentationDate,
-            preset: visualPreset
-        )
-        frozenEdgePresentations = presentations.isEmpty ? nil : presentations
-        frozenBallNormalizedHeight = presentations.isEmpty
-            ? nil
-            : ballNormalizedHeight
-        edgeResumeBridge = nil
-        frozenAt = date
-    }
-
-    private func eventAddress(_ pulse: BeatPlaybackPulse) -> BeatPresentationEventAddress {
-        BeatPresentationEventAddress(
-            cycle: pulse.cycle,
-            beat: pulse.beat,
-            subdivision: pulse.subdivision
-        )
-    }
-
-    private func drawPrototypeEdge(
-        slot: CGFloat,
-        center: CGPoint,
-        baselineY: CGFloat,
-        halfEdge: CGFloat,
-        step: CGFloat,
-        opacity: Double,
-        lineWidth: CGFloat,
-        progress: CGFloat,
-        in context: inout GraphicsContext
-    ) {
-        let midpoint = CGPoint(x: center.x, y: baselineY)
-        let unrotatedStart = CGPoint(x: center.x - halfEdge, y: baselineY)
-        let unrotatedEnd = CGPoint(x: center.x + halfEdge, y: baselineY)
-        let start = rotate(unrotatedStart, around: center, angle: slot * step)
-        let fullEnd = rotate(unrotatedEnd, around: center, angle: slot * step)
-        let rotatedMidpoint = rotate(midpoint, around: center, angle: slot * step)
-        let clampedProgress = min(1, max(0, progress))
-        let drawnStart = interpolate(
-            from: rotatedMidpoint,
-            to: start,
-            progress: clampedProgress
-        )
-        let drawnEnd = interpolate(
-            from: rotatedMidpoint,
-            to: fullEnd,
-            progress: clampedProgress
-        )
-        guard clampedProgress > 0.001 else { return }
-
-        var path = Path()
-        path.move(to: drawnStart)
-        path.addLine(to: drawnEnd)
-        context.stroke(
-            path,
-            with: .color(GeoTheme.text.opacity(opacity)),
-            style: StrokeStyle(
-                lineWidth: max(0.75, lineWidth),
-                lineCap: .round,
-                lineJoin: .round
-            )
-        )
-    }
-
-    private func drawPrototypeCollision(
-        _ sample: BeatCollisionVisualSample,
-        contact: PrototypeStageContactGeometry,
-        edgeStrokeWidth: CGFloat,
-        in context: inout GraphicsContext
-    ) {
-        guard sample.edgeOpacity > 0 else { return }
-
-        let deltaX = contact.end.x - contact.start.x
-        let deltaY = contact.end.y - contact.start.y
-        let edgeLength = hypot(deltaX, deltaY)
-        guard edgeLength > 0.000_001 else { return }
-        let tangent = CGVector(
-            dx: deltaX / edgeLength,
-            dy: deltaY / edgeLength
-        )
-        let halfLength = edgeLength * 0.5 * CGFloat(sample.edgeSpread)
-        var impulse = Path()
-        impulse.move(to: CGPoint(
-            x: contact.point.x - tangent.dx * halfLength,
-            y: contact.point.y - tangent.dy * halfLength
-        ))
-        impulse.addLine(to: CGPoint(
-            x: contact.point.x + tangent.dx * halfLength,
-            y: contact.point.y + tangent.dy * halfLength
-        ))
-        context.drawLayer { layer in
-            layer.addFilter(.blur(radius: 1.4))
-            layer.stroke(
-                impulse,
-                with: .color(
-                    Color(red: 0.76, green: 0.72, blue: 1)
-                        .opacity(sample.edgeOpacity)
-                ),
-                style: StrokeStyle(
-                    lineWidth: edgeStrokeWidth
-                        + CGFloat(sample.edgeLineWidthBoost),
-                    lineCap: .round
-                )
-            )
-        }
-    }
-
-    private func rotate(_ point: CGPoint, around center: CGPoint, angle: CGFloat) -> CGPoint {
-        let dx = point.x - center.x
-        let dy = point.y - center.y
-        return CGPoint(
-            x: center.x + dx * cos(angle) - dy * sin(angle),
-            y: center.y + dx * sin(angle) + dy * cos(angle)
-        )
-    }
-
-    private func interpolate(
-        from start: CGPoint,
-        to end: CGPoint,
-        progress: CGFloat
-    ) -> CGPoint {
-        CGPoint(
-            x: start.x + (end.x - start.x) * progress,
-            y: start.y + (end.y - start.y) * progress
-        )
-    }
-
 }
 
 private struct PrototypeParameterMenu<MenuContent: View>: View {

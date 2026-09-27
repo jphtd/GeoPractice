@@ -420,7 +420,7 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(TempoScrubModel.bpm(start: 120, horizontalTranslation: 2.9), 120)
         XCTAssertEqual(TempoScrubModel.bpm(start: 120, horizontalTranslation: 3), 121)
         XCTAssertEqual(TempoScrubModel.bpm(start: 120, horizontalTranslation: -3), 119)
-        XCTAssertEqual(TempoScrubModel.bpm(start: 30, horizontalTranslation: -300), 30)
+        XCTAssertEqual(TempoScrubModel.bpm(start: 30, horizontalTranslation: -300), 20)
         XCTAssertEqual(TempoScrubModel.bpm(start: 240, horizontalTranslation: 300), 240)
     }
 
@@ -431,7 +431,8 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(TempoScrubModel.validatedBPMInput("30"), 30)
         XCTAssertEqual(TempoScrubModel.validatedBPMInput("240"), 240)
         XCTAssertNil(TempoScrubModel.validatedBPMInput(""))
-        XCTAssertNil(TempoScrubModel.validatedBPMInput("29"))
+        XCTAssertEqual(TempoScrubModel.validatedBPMInput("20"), 20)
+        XCTAssertNil(TempoScrubModel.validatedBPMInput("19"))
         XCTAssertNil(TempoScrubModel.validatedBPMInput("241"))
         XCTAssertNil(TempoScrubModel.validatedBPMInput("88.5"))
         XCTAssertNil(TempoScrubModel.validatedBPMInput("Allegro"))
@@ -690,8 +691,8 @@ final class MetronomePresetTests: XCTestCase {
 
     func testV4BeatRangeAndTrainingNoteValues() {
         var belowRange = MetronomePreset.standard
-        belowRange.beats = 2
-        XCTAssertEqual(belowRange.normalized.beats, 3)
+        belowRange.beats = 0
+        XCTAssertEqual(belowRange.normalized.beats, 1)
 
         var aboveRange = MetronomePreset.standard
         aboveRange.beats = 12

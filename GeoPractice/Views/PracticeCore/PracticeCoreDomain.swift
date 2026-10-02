@@ -73,16 +73,21 @@ struct CoreTargetSpeed: Codable, Equatable {
 struct CoreHandGoal: Codable, Equatable {
     var count: Int?
     var speed: CoreTargetSpeed?
-    var isValid: Bool {
-        // No invented upper limits. Non-positive supplied values are invalid.
-        (count == nil || count! > 0) && (speed == nil || speed!.bpm > 0)
-            && (count != nil || speed != nil)
+    var isValid: Bool { CoreGoalValidation.isValid(self) }
+}
+
+// Shared Basic Goal validity for creation, editing and execution.
+enum CoreGoalValidation {
+    static func isValid(_ goal: CoreHandGoal) -> Bool {
+        let basicFieldsValid = (goal.count == nil || goal.count! > 0)
+            && (goal.speed == nil || (20...300).contains(goal.speed!.bpm))
+        let hasBasicTrainingCondition = goal.count != nil || goal.speed != nil
+        return basicFieldsValid && hasBasicTrainingCondition
     }
 }
 
 struct CoreGoal: Codable, Equatable {
     var hands: [PracticeHand: CoreHandGoal]
-    var targetDate: Date?
     var updatedAt: Date?
     func isValid(for mode: CoreHandMode) -> Bool {
         mode.hands.allSatisfy { hands[$0]?.isValid == true }
@@ -94,6 +99,8 @@ struct CoreDivisionDefinition: Codable, Equatable {
     var last: Int
     var handMode: CoreHandMode
     var goal: CoreGoal?
+    // Uninterpreted pre-correction Goal data; never used as current configuration.
+    var legacyGoalData: Data?
     var hasValidGoal: Bool { goal?.isValid(for: handMode) == true }
     func label(mode: CoreDivisionMode) -> String {
         "第 \(first == last ? String(first) : "\(first)–\(last)") \(mode.unit)"
@@ -161,7 +168,7 @@ enum CoreIntegrationError: LocalizedError {
         case .invalidRange: "练习划分范围不符合当前曲目结构。"
         case .overlappingRange: "练习划分不能与现有划分重叠。"
         case .activeSession: "请先结束并确认保存当前练习。"
-        case .invalidGoal: "每个适用手型都需要目标次数或练习目标速度。"
+        case .invalidGoal: "请检查每个适用手型的 Goal 配置。"
         case .wrongDestination: "返回的对象与当前操作不一致。"
         }
     }
@@ -186,6 +193,12 @@ enum CoreContracts {
         guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }
         guard division.songID == piece, var definition = division.coreDefinition else { throw CoreIntegrationError.wrongDestination }
         guard goal.isValid(for: definition.handMode) else { throw CoreIntegrationError.invalidGoal }
+        // Keep legacy date evidence outside the current Goal; no inferred Piece date migration.
+        if definition.legacyGoalData == nil, let data = division.coreDefinitionData,
+           let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let oldGoal = json["goal"] as? [String: Any], oldGoal["targetDate"] != nil {
+            definition.legacyGoalData = try JSONSerialization.data(withJSONObject: oldGoal, options: [.sortedKeys])
+        }
         var value = goal; value.updatedAt = date
         definition.goal = value
         division.coreDefinitionData = try JSONEncoder().encode(definition)
@@ -202,8 +215,7 @@ enum CoreContracts {
         }
     }
 
-    // Called by the temporary Create Flow only after its explicit save.
-    // Amendment 01: inherit mode; persist no Goal; return new Division Detail.
+    // Explicit, atomic Division + optional Basic Goal commit; UI 04 returns Piece Detail.
     static func saveCreatedDivision(piece: PracticeSong, definition: CoreDivisionDefinition,
                                     context: ModelContext, activeSessionID: UUID?) throws -> CorePage {
         guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }
@@ -213,12 +225,16 @@ enum CoreContracts {
         guard existing.allSatisfy({ $0.coreDefinition != nil }) else { throw CoreIntegrationError.missingMetadata }
         try validateDivision(definition, structure: structure, existing: existing.compactMap(\.coreDefinition))
         var value = definition
-        value.goal = nil
+        if var goal = value.goal {
+            guard goal.isValid(for: value.handMode) else { throw CoreIntegrationError.invalidGoal }
+            goal.updatedAt = .now
+            value.goal = goal
+        }
         let event = PracticeEvent(songID: piece.id, name: value.label(mode: structure.mode))
         event.coreDefinitionData = try JSONEncoder().encode(value)
         context.insert(event)
         do { try context.save() } catch { context.delete(event); throw error }
-        return .division(piece: piece.id, division: event.id)
+        return .piece(piece.id)
     }
 
     static func startRoute(piece: UUID, division: UUID, definition: CoreDivisionDefinition,
@@ -250,10 +266,10 @@ final class CoreNavigation: ObservableObject {
               piece.id == pieceID, piece.coreStructure?.mode == mode,
               division.songID == pieceID,
               let structure = piece.coreStructure, let definition = division.coreDefinition,
-              definition.fits(structure), definition.goal == nil else {
+              definition.fits(structure), (definition.goal == nil || definition.hasValidGoal) else {
             throw CoreIntegrationError.wrongDestination
         }
-        path = [.piece(pieceID), .division(piece: pieceID, division: division.id)]
+        path = [.piece(pieceID)]
         pendingRoute = nil
     }
 

@@ -178,7 +178,7 @@ struct PracticeCoreRootView: View {
                 VStack(alignment: .leading, spacing: 12) {
                     section("练习划分")
                     if divisions.isEmpty {
-                        CoreEmptyState(title: "还没有练习划分", copy: "进入划分详情后可设置 Goal；建立有效 Goal 后即可开始计划练习。", button: "创建练习划分") {
+                        CoreEmptyState(title: "还没有练习划分", copy: "创建练习划分时可同时设置 Goal，也可以稍后设置。", button: "创建练习划分") {
                             request(.createDivision(piece: piece.id, mode: structure.mode))
                         }.accessibilityIdentifier("piece.noDivision")
                     } else {
@@ -190,6 +190,9 @@ struct PracticeCoreRootView: View {
                                 }
                                 navigation.path.append(.division(piece: piece.id, division: division.id))
                             }
+                        }
+                        CoreButton(title: "创建练习划分", kind: .secondary) {
+                            request(.createDivision(piece: piece.id, mode: structure.mode))
                         }
                     }
                 }.padding(.top, 32)

@@ -17,7 +17,7 @@ final class PracticeCoreTests: XCTestCase {
         XCTAssertTrue(CoreGoal(hands: [.left: count]).isValid(for: .left))
         XCTAssertFalse(CoreGoal(hands: [.left: count, .right: speed]).isValid(for: .all))
         XCTAssertTrue(CoreGoal(hands: [.left: count, .right: speed, .both: count]).isValid(for: .all))
-        XCTAssertFalse(CoreGoal(hands: [.right: CoreHandGoal()], targetDate: .now).isValid(for: .right))
+        XCTAssertFalse(CoreGoal(hands: [.right: CoreHandGoal()]).isValid(for: .right))
         XCTAssertFalse(CoreHandGoal(count: 0).isValid)
         XCTAssertEqual(CoreTargetSpeed(bpm: 160, noteUnit: .eighth).quarterEquivalent, 80)
         XCTAssertEqual(CoreNoteUnit.allCases.count, 8)
@@ -37,11 +37,10 @@ final class PracticeCoreTests: XCTestCase {
         piece.coreStructureData = try JSONEncoder().encode(CorePieceStructure(mode: .measures, total: 48))
         context.insert(piece)
         try context.save()
-        let definition = CoreDivisionDefinition(first: 12, last: 18, handMode: .right,
-            goal: CoreGoal(hands: [.right: CoreHandGoal(count: 10)]))
+        let definition = CoreDivisionDefinition(first: 12, last: 18, handMode: .right)
         let page = try CoreContracts.saveCreatedDivision(piece: piece, definition: definition, context: context, activeSessionID: nil)
         let saved = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeEvent>()).first)
-        XCTAssertEqual(page, .division(piece: piece.id, division: saved.id))
+        XCTAssertEqual(page, .piece(piece.id))
         XCTAssertEqual(saved.name, "第 12–18 小节")
         XCTAssertNil(saved.coreDefinition?.goal)
         XCTAssertNil(saved.goalPlan)
@@ -176,7 +175,7 @@ final class PracticeCoreTests: XCTestCase {
             context: container.mainContext, activeSessionID: nil)
         let event = try XCTUnwrap(container.mainContext.fetch(FetchDescriptor<PracticeEvent>()).first)
         try nav.createdDivisionSaved(piece: piece, division: event)
-        XCTAssertEqual(nav.path, [.piece(piece.id), .division(piece: piece.id, division: event.id)])
+        XCTAssertEqual(nav.path, [.piece(piece.id)])
         XCTAssertNil(nav.pendingRoute)
         XCTAssertFalse(try XCTUnwrap(event.coreDefinition).hasValidGoal)
         nav.request(.editGoal(piece: piece.id, division: event.id))
@@ -215,6 +214,129 @@ final class PracticeCoreTests: XCTestCase {
         XCTAssertEqual(try context.fetch(FetchDescriptor<PracticeEvent>()).first?.coreDefinitionData, event.coreDefinitionData)
     }
 
+    func testCreationAllowsParagraphAndMeasureRangesWithUnassignedGaps() throws {
+        for mode in CoreDivisionMode.allCases {
+            let db = try container(), context = db.mainContext
+            let piece = try CoreContracts.savePiece(name: "Range", structure: CorePieceStructure(mode: mode, total: 14),
+                                                    context: context, activeSessionID: nil)
+            for (first, last) in [(2, 3), (7, 10)] {
+                let page = try CoreContracts.saveCreatedDivision(piece: piece,
+                    definition: CoreDivisionDefinition(first: first, last: last, handMode: .both),
+                    context: context, activeSessionID: nil)
+                XCTAssertEqual(page, .piece(piece.id))
+            }
+            let events = try context.fetch(FetchDescriptor<PracticeEvent>())
+            XCTAssertEqual(events.count, 2)
+            XCTAssertTrue(events.contains { $0.name == "第 2–3 \(mode.unit)" })
+            XCTAssertThrowsError(try CoreContracts.saveCreatedDivision(piece: piece,
+                definition: CoreDivisionDefinition(first: 3, last: 6, handMode: .both),
+                context: context, activeSessionID: nil))
+            XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeEvent>()), 2)
+        }
+    }
+
+    func testCreationWithOptionalBasicGoalForEveryModeReturnsPieceAndNeverStartsSession() throws {
+        for mode in CoreHandMode.allCases {
+            for withGoal in [false, true] {
+                let db = try container(), context = db.mainContext
+                let piece = try CoreContracts.savePiece(name: "Create", structure: CorePieceStructure(mode: .sections, total: 14),
+                                                        context: context, activeSessionID: nil)
+                let goal = withGoal ? CoreGoal(hands: Dictionary(uniqueKeysWithValues: mode.hands.map {
+                    ($0, CoreHandGoal(count: 5, speed: CoreTargetSpeed(bpm: 160, noteUnit: .eighth)))
+                })) : nil
+                let nav = CoreNavigation(); nav.request(.createDivision(piece: piece.id, mode: .sections))
+                let storage = UserDefaults(suiteName: "CoreCreate.\(UUID())")!
+                let runtime = CoreSessionRuntime(defaults: storage)
+                let page = try CoreContracts.saveCreatedDivision(piece: piece,
+                    definition: CoreDivisionDefinition(first: 2, last: 3, handMode: mode, goal: goal),
+                    context: context, activeSessionID: runtime.activeID)
+                let event = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeEvent>()).first)
+                XCTAssertEqual(page, .piece(piece.id))
+                XCTAssertEqual(event.coreDefinition?.handMode, mode)
+                XCTAssertEqual(event.coreDefinition?.goal?.hands, goal?.hands)
+                XCTAssertEqual(event.coreDefinition?.hasValidGoal, withGoal)
+                XCTAssertNil(runtime.activeID)
+                XCTAssertNil(storage.data(forKey: CoreSessionRuntime.draftKey))
+                XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+                try nav.createdDivisionSaved(piece: piece, division: event)
+                XCTAssertEqual(nav.path, [.piece(piece.id)])
+                XCTAssertNil(nav.pendingRoute)
+            }
+        }
+    }
+
+    func testInvalidOptionalGoalDoesNotPartiallyCreateDivision() throws {
+        let db = try container(), context = db.mainContext
+        let piece = try CoreContracts.savePiece(name: "Atomic", structure: CorePieceStructure(mode: .sections, total: 14),
+                                                context: context, activeSessionID: nil)
+        let incomplete = CoreGoal(hands: [.left: CoreHandGoal(count: 5)])
+        XCTAssertThrowsError(try CoreContracts.saveCreatedDivision(piece: piece,
+            definition: CoreDivisionDefinition(first: 2, last: 3, handMode: .all, goal: incomplete),
+            context: context, activeSessionID: nil))
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeEvent>()), 0)
+        XCTAssertFalse(context.hasChanges)
+    }
+
+    func testSetThenEditBasicGoalReturnsDivisionAndPreservesHandScope() throws {
+        for mode in CoreHandMode.allCases {
+            let db = try container(), context = db.mainContext
+            let piece = try CoreContracts.savePiece(name: "Edit", structure: CorePieceStructure(mode: .measures, total: 32),
+                                                    context: context, activeSessionID: nil)
+            _ = try CoreContracts.saveCreatedDivision(piece: piece,
+                definition: CoreDivisionDefinition(first: 21, last: 32, handMode: mode), context: context, activeSessionID: nil)
+            let event = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeEvent>()).first)
+            XCTAssertNil(event.coreDefinition?.goal)
+            for count in [5, 8] {
+                let goal = CoreGoal(hands: Dictionary(uniqueKeysWithValues: mode.hands.map {
+                    ($0, CoreHandGoal(count: count, speed: CoreTargetSpeed(bpm: count == 5 ? 100 : 160,
+                                                                         noteUnit: count == 5 ? .quarter : .eighth)))
+                }))
+                let page = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal,
+                                                      context: context, activeSessionID: nil)
+                XCTAssertEqual(page, .division(piece: piece.id, division: event.id))
+                XCTAssertEqual(event.coreDefinition?.handMode, mode)
+                XCTAssertEqual(event.coreDefinition?.goal?.hands, goal.hands)
+                let nav = CoreNavigation(); nav.request(.editGoal(piece: piece.id, division: event.id))
+                try nav.goalSaved(piece: piece.id, division: event)
+                XCTAssertEqual(nav.path, [.piece(piece.id), page])
+            }
+        }
+    }
+
+    func testBasicGoalBPMBoundsAndBlankConditions() {
+        for bpm in [20, 300] { XCTAssertTrue(CoreHandGoal(speed: CoreTargetSpeed(bpm: bpm)).isValid) }
+        for bpm in [0, 19, 301] { XCTAssertFalse(CoreHandGoal(count: 5, speed: CoreTargetSpeed(bpm: bpm)).isValid) }
+        XCTAssertTrue(CoreHandGoal(count: Int.max).isValid)
+        XCTAssertFalse(CoreHandGoal().isValid)
+        XCTAssertTrue(CoreGoal(hands: [.both: CoreHandGoal(count: 1)]).isValid(for: .both))
+        XCTAssertFalse(CoreGoal(hands: [.both: CoreHandGoal(count: 1)]).isValid(for: .all))
+    }
+
+    func testGoalEditPreservesLegacyDateEvidenceOutsideCurrentGoalWithoutMigration() throws {
+        let db = try container(), context = db.mainContext
+        let piece = try CoreContracts.savePiece(name: "Legacy date", structure: CorePieceStructure(mode: .sections, total: 14),
+                                                context: context, activeSessionID: nil)
+        let originalPieceMetadata = piece.coreStructureData
+        let definition = CoreDivisionDefinition(first: 2, last: 3, handMode: .both,
+                                               goal: CoreGoal(hands: [.both: CoreHandGoal(count: 5)]))
+        var json = try XCTUnwrap(JSONSerialization.jsonObject(with: JSONEncoder().encode(definition)) as? [String: Any])
+        var oldGoal = try XCTUnwrap(json["goal"] as? [String: Any]); oldGoal["targetDate"] = 123456.0
+        json["goal"] = oldGoal
+        let event = PracticeEvent(songID: piece.id, name: "第 2–3 段")
+        event.coreDefinitionData = try JSONSerialization.data(withJSONObject: json)
+        context.insert(event); try context.save()
+        let goal = CoreGoal(hands: [.both: CoreHandGoal(count: 8)])
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal, context: context, activeSessionID: nil)
+        let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(event.coreDefinitionData)) as? [String: Any])
+        XCTAssertNil((saved["goal"] as? [String: Any])?["targetDate"])
+        let preserved = try XCTUnwrap(event.coreDefinition?.legacyGoalData)
+        let old = try XCTUnwrap(JSONSerialization.jsonObject(with: preserved) as? [String: Any])
+        XCTAssertEqual(old["targetDate"] as? Double, 123456.0)
+        XCTAssertEqual(piece.coreStructureData, originalPieceMetadata)
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal, context: context, activeSessionID: nil)
+        XCTAssertEqual(event.coreDefinition?.legacyGoalData, preserved)
+    }
+
 }
 
 @MainActor
@@ -230,8 +352,8 @@ final class PracticeCoreE2ETests: XCTestCase {
             structure: CorePieceStructure(mode: .measures, total: 32), context: context, activeSessionID: nil)
         let page = try CoreContracts.saveCreatedDivision(piece: piece,
             definition: CoreDivisionDefinition(first: 1, last: 8, handMode: handMode), context: context, activeSessionID: nil)
-        guard case .division(_, let id) = page else { throw CoreIntegrationError.wrongDestination }
-        let event = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeEvent>()).first { $0.id == id })
+        XCTAssertEqual(page, .piece(piece.id))
+        let event = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeEvent>()).first { $0.songID == piece.id })
         let definition = try XCTUnwrap(event.coreDefinition)
         XCTAssertNil(definition.goal)
         let goal = CoreGoal(hands: Dictionary(uniqueKeysWithValues: handMode.hands.map {
@@ -412,6 +534,9 @@ final class PracticeCoreE2ETests: XCTestCase {
             runtime.finish(at: date.addingTimeInterval(2))
             _ = try runtime.save(division: event, in: context)
         }
+        let beforeEdit = try context.fetch(FetchDescriptor<PracticeAttempt>())
+        let historicalSamples = Dictionary(uniqueKeysWithValues: beforeEdit.map { ($0.id, $0.completions) })
+        let historicalContexts = Dictionary(uniqueKeysWithValues: beforeEdit.map { ($0.id, $0.coreContextData) })
         let goal = CoreGoal(hands: [.left: CoreHandGoal(count: 15, speed: CoreTargetSpeed(bpm: 120, noteUnit: .eighth))])
         _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal, context: context,
                                       activeSessionID: nil, at: start.addingTimeInterval(100))
@@ -419,6 +544,10 @@ final class PracticeCoreE2ETests: XCTestCase {
         XCTAssertEqual(CoreAnalysis.count(history, hand: .left, cycleStart: calendar.startOfDay(for: start)), 2)
         XCTAssertEqual(CoreAnalysis.stable(history, hand: .left), 80)
         XCTAssertEqual(event.coreDefinition?.goal?.hands[.left]?.count, 15)
+        for attempt in history {
+            XCTAssertEqual(attempt.completions, historicalSamples[attempt.id])
+            XCTAssertEqual(attempt.coreContextData, historicalContexts[attempt.id]!)
+        }
         let library = try PracticeLibraryStore(modelContext: context)
         let backup = try library.makeBackupData()
         let restored = try container(), restoredLibrary = try PracticeLibraryStore(modelContext: restored.mainContext)

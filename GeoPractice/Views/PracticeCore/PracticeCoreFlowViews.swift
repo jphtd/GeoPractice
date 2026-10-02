@@ -23,8 +23,11 @@ struct CoreEditorView: View {
     @State private var last = ""
     @State private var handMode = CoreHandMode.all
     @State private var goals: [PracticeHand: CoreGoalInput] = [:]
-    @State private var hasDate = false
-    @State private var date = Date.now
+    @State private var setupGoal = false
+    @State private var discardConfirmation = false
+    @State private var didAttemptSave = false
+    @State private var didPopulate = false
+    @State private var initialGoals: [PracticeHand: CoreGoalInput] = [:]
     @State private var error: String?
 
     private var piece: PracticeSong? {
@@ -44,7 +47,7 @@ struct CoreEditorView: View {
         switch route {
         case .addPiece: "添加曲目"
         case .createDivision: "创建练习划分"
-        case .editGoal: "设置 / 编辑 Goal"
+        case .editGoal: division?.coreDefinition?.hasValidGoal == true ? "编辑 Goal" : "设置 Goal"
         case .pieceSettings: "曲目设置"
         default: "全部曲目"
         }
@@ -52,7 +55,10 @@ struct CoreEditorView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section { CoreTestLabel() }
+                if isEditable {
+                    Section { CorePageHeader(title: title, back: cancel) }
+                        .listRowBackground(Color.clear)
+                } else { Section { CoreTestLabel() } }
                 switch route {
                 case .addPiece:
                     Section("曲目") {
@@ -63,23 +69,47 @@ struct CoreEditorView: View {
                         TextField("总数（可选）", text: $total).keyboardType(.numberPad)
                     }
                 case .createDivision:
-                    Section("《\(piece?.name ?? "")》 · \(piece?.coreStructure?.mode.label ?? "")") {
-                        TextField("起始位置", text: $first).keyboardType(.numberPad).accessibilityIdentifier("core.division.first")
-                        TextField("结束位置", text: $last).keyboardType(.numberPad).accessibilityIdentifier("core.division.last")
-                        Picker("适用手型", selection: $handMode) {
-                            ForEach(CoreHandMode.allCases, id: \.self) { Text($0.label).tag($0) }
+                    Section("《\(piece?.name ?? "")》 · \(piece?.coreStructure?.label ?? "")") {
+                        Text(piece?.coreStructure?.mode == .sections ? "段落范围" : "小节范围").coreType(.titleSmall)
+                        LabeledContent(piece?.coreStructure?.mode == .sections ? "起始段落" : "起始小节") {
+                            TextField("", text: $first).multilineTextAlignment(.trailing).keyboardType(.numberPad)
+                                .accessibilityIdentifier("core.division.first")
                         }
-                        Text("范围不能重叠。保存后进入划分详情，再设置 Goal。").font(.caption)
+                        LabeledContent(piece?.coreStructure?.mode == .sections ? "结束段落" : "结束小节") {
+                            TextField("", text: $last).multilineTextAlignment(.trailing).keyboardType(.numberPad)
+                                .accessibilityIdentifier("core.division.last")
+                        }
+                        Text("范围不能与现有划分重叠，可以保留未划分区域。").coreType(.caption)
                     }
+                    Section("适用手型") {
+                        ForEach(CoreHandMode.allCases, id: \.self) { mode in
+                            Button { handMode = mode } label: {
+                                HStack {
+                                    Text(mode.label).coreType(.body)
+                                    Spacer()
+                                    Image(systemName: handMode == mode ? "checkmark.circle.fill" : "circle")
+                                }.foregroundStyle(CorePalette.primary).padding(.vertical, 8)
+                            }.accessibilityAddTraits(handMode == mode ? .isSelected : [])
+                                .accessibilityIdentifier("core.division.hand.\(mode.rawValue)")
+                        }
+                    }
+                    Section("Goal（可选）") {
+                        if setupGoal {
+                            CoreButton(title: "暂不设置 Goal", kind: .tertiary) { setupGoal = false }
+                        } else {
+                            Text("暂不设置 Goal").coreType(.body)
+                            CoreButton(title: "同时设置 Goal", kind: .secondary) { setupGoal = true }
+                                .accessibilityIdentifier("core.division.enableGoal")
+                        }
+                    }
+                    if setupGoal { goalFields(for: handMode) }
                 case .editGoal:
-                    Section { Text("每日周期 · 当地 00:00 重置执行进度。编辑目标保留当天已完成次数。") }
-                    ForEach(division?.coreDefinition?.handMode.hands ?? []) { hand in
-                        CoreGoalInputRow(hand: hand, input: Binding(get: { goals[hand] ?? CoreGoalInput() }, set: { goals[hand] = $0 }))
-                    }
-                    Section {
-                        Toggle("目标日期（可选）", isOn: $hasDate)
-                        if hasDate { DatePicker("日期", selection: $date, displayedComponents: .date) }
-                        Text("每个适用手型至少填写目标次数或目标速度之一。目标速度独立于实际节拍器速度。").font(.caption)
+                    if let mode = division?.coreDefinition?.handMode {
+                        Section {
+                            Text("《\(piece?.name ?? "")》 · \(division?.name ?? "")").coreType(.body)
+                            Text("适用手型 · \(mode.label)").coreType(.caption)
+                        }
+                        goalFields(for: mode)
                     }
                 case .pieceSettings:
                     if let piece, let structure = piece.coreStructure {
@@ -100,13 +130,20 @@ struct CoreEditorView: View {
                 if let error { Section { Text(error).foregroundStyle(.red) } }
                 if route == .addPiece || isEditable {
                     Section {
-                        CoreButton(title: "保存", action: save).accessibilityIdentifier("core.editor.save")
+                        CoreButton(title: isCreating ? "保存练习划分" : "保存", action: save).accessibilityIdentifier("core.editor.save")
+                        if isEditable { CoreButton(title: "取消", kind: .tertiary, action: cancel) }
                     }.listRowBackground(Color.clear)
                 }
             }
             .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                if !isEditable { ToolbarItem(placement: .cancellationAction) { Button("取消", action: cancel) } }
+            }
+            .toolbar(isEditable ? .hidden : .visible, for: .navigationBar)
+            .interactiveDismissDisabled(hasUnsavedChanges)
+            .alert(isCreating ? "放弃创建练习划分？" : "放弃未保存的 Goal 修改？", isPresented: $discardConfirmation) {
+                Button("继续编辑", role: .cancel) {}
+                Button("放弃", role: .destructive) { dismiss() }
             }
             .onAppear { populate() }
         }
@@ -114,11 +151,43 @@ struct CoreEditorView: View {
     private var isEditable: Bool {
         switch route { case .createDivision, .editGoal: true; default: false }
     }
+    private var isCreating: Bool { if case .createDivision = route { true } else { false } }
+    private var hasUnsavedChanges: Bool {
+        if isCreating { return !first.isEmpty || !last.isEmpty || handMode != .all || setupGoal || goals != initialGoals }
+        if case .editGoal = route { return goals != initialGoals }
+        return false
+    }
+    private func cancel() {
+        if hasUnsavedChanges { discardConfirmation = true } else { dismiss() }
+    }
+    @ViewBuilder private func goalFields(for mode: CoreHandMode) -> some View {
+        ForEach(mode.hands) { hand in
+            CoreGoalInputRow(hand: hand, input: Binding(get: { goals[hand] ?? CoreGoalInput() }, set: { goals[hand] = $0 }),
+                             showRequiredError: didAttemptSave)
+        }
+        Section {
+            Text("每个适用手型至少填写目标次数或练习目标速度之一。速度使用所选音符单位，独立于实际节拍器速度。")
+                .coreType(.caption).foregroundStyle(CorePalette.secondary)
+        }
+    }
     private func populate() {
+        guard !didPopulate else { return }; didPopulate = true
         guard let goal = division?.coreDefinition?.goal else { return }
         goals = goal.hands.mapValues { CoreGoalInput(count: $0.count.map(String.init) ?? "",
             speed: $0.speed.map { String($0.bpm) } ?? "", unit: $0.speed?.noteUnit ?? .quarter) }
-        hasDate = goal.targetDate != nil; date = goal.targetDate ?? .now
+        initialGoals = goals
+    }
+    private func basicGoal(for mode: CoreHandMode) throws -> CoreGoal {
+        var values: [PracticeHand: CoreHandGoal] = [:]
+        for hand in mode.hands {
+            let input = goals[hand] ?? CoreGoalInput()
+            let bpm = try optionalPositive(input.speed, label: "\(hand.title)目标速度")
+            values[hand] = CoreHandGoal(count: try optionalPositive(input.count, label: "\(hand.title)目标次数"),
+                speed: bpm.map { CoreTargetSpeed(bpm: $0, noteUnit: input.unit) })
+        }
+        let goal = CoreGoal(hands: values)
+        guard goal.isValid(for: mode) else { throw CoreIntegrationError.invalidGoal }
+        return goal
     }
     private func optionalPositive(_ text: String, label: String) throws -> Int? {
         let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -127,6 +196,7 @@ struct CoreEditorView: View {
         return number
     }
     private func save() {
+        didAttemptSave = true
         do {
             guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }
             switch route {
@@ -140,19 +210,13 @@ struct CoreEditorView: View {
                     throw CoreFlowError.invalidInput("请填写起始和结束位置。")
                 }
                 let page = try CoreContracts.saveCreatedDivision(piece: piece,
-                    definition: CoreDivisionDefinition(first: first, last: last, handMode: handMode),
+                    definition: CoreDivisionDefinition(first: first, last: last, handMode: handMode,
+                        goal: setupGoal ? try basicGoal(for: handMode) : nil),
                     context: modelContext, activeSessionID: activeSessionID)
                 onSaved(page)
             case .editGoal:
                 guard let division, let definition = division.coreDefinition, let piece else { throw CoreIntegrationError.missingMetadata }
-                var values: [PracticeHand: CoreHandGoal] = [:]
-                for hand in definition.handMode.hands {
-                    let input = goals[hand] ?? CoreGoalInput()
-                    let bpm = try optionalPositive(input.speed, label: "目标速度")
-                    values[hand] = CoreHandGoal(count: try optionalPositive(input.count, label: "目标次数"),
-                        speed: bpm.map { CoreTargetSpeed(bpm: $0, noteUnit: input.unit) })
-                }
-                let goal = CoreGoal(hands: values, targetDate: hasDate ? date : nil)
+                let goal = try basicGoal(for: definition.handMode)
                 onSaved(try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
                     context: modelContext, activeSessionID: activeSessionID))
             default: return
@@ -162,7 +226,7 @@ struct CoreEditorView: View {
     }
 }
 
-private struct CoreGoalInput {
+private struct CoreGoalInput: Equatable {
     var count = ""
     var speed = ""
     var unit = CoreNoteUnit.quarter
@@ -170,12 +234,28 @@ private struct CoreGoalInput {
 private struct CoreGoalInputRow: View {
     let hand: PracticeHand
     @Binding var input: CoreGoalInput
+    var showRequiredError = false
     var body: some View {
         Section(hand.title) {
-            TextField("目标次数（可选）", text: $input.count).keyboardType(.numberPad).accessibilityIdentifier("core.goal.\(hand.rawValue).count")
-            TextField("目标速度 BPM（可选）", text: $input.speed).keyboardType(.numberPad).accessibilityIdentifier("core.goal.\(hand.rawValue).speed")
+            LabeledContent("目标次数") {
+                TextField("可选", text: $input.count).multilineTextAlignment(.trailing).keyboardType(.numberPad)
+                    .accessibilityIdentifier("core.goal.\(hand.rawValue).count")
+            }
+            if !input.count.isEmpty && (Int(input.count.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) < 1 {
+                Text("目标次数须为正整数。").coreType(.caption).foregroundStyle(.red)
+            }
+            LabeledContent("练习目标 BPM") {
+                TextField("可选", text: $input.speed).multilineTextAlignment(.trailing).keyboardType(.numberPad)
+                    .accessibilityIdentifier("core.goal.\(hand.rawValue).speed")
+            }
+            if !input.speed.isEmpty && !(20...300).contains(Int(input.speed.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) {
+                Text("练习目标 BPM 须为 20–300 的整数。").coreType(.caption).foregroundStyle(.red)
+            }
             Picker("目标音符单位", selection: $input.unit) {
                 ForEach(CoreNoteUnit.allCases, id: \.self) { Text($0.title).tag($0) }
+            }
+            if showRequiredError && input.count.isEmpty && input.speed.isEmpty {
+                Text("请填写目标次数或练习目标速度。").coreType(.caption).foregroundStyle(.red)
             }
         }
     }

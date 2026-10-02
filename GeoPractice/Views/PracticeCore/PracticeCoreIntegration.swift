@@ -68,10 +68,28 @@ struct CoreFixture {
         ]) : nil
         event.coreDefinitionData = try JSONEncoder().encode(CoreDivisionDefinition(first: 3, last: 3, handMode: name == "only-together" ? .both : name == "only-left" ? .left : name == "only-right" ? .right : .all, goal: goal))
         context.insert(event)
+        if name == "ladder-history" {
+            // Explicit isolated QA facts, never inferred from ordinary recordings.
+            let goal = CoreGoal(hands: [.both: CoreHandGoal(speed: CoreTargetSpeed(bpm: 108),
+                ladder: CoreLadderConfiguration(startBPM: 100, stepBPM: 3, repsPerLevel: 2))],
+                ladderEnabled: true, reset: CoreResetConfiguration())
+            let date = Date.now.addingTimeInterval(-60)
+            let state = CoreLadderState(cycleStart: Calendar.current.startOfDay(for: date), cycleStartBPM: 100,
+                currentBPM: 103, repsCompleted: 1, noteUnit: .quarter, firstValidRecordAt: date, previousValidBPM: 103)
+            event.coreDefinitionData = try JSONEncoder().encode(CoreDivisionDefinition(first: 3, last: 3, handMode: .both,
+                goal: goal, ladderStates: [.both: state]))
+            let qaDefaults = UserDefaults(suiteName: "CoreLadderQA.\(UUID())")!
+            let runtime = CoreSessionRuntime(defaults: qaDefaults, restore: false)
+            try runtime.begin(piece: piece, division: event, at: date)
+            var preset = MetronomePreset.standard; preset.bpm = 103
+            runtime.record(preset: preset, at: date.addingTimeInterval(1))
+            runtime.finish(at: date.addingTimeInterval(2))
+            _ = try runtime.save(division: event, in: context)
+        }
         try context.save()
         switch name {
         case "piece": return CoreFixture(path: [.piece(piece.id)])
-        case "no-goal", "valid-goal", "long", "only-left", "only-right", "only-together":
+        case "no-goal", "valid-goal", "long", "only-left", "only-right", "only-together", "ladder-history":
             return CoreFixture(path: [.piece(piece.id), .division(piece: piece.id, division: event.id)])
         case "recovery":
             return CoreFixture(recovery: CoreRecovery(sessionID: UUID(), divisionID: event.id, pieceName: piece.name, divisionName: event.name))

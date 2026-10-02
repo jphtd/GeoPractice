@@ -73,25 +73,86 @@ struct CoreTargetSpeed: Codable, Equatable {
 struct CoreHandGoal: Codable, Equatable {
     var count: Int?
     var speed: CoreTargetSpeed?
+    var ladder: CoreLadderConfiguration?
     var isValid: Bool { CoreGoalValidation.isValid(self) }
 }
 
 // Shared Basic Goal validity for creation, editing and execution.
 enum CoreGoalValidation {
-    static func isValid(_ goal: CoreHandGoal) -> Bool {
+    static func isValid(_ goal: CoreHandGoal, ladderEnabled: Bool = false) -> Bool {
         let basicFieldsValid = (goal.count == nil || goal.count! > 0)
             && (goal.speed == nil || (20...300).contains(goal.speed!.bpm))
         let hasBasicTrainingCondition = goal.count != nil || goal.speed != nil
-        return basicFieldsValid && hasBasicTrainingCondition
+        let participates = ladderEnabled && goal.ladder != nil
+        let ladderValid = !participates || goal.ladder!.isValid(target: goal.speed)
+        let openEnded = participates && goal.speed == nil && ladderValid
+        return basicFieldsValid && ladderValid && (hasBasicTrainingCondition || openEnded)
     }
 }
 
 struct CoreGoal: Codable, Equatable {
     var hands: [PracticeHand: CoreHandGoal]
     var updatedAt: Date?
+    var ladderEnabled: Bool?
+    var reset: CoreResetConfiguration?
     func isValid(for mode: CoreHandMode) -> Bool {
-        mode.hands.allSatisfy { hands[$0]?.isValid == true }
+        mode.hands.allSatisfy { hand in
+            guard let value = hands[hand] else { return false }
+            return CoreGoalValidation.isValid(value, ladderEnabled: ladderEnabled == true)
+        } && (reset?.isValid ?? true)
     }
+}
+
+// Configuration and saved execution facts are separate. Node 3 owns fact production.
+struct CoreLadderConfiguration: Codable, Equatable {
+    var startBPM: Int
+    var stepBPM: Int
+    var repsPerLevel: Int
+    var noteUnit: CoreNoteUnit = .quarter
+    var retainsLockedOrigin: Bool?
+    func isValid(target: CoreTargetSpeed?) -> Bool {
+        (20...300).contains(startBPM) && (1...20).contains(stepBPM) && repsPerLevel >= 1
+            && (target == nil || ((20...300).contains(target!.bpm) && (startBPM < target!.bpm || retainsLockedOrigin == true) && noteUnit == target!.noteUnit))
+    }
+    // A finite target is a hard final level, even when the last interval is short.
+    func finiteLevels(target: CoreTargetSpeed) -> [Int] {
+        guard isValid(target: target) else { return [] }
+        return Array(stride(from: startBPM, to: target.bpm, by: stepBPM)) + [target.bpm]
+    }
+    func converted(to unit: CoreNoteUnit) -> Self {
+        let ratio = noteUnit.quarterMultiplier / unit.quarterMultiplier
+        return Self(startBPM: Int((Double(startBPM) * ratio).rounded()),
+                    stepBPM: Int((Double(stepBPM) * ratio).rounded()), repsPerLevel: repsPerLevel, noteUnit: unit, retainsLockedOrigin: retainsLockedOrigin)
+    }
+}
+
+struct CoreLadderState: Codable, Equatable {
+    var cycleStart: Date
+    var cycleStartBPM: Int
+    var currentBPM: Int
+    var repsCompleted: Int
+    var noteUnit: CoreNoteUnit
+    var firstValidRecordAt: Date?
+    var previousValidBPM: Int?
+    var previousNoteUnit: CoreNoteUnit?
+    var startLocked: Bool { firstValidRecordAt != nil }
+    func suggestedStart(in unit: CoreNoteUnit) -> Int? {
+        guard let previousValidBPM else { return nil }
+        let previous = Double(previousValidBPM) * (previousNoteUnit ?? noteUnit).quarterMultiplier / unit.quarterMultiplier
+        return max(20, Int(previous.rounded()) - 10)
+    }
+}
+
+enum CoreGoalEditTiming: String, CaseIterable { case current, next }
+enum CoreAnalyzeTiming: String, Codable, CaseIterable { case immediately, nextCycle }
+struct CoreResetConfiguration: Codable, Equatable {
+    static let proDays = [1, 3, 5, 7, 14, 30, 60, 90]
+    var enabled = true
+    var days = 1
+    var anchor: Date?
+    var pendingDays: Int?
+    var pendingEffectiveAt: Date?
+    var isValid: Bool { Self.proDays.contains(days) && (pendingDays == nil || Self.proDays.contains(pendingDays!)) }
 }
 
 struct CoreDivisionDefinition: Codable, Equatable {
@@ -101,6 +162,10 @@ struct CoreDivisionDefinition: Codable, Equatable {
     var goal: CoreGoal?
     // Uninterpreted pre-correction Goal data; never used as current configuration.
     var legacyGoalData: Data?
+    var ladderStates: [PracticeHand: CoreLadderState]?
+    var nextCycleGoal: CoreGoal?
+    var nextCycleAnalyzeTiming: CoreAnalyzeTiming?
+    var nextCycleAdjustedStartHands: Set<PracticeHand>?
     var hasValidGoal: Bool { goal?.isValid(for: handMode) == true }
     func label(mode: CoreDivisionMode) -> String {
         "第 \(first == last ? String(first) : "\(first)–\(last)") \(mode.unit)"
@@ -189,22 +254,121 @@ enum CoreContracts {
     }
 
     static func saveGoal(piece: UUID, division: PracticeEvent, goal: CoreGoal,
-                         context: ModelContext, activeSessionID: UUID?, at date: Date = .now) throws -> CorePage {
+                         context: ModelContext, activeSessionID: UUID?, at date: Date = .now,
+                         isPro: Bool = false, timing: CoreGoalEditTiming? = nil,
+                         analyzeTiming: CoreAnalyzeTiming? = nil, adjustedStartHands: Set<PracticeHand> = [],
+                         calendar: Calendar = .current) throws -> CorePage {
         guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }
         guard division.songID == piece, var definition = division.coreDefinition else { throw CoreIntegrationError.wrongDestination }
-        guard goal.isValid(for: definition.handMode) else { throw CoreIntegrationError.invalidGoal }
+        var value = goal
+        for (hand, historical) in definition.goal?.hands ?? [:] where !definition.handMode.hands.contains(hand) {
+            value.hands[hand] = historical
+        }
+        value.reset = value.reset ?? definition.goal?.reset ?? CoreResetConfiguration(anchor: calendar.startOfDay(for: date))
+        try validateGoalAccess(value, previous: definition.goal, isPro: isPro)
+        let previous = definition.goal
+        let structureChanged = previous.map { $0.hands != value.hands || ($0.ladderEnabled == true) != (value.ladderEnabled == true) } ?? false
+        if structureChanged && previous != nil && timing == nil {
+            throw CoreFlowError.invalidInput("请选择本周期生效或下周期生效。")
+        }
+        let targetsChanged = definition.handMode.hands.contains {
+            previous?.hands[$0]?.count != value.hands[$0]?.count || previous?.hands[$0]?.speed != value.hands[$0]?.speed
+        }
+        if timing == .next && targetsChanged && analyzeTiming == nil {
+            throw CoreFlowError.invalidInput("请选择 Analyze 标准立即切换或跟随下周期切换。")
+        }
+        for hand in definition.handMode.hands where value.ladderEnabled == true {
+            guard var ladder = value.hands[hand]?.ladder else { continue }
+            ladder.retainsLockedOrigin = nil
+            let state = definition.ladderStates?[hand]
+            let wasParticipating = previous?.ladderEnabled == true && previous?.hands[hand]?.ladder != nil
+            if timing != .next, wasParticipating, let state, state.startLocked {
+                let expected = Int((Double(state.cycleStartBPM) * state.noteUnit.quarterMultiplier / ladder.noteUnit.quarterMultiplier).rounded())
+                guard ladder.startBPM == expected else { throw CoreFlowError.invalidInput("\(hand.title)：本周期起始 BPM 已锁定。") }
+                if let target = value.hands[hand]?.speed, target.bpm <= expected {
+                    ladder.retainsLockedOrigin = true
+                }
+            }
+            value.hands[hand]?.ladder = ladder
+            if timing == .next, let state, let previousBPM = state.previousValidBPM {
+                let ceiling = Int((Double(previousBPM) * (state.previousNoteUnit ?? state.noteUnit).quarterMultiplier / ladder.noteUnit.quarterMultiplier).rounded())
+                let target = value.hands[hand]?.speed?.bpm
+                guard ladder.startBPM <= min(300, target ?? ceiling) else {
+                    throw CoreFlowError.invalidInput("\(hand.title)：下周期起始 BPM 超出允许范围。")
+                }
+                if let target, let suggested = state.suggestedStart(in: ladder.noteUnit), suggested > target,
+                   !adjustedStartHands.contains(hand) {
+                    throw CoreFlowError.invalidInput("\(hand.title)：请先决定是否调整建议起始速度，并确认真实 Start。")
+                }
+            }
+            // Inactive per-hand facts remain untouched; edits never manufacture records.
+        }
+        guard value.isValid(for: definition.handMode) else { throw CoreIntegrationError.invalidGoal }
+        // Preserve disabled configurations so Off never destroys saved configuration evidence.
+        if value.ladderEnabled != true {
+            for (hand, old) in previous?.hands ?? [:] where value.hands[hand] != nil {
+                value.hands[hand]?.ladder = old.ladder
+            }
+        }
+        if var reset = value.reset {
+            let old = previous?.reset ?? CoreResetConfiguration()
+            if previous == nil && reset.enabled && reset.anchor == nil { reset.anchor = calendar.startOfDay(for: date) }
+            if reset.enabled && !old.enabled {
+                reset.anchor = calendar.startOfDay(for: date)
+                reset.pendingDays = nil; reset.pendingEffectiveAt = nil
+            } else if reset.enabled && old.enabled && reset.days != old.days {
+                reset.pendingDays = reset.days
+                reset.days = old.days; reset.anchor = old.anchor
+                reset.pendingEffectiveAt = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date))
+            }
+            if !reset.enabled { reset.pendingDays = nil; reset.pendingEffectiveAt = nil }
+            value.reset = reset
+        }
         // Keep legacy date evidence outside the current Goal; no inferred Piece date migration.
         if definition.legacyGoalData == nil, let data = division.coreDefinitionData,
            let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
            let oldGoal = json["goal"] as? [String: Any], oldGoal["targetDate"] != nil {
             definition.legacyGoalData = try JSONSerialization.data(withJSONObject: oldGoal, options: [.sortedKeys])
         }
-        var value = goal; value.updatedAt = date
-        definition.goal = value
+        value.updatedAt = date
+        if timing == .next && structureChanged {
+            // Reset edits have their own next-midnight schedule, independent of Goal timing.
+            definition.goal?.reset = value.reset
+            definition.nextCycleGoal = value
+            definition.nextCycleAnalyzeTiming = analyzeTiming
+            definition.nextCycleAdjustedStartHands = adjustedStartHands
+        } else {
+            definition.goal = value
+            definition.nextCycleGoal = nil
+            definition.nextCycleAnalyzeTiming = nil
+            definition.nextCycleAdjustedStartHands = nil
+        }
         division.coreDefinitionData = try JSONEncoder().encode(definition)
         division.updatedAt = date
         do { try context.save() } catch { context.rollback(); throw error }
         return .division(piece: piece, division: division.id)
+    }
+
+    static func copyLeftLadderToRight(in goal: CoreGoal, mode: CoreHandMode) throws -> CoreGoal {
+        guard mode.hands.contains(.left), mode.hands.contains(.right), goal.ladderEnabled == true,
+              let left = goal.hands[.left], let ladder = left.ladder, goal.hands[.right]?.ladder != nil else {
+            throw CoreFlowError.invalidInput("复制要求左右手均适用且右手参与 Ladder。")
+        }
+        var result = goal
+        result.hands[.right]?.ladder = ladder
+        result.hands[.right]?.speed = left.speed
+        return result
+    }
+
+    static func validateGoalAccess(_ goal: CoreGoal, previous: CoreGoal?, isPro: Bool) throws {
+        guard !isPro else { return }
+        let advancedChanged = (goal.ladderEnabled == true) != (previous?.ladderEnabled == true)
+            || goal.hands.contains { $0.value.ladder != previous?.hands[$0.key]?.ladder }
+        guard !advancedChanged else { throw CoreFlowError.invalidInput("Speed Ladder 配置需要 Pro。") }
+        if let reset = goal.reset, reset.enabled, reset.days != 1,
+           reset != previous?.reset {
+            throw CoreFlowError.invalidInput("Free Reset 仅支持 1 天。")
+        }
     }
 
     static func validateDivision(_ definition: CoreDivisionDefinition, structure: CorePieceStructure,
@@ -217,7 +381,7 @@ enum CoreContracts {
 
     // Explicit, atomic Division + optional Basic Goal commit; UI 04 returns Piece Detail.
     static func saveCreatedDivision(piece: PracticeSong, definition: CoreDivisionDefinition,
-                                    context: ModelContext, activeSessionID: UUID?) throws -> CorePage {
+                                    context: ModelContext, activeSessionID: UUID?, isPro: Bool = false) throws -> CorePage {
         guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }
         guard let structure = piece.coreStructure else { throw CoreIntegrationError.missingMetadata }
         let pieceID = piece.id
@@ -226,6 +390,10 @@ enum CoreContracts {
         try validateDivision(definition, structure: structure, existing: existing.compactMap(\.coreDefinition))
         var value = definition
         if var goal = value.goal {
+            try validateGoalAccess(goal, previous: nil, isPro: isPro)
+            for hand in goal.hands.keys { goal.hands[hand]?.ladder?.retainsLockedOrigin = nil }
+            goal.reset = goal.reset ?? CoreResetConfiguration()
+            if goal.reset?.enabled == true && goal.reset?.anchor == nil { goal.reset?.anchor = Calendar.current.startOfDay(for: .now) }
             guard goal.isValid(for: value.handMode) else { throw CoreIntegrationError.invalidGoal }
             goal.updatedAt = .now
             value.goal = goal

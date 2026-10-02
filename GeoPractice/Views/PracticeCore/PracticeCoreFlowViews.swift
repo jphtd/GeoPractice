@@ -1,5 +1,6 @@
 import SwiftData
 import SwiftUI
+import UIKit
 
 /// Temporary native screens for the E2E path; not FROZEN visual acceptance.
 struct CoreTestLabel: View {
@@ -11,6 +12,8 @@ struct CoreTestLabel: View {
 struct CoreEditorView: View {
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var subscription: SubscriptionStore
+    @Query private var savedAttempts: [PracticeAttempt]
     let route: CoreRoute
     let songs: [PracticeSong]
     let events: [PracticeEvent]
@@ -28,6 +31,16 @@ struct CoreEditorView: View {
     @State private var didAttemptSave = false
     @State private var didPopulate = false
     @State private var initialGoals: [PracticeHand: CoreGoalInput] = [:]
+    @State private var advanced = false
+    @State private var ladderEnabled = false
+    @State private var initialLadderEnabled = false
+    @State private var reset = CoreResetConfiguration()
+    @State private var initialReset = CoreResetConfiguration()
+    @State private var editTiming: CoreGoalEditTiming?
+    @State private var analyzeTiming: CoreAnalyzeTiming?
+    @State private var adjustedStartHands: Set<PracticeHand> = []
+    @State private var startConflict: PracticeHand?
+    @State private var previewPro = false
     @State private var error: String?
 
     private var piece: PracticeSong? {
@@ -145,7 +158,19 @@ struct CoreEditorView: View {
                 Button("继续编辑", role: .cancel) {}
                 Button("放弃", role: .destructive) { dismiss() }
             }
+            .alert("建议起始速度高于新的目标速度", isPresented: Binding(get: { startConflict != nil }, set: { if !$0 { startConflict = nil } })) {
+                Button("调整") {
+                    if let hand = startConflict { adjustedStartHands.insert(hand); goals[hand]?.start = "" }
+                    startConflict = nil
+                }
+                Button("不调整", role: .cancel) { startConflict = nil }
+            } message: {
+                Text("调整后建议为 max(20, Target − 10)。建议不会自动保存，请继续输入并确认真实 Start；不调整则不能保存此下周期有限 Ladder。")
+            }
             .onAppear { populate() }
+            .onChange(of: error) { _, message in
+                if let message { UIAccessibility.post(notification: .announcement, argument: message) }
+            }
         }
     }
     private var isEditable: Bool {
@@ -153,8 +178,8 @@ struct CoreEditorView: View {
     }
     private var isCreating: Bool { if case .createDivision = route { true } else { false } }
     private var hasUnsavedChanges: Bool {
-        if isCreating { return !first.isEmpty || !last.isEmpty || handMode != .all || setupGoal || goals != initialGoals }
-        if case .editGoal = route { return goals != initialGoals }
+        if isCreating { return !first.isEmpty || !last.isEmpty || handMode != .all || setupGoal || goals != initialGoals || reset != initialReset }
+        if case .editGoal = route { return goals != initialGoals || ladderEnabled != initialLadderEnabled || reset != initialReset }
         return false
     }
     private func cancel() {
@@ -162,19 +187,185 @@ struct CoreEditorView: View {
     }
     @ViewBuilder private func goalFields(for mode: CoreHandMode) -> some View {
         ForEach(mode.hands) { hand in
-            CoreGoalInputRow(hand: hand, input: Binding(get: { goals[hand] ?? CoreGoalInput() }, set: { goals[hand] = $0 }),
-                             showRequiredError: didAttemptSave)
+            CoreGoalInputRow(hand: hand, input: Binding(get: { goals[hand] ?? CoreGoalInput() }, set: { value in
+                if value.speed != goals[hand]?.speed || value.unit != goals[hand]?.unit { adjustedStartHands.remove(hand) }
+                goals[hand] = value
+            }),
+                             showRequiredError: didAttemptSave, unitLabel: ladderEnabled && (goals[hand]?.participates == true) && (goals[hand]?.speed.isEmpty != false) ? "Ladder 音符单位" : "目标音符单位", ladderIsValid: ladderEnabled && (goals[hand]?.participates == true) && (goals[hand]?.validLadder == true), onUnitChange: { unit in changeUnit(unit, for: hand) })
         }
         Section {
-            Text("每个适用手型至少填写目标次数或练习目标速度之一。速度使用所选音符单位，独立于实际节拍器速度。")
+            Text("每个适用手型至少拥有目标次数、练习目标速度或完整合法开放式 Ladder。速度使用所选音符单位，独立于实际节拍器速度。")
                 .coreType(.caption).foregroundStyle(CorePalette.secondary)
+            DisclosureGroup("高级 Goal", isExpanded: $advanced) {
+                advancedFields(for: mode)
+            }
+        }
+        if case .editGoal = route, configurationChanged || hasLadderLock {
+            Section("配置生效时间") {
+                Picker("生效周期", selection: $editTiming) {
+                    Text("请选择").tag(CoreGoalEditTiming?.none)
+                    Text("本周期生效").tag(CoreGoalEditTiming?.some(.current))
+                    Text("下周期生效").tag(CoreGoalEditTiming?.some(.next))
+                }.accessibilityIdentifier("core.goal.timing")
+                if editTiming == .next && targetsChanged {
+                    Picker("Analyze 标准", selection: $analyzeTiming) {
+                        Text("请选择").tag(CoreAnalyzeTiming?.none)
+                        Text("立即按新目标重新计算").tag(CoreAnalyzeTiming?.some(.immediately))
+                        Text("跟随新目标到下周期一起切换").tag(CoreAnalyzeTiming?.some(.nextCycle))
+                    }
+                }
+                if editTiming == .next && !targetsChanged, let analyzeTiming {
+                    Text(analyzeTiming == .immediately ? "已保存 Analyze 选择：立即按新目标重新计算。" : "已保存 Analyze 选择：跟随新目标到下周期一起切换。").coreType(.caption)
+                }
+                Text(editTiming == .next ? "本周期保留当前配置；新配置保存为下周期待生效值。" : "已发生的 Session / Record 保留。")
+                    .coreType(.caption)
+            }
+        }
+    }
+    private var canConfigurePro: Bool {
+#if DEBUG
+        subscription.isPro || (CoreFixture.requested != nil && previewPro)
+#else
+        subscription.isPro
+#endif
+    }
+    private var hasLadderLock: Bool { ladderEnabled && (division?.coreDefinition?.ladderStates?.values.contains { $0.startLocked } == true) }
+    private var configurationChanged: Bool { goals != initialGoals || ladderEnabled != initialLadderEnabled }
+    private var targetsChanged: Bool {
+        goals.contains { hand, input in input.count != initialGoals[hand]?.count || input.speed != initialGoals[hand]?.speed || input.unit != initialGoals[hand]?.unit }
+    }
+    private func changeUnit(_ unit: CoreNoteUnit, for hand: PracticeHand) {
+        var input = goals[hand] ?? CoreGoalInput()
+        let ratio = input.unit.quarterMultiplier / unit.quarterMultiplier
+        for key in [\CoreGoalInput.start, \CoreGoalInput.step] {
+            if let number = Int(input[keyPath: key]) { input[keyPath: key] = String(Int((Double(number) * ratio).rounded())) }
+        }
+        input.unit = unit; goals[hand] = input
+        adjustedStartHands.remove(hand)
+    }
+    @ViewBuilder private func advancedFields(for mode: CoreHandMode) -> some View {
+#if DEBUG
+        if CoreFixture.requested != nil && !subscription.isPro {
+            Toggle("Debug · Pro 配置预览（内存数据）", isOn: $previewPro).accessibilityIdentifier("core.goal.previewPro")
+        }
+#endif
+        if canConfigurePro {
+            Toggle("Speed Ladder", isOn: Binding(get: { ladderEnabled }, set: { enabled in
+                ladderEnabled = enabled
+                if enabled && !initialLadderEnabled {
+                    for hand in mode.hands {
+                        var input = goals[hand] ?? CoreGoalInput(); input.participates = true
+                        input.start = ""; goals[hand] = input
+                    }
+                }
+            })).accessibilityIdentifier("core.ladder.enabled")
+            if ladderEnabled {
+                ForEach(mode.hands) { hand in
+                    ladderFields(for: hand)
+                }
+                if mode.hands.contains(.left) && mode.hands.contains(.right) && goals[.right]?.participates == true {
+                    Button("复制左手 Ladder 设置到右手") {
+                        guard let left = goals[.left], let start = Int(left.start), let step = Int(left.step), let reps = Int(left.reps) else {
+                            error = "请先填写左手 Start、Step、Reps。"; return
+                        }
+                        var right = goals[.right] ?? CoreGoalInput()
+                        let leftGoal = CoreHandGoal(speed: Int(left.speed).map { CoreTargetSpeed(bpm: $0, noteUnit: left.unit) },
+                            ladder: CoreLadderConfiguration(startBPM: start, stepBPM: step, repsPerLevel: reps, noteUnit: left.unit))
+                        do {
+                            let copied = try CoreContracts.copyLeftLadderToRight(in: CoreGoal(hands: [.left: leftGoal, .right: leftGoal], ladderEnabled: true), mode: mode)
+                            guard let value = copied.hands[.right], let ladder = value.ladder else { return }
+                            right.start = String(ladder.startBPM); right.step = String(ladder.stepBPM); right.reps = String(ladder.repsPerLevel)
+                            right.speed = value.speed.map { String($0.bpm) } ?? ""; right.unit = ladder.noteUnit
+                            goals[.right] = right
+                        } catch { self.error = error.localizedDescription }
+                    }.accessibilityIdentifier("core.ladder.copyLeftRight")
+                }
+            }
+        } else { Text("Speed Ladder · Pro 专业版").coreType(.caption) }
+        Toggle("Reset", isOn: $reset.enabled).accessibilityIdentifier("core.reset.enabled")
+        if reset.enabled {
+            Picker("固定周期天数", selection: $reset.days) {
+                ForEach(canConfigurePro ? CoreResetConfiguration.proDays : [1], id: \.self) { Text("\($0) 天").tag($0) }
+            }.accessibilityIdentifier("core.reset.days")
+            if division?.coreDefinition?.goal != nil && reset.days != initialReset.days {
+                Text("不立即 Reset；当天继续旧周期，下一自然日 00:00 按新周期开始并建立锚点。").coreType(.caption)
+            }
+        } else { Text("Reset 未启用，不按日期自动重置。").coreType(.caption) }
+    }
+    @ViewBuilder private func ladderFields(for hand: PracticeHand) -> some View {
+        let input = goals[hand] ?? CoreGoalInput()
+        Toggle("\(hand.title)参与 Ladder", isOn: Binding(get: { input.participates }, set: {
+            var value = goals[hand] ?? CoreGoalInput(); value.participates = $0; goals[hand] = value
+        })).accessibilityIdentifier("core.ladder.\(hand.rawValue).participates")
+        if input.participates {
+            Text(input.speed.isEmpty ? "开放式 Ladder · 无 Target BPM" : "有限 Ladder · Target 使用上方练习目标 BPM")
+                .coreType(.caption)
+            if !input.speed.isEmpty {
+                Button("改为开放式 · 清除 Target BPM") { goals[hand]?.speed = "" }
+                    .accessibilityIdentifier("core.ladder.\(hand.rawValue).openEnded")
+            } else { Text("需要有限 Ladder 时，请在上方填写 Target BPM。").coreType(.caption) }
+            let state = division?.coreDefinition?.ladderStates?[hand]
+            let locked = state?.startLocked == true && editTiming != .next && initialLadderEnabled && initialGoals[hand]?.participates == true
+            if let state {
+                Text("当前周期：\(state.cycleStart.formatted(date: .abbreviated, time: .omitted)) · 当前档 \(state.currentBPM) BPM · \(state.repsCompleted)/\(division?.coreDefinition?.goal?.hands[hand]?.ladder?.repsPerLevel ?? 0) · \(state.noteUnit.title)").coreType(.caption)
+                if state.startLocked { Text("本周期 Start 已锁定；下周期 Start 可配置。实际练习 BPM 仍可自由调整。").coreType(.caption) }
+                if let suggestion = state.suggestedStart(in: input.unit) {
+                    let adjusted = adjustedStartHands.contains(hand)
+                    let target = Int(input.speed)
+                    let shown = adjusted ? max(20, (target ?? suggestion) - 10) : suggestion
+                    Text("Suggested Start · \(shown) BPM（仅建议，请确认实际 Start）").coreType(.caption)
+                    if editTiming == .next, let target, suggestion > target, !adjusted {
+                        Button("处理建议起点与 Target 冲突") { startConflict = hand }
+                    }
+                }
+            } else if let division, let stable = CoreAnalysis.stable(CoreAnalysis.planned(savedAttempts, division: division.id), hand: hand) {
+                Text("Suggested Start · \(Int((stable / input.unit.quarterMultiplier).rounded())) BPM（Stable BPM 换算，仅建议，请自行确认 Start）").coreType(.caption)
+            } else { Text("没有有效历史速度时不生成建议，请自行确认 Start。").coreType(.caption) }
+            if let start = Int(input.start), let target = Int(input.speed), start >= target && !locked {
+                Text("\(hand.title)：有限 Ladder 需要 Start < Target；最后一档允许短步进。").coreType(.caption).foregroundStyle(.red)
+            }
+            ladderNumber("Start · 起始 BPM", hand: hand, key: \.start, range: 20...300).disabled(locked)
+            ladderNumber("Step · 增加 BPM", hand: hand, key: \.step, range: 1...20)
+            ladderNumber("Reps · 每档次数", hand: hand, key: \.reps, range: 1...Int.max)
+            Text("Ladder 音符单位 · \(input.unit.title)；有限 Ladder 继承目标音符单位，开放式可在上方选择。").coreType(.caption)
+        }
+    }
+    private func ladderNumber(_ label: String, hand: PracticeHand, key: WritableKeyPath<CoreGoalInput, String>, range: ClosedRange<Int>) -> some View {
+        let input = goals[hand] ?? CoreGoalInput()
+        let value = input[keyPath: key]
+        return VStack(alignment: .leading) {
+            LabeledContent(label) {
+                TextField("必填", text: Binding(get: { value }, set: {
+                    var edited = goals[hand] ?? CoreGoalInput(); edited[keyPath: key] = $0; goals[hand] = edited
+                })).multilineTextAlignment(.trailing).keyboardType(.numberPad)
+                    .accessibilityIdentifier("core.ladder.\(hand.rawValue).\(key == \.start ? "start" : key == \.step ? "step" : "reps")")
+            }
+            if (didAttemptSave || !value.isEmpty) && !range.contains(Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) {
+                Text(key == \.reps ? "必填正整数，不设 Product 上限。" : "必填整数 \(range.lowerBound)–\(range.upperBound)。")
+                    .coreType(.caption).foregroundStyle(.red)
+            }
         }
     }
     private func populate() {
         guard !didPopulate else { return }; didPopulate = true
         guard let goal = division?.coreDefinition?.goal else { return }
-        goals = goal.hands.mapValues { CoreGoalInput(count: $0.count.map(String.init) ?? "",
-            speed: $0.speed.map { String($0.bpm) } ?? "", unit: $0.speed?.noteUnit ?? .quarter) }
+        let displayed = division?.coreDefinition?.nextCycleGoal ?? goal
+        goals = displayed.hands.mapValues { value in
+            let unit = value.speed?.noteUnit ?? value.ladder?.noteUnit ?? .quarter
+            let ladder = value.ladder?.converted(to: unit)
+            return CoreGoalInput(count: value.count.map(String.init) ?? "", speed: value.speed.map { String($0.bpm) } ?? "",
+                          unit: unit,
+                          participates: ladder != nil, start: ladder.map { String($0.startBPM) } ?? "",
+                          step: ladder.map { String($0.stepBPM) } ?? "", reps: ladder.map { String($0.repsPerLevel) } ?? "")
+        }
+        ladderEnabled = displayed.ladderEnabled == true
+        initialLadderEnabled = ladderEnabled
+        reset = displayed.reset ?? CoreResetConfiguration()
+        if let pending = reset.pendingDays { reset.days = pending }
+        initialReset = reset
+        editTiming = division?.coreDefinition?.nextCycleGoal == nil ? nil : .next
+        analyzeTiming = division?.coreDefinition?.nextCycleAnalyzeTiming
+        adjustedStartHands = division?.coreDefinition?.nextCycleAdjustedStartHands ?? []
         initialGoals = goals
     }
     private func basicGoal(for mode: CoreHandMode) throws -> CoreGoal {
@@ -182,10 +373,28 @@ struct CoreEditorView: View {
         for hand in mode.hands {
             let input = goals[hand] ?? CoreGoalInput()
             let bpm = try optionalPositive(input.speed, label: "\(hand.title)目标速度")
+            var ladder: CoreLadderConfiguration?
+            if ladderEnabled && input.participates {
+                guard let start = try optionalPositive(input.start, label: "\(hand.title) Start"),
+                      let step = try optionalPositive(input.step, label: "\(hand.title) Step"),
+                      let reps = try optionalPositive(input.reps, label: "\(hand.title) Reps") else {
+                    throw CoreFlowError.invalidInput("\(hand.title)：Start、Step、Reps 均为必填。")
+                }
+                ladder = CoreLadderConfiguration(startBPM: start, stepBPM: step, repsPerLevel: reps, noteUnit: input.unit)
+                if editTiming != .next, initialLadderEnabled, let state = division?.coreDefinition?.ladderStates?[hand],
+                   state.startLocked, let bpm, bpm <= start {
+                    ladder?.retainsLockedOrigin = true
+                }
+            } else if !ladderEnabled { ladder = division?.coreDefinition?.goal?.hands[hand]?.ladder }
             values[hand] = CoreHandGoal(count: try optionalPositive(input.count, label: "\(hand.title)目标次数"),
-                speed: bpm.map { CoreTargetSpeed(bpm: $0, noteUnit: input.unit) })
+                speed: bpm.map { CoreTargetSpeed(bpm: $0, noteUnit: input.unit) }, ladder: ladder)
         }
-        let goal = CoreGoal(hands: values)
+        let goal = CoreGoal(hands: values, ladderEnabled: ladderEnabled, reset: reset)
+        for hand in mode.hands {
+            guard let value = values[hand], CoreGoalValidation.isValid(value, ladderEnabled: ladderEnabled) else {
+                throw CoreFlowError.invalidInput("\(hand.title)：请检查 Goal 与参与的 Ladder 必填字段。")
+            }
+        }
         guard goal.isValid(for: mode) else { throw CoreIntegrationError.invalidGoal }
         return goal
     }
@@ -197,6 +406,13 @@ struct CoreEditorView: View {
     }
     private func save() {
         didAttemptSave = true
+        if editTiming == .next && ladderEnabled {
+            for hand in division?.coreDefinition?.handMode.hands ?? [] {
+                guard let input = goals[hand], input.participates, let target = Int(input.speed),
+                      let suggestion = division?.coreDefinition?.ladderStates?[hand]?.suggestedStart(in: input.unit) else { continue }
+                if suggestion > target && !adjustedStartHands.contains(hand) { startConflict = hand; return }
+            }
+        }
         do {
             guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }
             switch route {
@@ -212,13 +428,14 @@ struct CoreEditorView: View {
                 let page = try CoreContracts.saveCreatedDivision(piece: piece,
                     definition: CoreDivisionDefinition(first: first, last: last, handMode: handMode,
                         goal: setupGoal ? try basicGoal(for: handMode) : nil),
-                    context: modelContext, activeSessionID: activeSessionID)
+                    context: modelContext, activeSessionID: activeSessionID, isPro: canConfigurePro)
                 onSaved(page)
             case .editGoal:
                 guard let division, let definition = division.coreDefinition, let piece else { throw CoreIntegrationError.missingMetadata }
                 let goal = try basicGoal(for: definition.handMode)
                 onSaved(try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
-                    context: modelContext, activeSessionID: activeSessionID))
+                    context: modelContext, activeSessionID: activeSessionID, isPro: canConfigurePro,
+                    timing: editTiming, analyzeTiming: analyzeTiming, adjustedStartHands: adjustedStartHands))
             default: return
             }
             dismiss()
@@ -230,11 +447,23 @@ private struct CoreGoalInput: Equatable {
     var count = ""
     var speed = ""
     var unit = CoreNoteUnit.quarter
+    var participates = true
+    var start = ""
+    var step = ""
+    var reps = ""
+    var validLadder: Bool {
+        guard let start = Int(start), let step = Int(step), let reps = Int(reps) else { return false }
+        let target = speed.isEmpty ? nil : Int(speed).map { CoreTargetSpeed(bpm: $0, noteUnit: unit) }
+        return CoreLadderConfiguration(startBPM: start, stepBPM: step, repsPerLevel: reps, noteUnit: unit).isValid(target: target)
+    }
 }
 private struct CoreGoalInputRow: View {
     let hand: PracticeHand
     @Binding var input: CoreGoalInput
     var showRequiredError = false
+    var unitLabel = "目标音符单位"
+    var ladderIsValid = false
+    var onUnitChange: (CoreNoteUnit) -> Void = { _ in }
     var body: some View {
         Section(hand.title) {
             LabeledContent("目标次数") {
@@ -251,11 +480,11 @@ private struct CoreGoalInputRow: View {
             if !input.speed.isEmpty && !(20...300).contains(Int(input.speed.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) {
                 Text("练习目标 BPM 须为 20–300 的整数。").coreType(.caption).foregroundStyle(.red)
             }
-            Picker("目标音符单位", selection: $input.unit) {
+            Picker(unitLabel, selection: Binding(get: { input.unit }, set: onUnitChange)) {
                 ForEach(CoreNoteUnit.allCases, id: \.self) { Text($0.title).tag($0) }
             }
-            if showRequiredError && input.count.isEmpty && input.speed.isEmpty {
-                Text("请填写目标次数或练习目标速度。").coreType(.caption).foregroundStyle(.red)
+            if showRequiredError && input.count.isEmpty && input.speed.isEmpty && !ladderIsValid {
+                Text("请填写目标次数、练习目标速度或完整开放式 Ladder。").coreType(.caption).foregroundStyle(.red)
             }
         }
     }

@@ -117,7 +117,7 @@ final class PracticeCoreTests: XCTestCase {
         let piece = try CoreContracts.savePiece(name: "新测试曲目", structure: CorePieceStructure(mode: .measures, total: 8), context: context, activeSessionID: result.recovery?.sessionID)
         _ = try CoreContracts.saveCreatedDivision(piece: piece, definition: CoreDivisionDefinition(first: 1, last: 8, handMode: .left), context: context, activeSessionID: nil)
         let division = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeEvent>()).first { $0.songID == piece.id })
-        _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: CoreGoal(hands: [.left: CoreHandGoal(count: 3)]), context: context, activeSessionID: nil)
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: CoreGoal(hands: [.left: CoreHandGoal(count: 3)]), context: context, activeSessionID: nil, timing: .current)
         let runtime = CoreSessionRuntime(defaults: reopened)
         try runtime.begin(piece: piece, division: division)
         runtime.record(preset: .standard)
@@ -292,7 +292,7 @@ final class PracticeCoreTests: XCTestCase {
                                                                          noteUnit: count == 5 ? .quarter : .eighth)))
                 }))
                 let page = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal,
-                                                      context: context, activeSessionID: nil)
+                                                      context: context, activeSessionID: nil, timing: .current)
                 XCTAssertEqual(page, .division(piece: piece.id, division: event.id))
                 XCTAssertEqual(event.coreDefinition?.handMode, mode)
                 XCTAssertEqual(event.coreDefinition?.goal?.hands, goal.hands)
@@ -326,15 +326,221 @@ final class PracticeCoreTests: XCTestCase {
         event.coreDefinitionData = try JSONSerialization.data(withJSONObject: json)
         context.insert(event); try context.save()
         let goal = CoreGoal(hands: [.both: CoreHandGoal(count: 8)])
-        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal, context: context, activeSessionID: nil)
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal, context: context, activeSessionID: nil, timing: .current)
         let saved = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(event.coreDefinitionData)) as? [String: Any])
         XCTAssertNil((saved["goal"] as? [String: Any])?["targetDate"])
         let preserved = try XCTUnwrap(event.coreDefinition?.legacyGoalData)
         let old = try XCTUnwrap(JSONSerialization.jsonObject(with: preserved) as? [String: Any])
         XCTAssertEqual(old["targetDate"] as? Double, 123456.0)
         XCTAssertEqual(piece.coreStructureData, originalPieceMetadata)
-        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal, context: context, activeSessionID: nil)
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal, context: context, activeSessionID: nil, timing: .current)
         XCTAssertEqual(event.coreDefinition?.legacyGoalData, preserved)
+    }
+
+    // Node 2B: configuration persistence only; no simulated rung advancement.
+    private func ladderGoal(_ mode: CoreHandMode = .both, target: Int? = nil, start: Int = 40,
+                            step: Int = 3, reps: Int = 2) -> CoreGoal {
+        CoreGoal(hands: Dictionary(uniqueKeysWithValues: mode.hands.map {
+            ($0, CoreHandGoal(speed: target.map { CoreTargetSpeed(bpm: $0) },
+                             ladder: CoreLadderConfiguration(startBPM: start, stepBPM: step, repsPerLevel: reps)))
+        }), ladderEnabled: true, reset: CoreResetConfiguration())
+    }
+    private func ladderDivision(_ goal: CoreGoal, mode: CoreHandMode = .both) throws -> (ModelContainer, PracticeSong, PracticeEvent) {
+        let db = try container(), context = db.mainContext
+        let piece = try CoreContracts.savePiece(name: "Ladder", structure: CorePieceStructure(mode: .sections, total: 8), context: context, activeSessionID: nil)
+        _ = try CoreContracts.saveCreatedDivision(piece: piece, definition: CoreDivisionDefinition(first: 2, last: 4, handMode: mode, goal: goal),
+                                                   context: context, activeSessionID: nil, isPro: true)
+        return (db, piece, try XCTUnwrap(context.fetch(FetchDescriptor<PracticeEvent>()).first))
+    }
+    func testLadderAllFourModesPersistIndependentConfigurations() throws {
+        for mode in CoreHandMode.allCases {
+            var goal = ladderGoal(mode)
+            for (index, hand) in mode.hands.enumerated() { goal.hands[hand]?.ladder?.startBPM = 40 + index * 10 }
+            let (db, piece, event) = try ladderDivision(goal, mode: mode)
+            XCTAssertEqual(event.coreDefinition?.goal?.hands, goal.hands)
+            XCTAssertEqual(Set(event.coreDefinition?.goal?.hands.keys.map { $0 } ?? []), Set(mode.hands))
+            XCTAssertEqual(try db.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+            var edited = goal; edited.hands[mode.hands[0]]?.ladder?.stepBPM = 4
+            XCTAssertEqual(try CoreContracts.saveGoal(piece: piece.id, division: event, goal: edited, context: db.mainContext,
+                activeSessionID: nil, isPro: true, timing: .current), .division(piece: piece.id, division: event.id))
+            XCTAssertEqual(event.coreDefinition?.goal?.hands, edited.hands)
+        }
+    }
+    func testLadderFiniteFinalShortStepAndOpenEndedValidity() {
+        let config = CoreLadderConfiguration(startBPM: 100, stepBPM: 3, repsPerLevel: 11)
+        XCTAssertEqual(config.finiteLevels(target: CoreTargetSpeed(bpm: 108)), [100, 103, 106, 108])
+        XCTAssertTrue(ladderGoal(target: 108, start: 100).isValid(for: .both))
+        XCTAssertTrue(ladderGoal(reps: Int.max).isValid(for: .both))
+        XCTAssertFalse(ladderGoal(.left).isValid(for: .all))
+        XCTAssertEqual(CoreLadderConfiguration(startBPM: 118, stepBPM: 5, repsPerLevel: 1).finiteLevels(target: CoreTargetSpeed(bpm: 120)), [118, 120])
+    }
+    func testLadderInvalidRequiredFieldsBlockAtomicSave() throws {
+        let db = try container(), context = db.mainContext
+        let piece = try CoreContracts.savePiece(name: "Invalid", structure: CorePieceStructure(mode: .measures), context: context, activeSessionID: nil)
+        let invalid = [ladderGoal(start: 19), ladderGoal(start: 301), ladderGoal(step: 0), ladderGoal(step: 21),
+                       ladderGoal(reps: 0), ladderGoal(target: 40), ladderGoal(target: 39), ladderGoal(target: 301)]
+        for goal in invalid {
+            XCTAssertFalse(goal.isValid(for: .both))
+            XCTAssertThrowsError(try CoreContracts.saveCreatedDivision(piece: piece,
+                definition: CoreDivisionDefinition(first: 1, last: 2, handMode: .both, goal: goal), context: context, activeSessionID: nil, isPro: true))
+        }
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeEvent>()), 0)
+        XCTAssertFalse(context.hasChanges)
+    }
+    func testLadderOffKeepsSavedConfigurationButNotValidity() throws {
+        let goal = ladderGoal(target: 80)
+        let (db, piece, event) = try ladderDivision(goal)
+        var off = goal; off.ladderEnabled = false; off.hands[.both]?.ladder = nil
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: off, context: db.mainContext, activeSessionID: nil, isPro: true, timing: .current)
+        XCTAssertEqual(event.coreDefinition?.goal?.hands[.both]?.ladder, goal.hands[.both]?.ladder)
+        var soleLadder = ladderGoal(); soleLadder.ladderEnabled = false
+        XCTAssertFalse(soleLadder.isValid(for: .both))
+        XCTAssertTrue(try XCTUnwrap(event.coreDefinition).hasValidGoal)
+    }
+    func testLadderFreeCannotCreateOrModifyProConfiguration() throws {
+        let (db, piece, event) = try ladderDivision(ladderGoal())
+        var edited = try XCTUnwrap(event.coreDefinition?.goal); edited.hands[.both]?.ladder?.stepBPM = 4
+        let before = event.coreDefinitionData
+        XCTAssertThrowsError(try CoreContracts.saveGoal(piece: piece.id, division: event, goal: edited, context: db.mainContext,
+            activeSessionID: nil, timing: .current))
+        XCTAssertEqual(event.coreDefinitionData, before)
+        XCTAssertThrowsError(try CoreContracts.validateGoalAccess(ladderGoal(), previous: nil, isPro: false))
+    }
+    func testLadderCopyConfigurationDoesNotCopyCountsOrFacts() throws {
+        var goal = ladderGoal(.all, target: 80)
+        goal.hands[.left]?.count = 8; goal.hands[.right]?.count = 12
+        goal.hands[.right]?.ladder?.stepBPM = 9
+        let copied = try CoreContracts.copyLeftLadderToRight(in: goal, mode: .all)
+        XCTAssertEqual(copied.hands[.left]?.ladder, copied.hands[.right]?.ladder)
+        XCTAssertEqual(copied.hands[.right]?.count, 12)
+        XCTAssertEqual(copied.hands[.both], goal.hands[.both])
+        XCTAssertThrowsError(try CoreContracts.copyLeftLadderToRight(in: goal, mode: .both))
+    }
+    func testLadderCycleStartLocksOnlyAfterExplicitValidRecordFact() throws {
+        let goal = ladderGoal(target: 100)
+        let (db, piece, event) = try ladderDivision(goal)
+        var definition = try XCTUnwrap(event.coreDefinition)
+        let date = Date(timeIntervalSince1970: 1700000000)
+        var state = CoreLadderState(cycleStart: date, cycleStartBPM: 40, currentBPM: 70, repsCompleted: 1, noteUnit: .quarter)
+        definition.ladderStates = [.both: state]
+        event.coreDefinitionData = try JSONEncoder().encode(definition); try db.mainContext.save()
+        var changed = goal; changed.hands[.both]?.ladder?.startBPM = 42
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: changed, context: db.mainContext,
+            activeSessionID: nil, isPro: true, timing: .current)
+        state.cycleStartBPM = 42; state.firstValidRecordAt = date
+        definition = try XCTUnwrap(event.coreDefinition); definition.ladderStates = [.both: state]
+        event.coreDefinitionData = try JSONEncoder().encode(definition); try db.mainContext.save()
+        changed.hands[.both]?.ladder?.startBPM = 44
+        let before = event.coreDefinitionData
+        XCTAssertThrowsError(try CoreContracts.saveGoal(piece: piece.id, division: event, goal: changed, context: db.mainContext,
+            activeSessionID: nil, isPro: true, timing: .current))
+        XCTAssertEqual(event.coreDefinitionData, before)
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: changed, context: db.mainContext,
+            activeSessionID: nil, isPro: true, timing: .next)
+        XCTAssertEqual(event.coreDefinition?.ladderStates?[.both], state)
+        XCTAssertEqual(event.coreDefinition?.goal?.hands[.both]?.ladder?.startBPM, 42)
+        XCTAssertEqual(event.coreDefinition?.nextCycleGoal?.hands[.both]?.ladder?.startBPM, 44)
+    }
+    func testLadderNextCycleRequiresIndependentAnalyzeDecision() throws {
+        let (db, piece, event) = try ladderDivision(ladderGoal(target: 100))
+        var changed = try XCTUnwrap(event.coreDefinition?.goal); changed.hands[.both]?.speed?.bpm = 108
+        XCTAssertThrowsError(try CoreContracts.saveGoal(piece: piece.id, division: event, goal: changed, context: db.mainContext,
+            activeSessionID: nil, isPro: true))
+        XCTAssertThrowsError(try CoreContracts.saveGoal(piece: piece.id, division: event, goal: changed, context: db.mainContext,
+            activeSessionID: nil, isPro: true, timing: .next))
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: changed, context: db.mainContext,
+            activeSessionID: nil, isPro: true, timing: .next, analyzeTiming: .immediately)
+        XCTAssertEqual(event.coreDefinition?.goal?.hands[.both]?.speed?.bpm, 100)
+        XCTAssertEqual(event.coreDefinition?.nextCycleGoal?.hands[.both]?.speed?.bpm, 108)
+        XCTAssertEqual(event.coreDefinition?.nextCycleAnalyzeTiming, .immediately)
+        let encoded = try JSONEncoder().encode(XCTUnwrap(event.coreDefinition))
+        let decoded = try JSONDecoder().decode(CoreDivisionDefinition.self, from: encoded)
+        XCTAssertEqual(decoded, event.coreDefinition)
+    }
+    func testLadderSuggestedStartConflictNeedsDecisionAndExplicitStart() throws {
+        let (db, piece, event) = try ladderDivision(ladderGoal(target: 160))
+        var definition = try XCTUnwrap(event.coreDefinition)
+        let state = CoreLadderState(cycleStart: .now, cycleStartBPM: 40, currentBPM: 140, repsCompleted: 1,
+            noteUnit: .quarter, firstValidRecordAt: .now, previousValidBPM: 140)
+        XCTAssertEqual(state.suggestedStart(in: .quarter), 130)
+        XCTAssertNil(CoreLadderState(cycleStart: .now, cycleStartBPM: 40, currentBPM: 40, repsCompleted: 0, noteUnit: .quarter).suggestedStart(in: .quarter))
+        definition.ladderStates = [.both: state]
+        event.coreDefinitionData = try JSONEncoder().encode(definition); try db.mainContext.save()
+        let changed = ladderGoal(target: 108, start: 99)
+        XCTAssertThrowsError(try CoreContracts.saveGoal(piece: piece.id, division: event, goal: changed, context: db.mainContext,
+            activeSessionID: nil, isPro: true, timing: .next, analyzeTiming: .nextCycle))
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: changed, context: db.mainContext,
+            activeSessionID: nil, isPro: true, timing: .next, analyzeTiming: .nextCycle, adjustedStartHands: [.both])
+        XCTAssertEqual(event.coreDefinition?.nextCycleGoal?.hands[.both]?.ladder?.startBPM, 99)
+        XCTAssertEqual(event.coreDefinition?.nextCycleAdjustedStartHands, [.both])
+        let decoded = try JSONDecoder().decode(CoreDivisionDefinition.self, from: XCTUnwrap(event.coreDefinitionData))
+        XCTAssertEqual(decoded.nextCycleAdjustedStartHands, [.both])
+        XCTAssertEqual(event.coreDefinition?.ladderStates?[.both], state)
+    }
+    func testLadderLowerCurrentTargetPreservesLockedOriginAndHistory() throws {
+        let (db, piece, event) = try ladderDivision(ladderGoal(target: 160, start: 100))
+        var definition = try XCTUnwrap(event.coreDefinition)
+        let state = CoreLadderState(cycleStart: .now, cycleStartBPM: 100, currentBPM: 140, repsCompleted: 1, noteUnit: .quarter, firstValidRecordAt: .now)
+        definition.ladderStates = [.both: state]
+        event.coreDefinitionData = try JSONEncoder().encode(definition); try db.mainContext.save()
+        let changed = ladderGoal(target: 80, start: 100)
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: changed, context: db.mainContext,
+            activeSessionID: nil, isPro: true, timing: .current)
+        XCTAssertTrue(try XCTUnwrap(event.coreDefinition).hasValidGoal)
+        XCTAssertEqual(event.coreDefinition?.ladderStates?[.both], state)
+        XCTAssertEqual(try db.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+    }
+    func testLadderResetCadenceSchedulesNextMidnightAndKeepsFacts() throws {
+        let (db, piece, event) = try ladderDivision(ladderGoal(target: 80))
+        var goal = try XCTUnwrap(event.coreDefinition?.goal)
+        XCTAssertTrue(try XCTUnwrap(goal.reset).enabled)
+        XCTAssertEqual(CoreResetConfiguration.proDays, [1,3,5,7,14,30,60,90])
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let date = Date(timeIntervalSince1970: 1700000000)
+        goal.reset?.days = 30
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal, context: db.mainContext, activeSessionID: nil,
+            at: date, isPro: true, calendar: calendar)
+        let saved = try XCTUnwrap(event.coreDefinition?.goal?.reset)
+        XCTAssertEqual(saved.days, 1); XCTAssertEqual(saved.pendingDays, 30)
+        XCTAssertEqual(saved.pendingEffectiveAt, calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: date)))
+        XCTAssertEqual(event.coreDefinition?.goal?.hands, goal.hands)
+        XCTAssertFalse(CoreResetConfiguration(days: 2).isValid)
+    }
+    func testLadderHistoryFixtureEditPreservesSavedSessionAndInactiveHands() throws {
+        let db = try container(), context = db.mainContext
+        _ = try CoreFixture.make("ladder-history", context: context)
+        let piece = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeSong>()).first)
+        let event = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeEvent>()).first)
+        let attempt = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeAttempt>()).first)
+        let contextBytes = attempt.coreContextData, samples = attempt.completions
+        var definition = try XCTUnwrap(event.coreDefinition)
+        definition.goal?.hands[.left] = CoreHandGoal(count: 11)
+        event.coreDefinitionData = try JSONEncoder().encode(definition); try context.save()
+        var edited = try XCTUnwrap(definition.goal)
+        edited.hands.removeValue(forKey: .left)
+        edited.hands[.both]?.ladder?.stepBPM = 4
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: edited, context: context,
+            activeSessionID: nil, isPro: true, timing: .current)
+        XCTAssertEqual(attempt.coreContextData, contextBytes); XCTAssertEqual(attempt.completions, samples)
+        XCTAssertEqual(event.coreDefinition?.ladderStates, definition.ladderStates)
+        XCTAssertEqual(event.coreDefinition?.goal?.hands[.left]?.count, 11)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 1)
+    }
+    func testLadderNoteUnitConversionAndLegacyDecode() throws {
+        let original = CoreLadderConfiguration(startBPM: 101, stepBPM: 3, repsPerLevel: 12, noteUnit: .quarter)
+        let converted = original.converted(to: .dottedQuarter)
+        XCTAssertEqual(converted.startBPM, 67); XCTAssertEqual(converted.stepBPM, 2)
+        XCTAssertEqual(original.startBPM, 101)
+        let encoded = try JSONEncoder().encode(CoreGoal(hands: [.both: CoreHandGoal(count: 5)]))
+        let decoded = try JSONDecoder().decode(CoreGoal.self, from: encoded)
+        XCTAssertNil(decoded.ladderEnabled); XCTAssertNil(decoded.reset)
+        XCTAssertTrue(decoded.isValid(for: .both))
+        let (db, piece, event) = try ladderDivision(decoded)
+        var unchanged = try XCTUnwrap(event.coreDefinition?.goal)
+        unchanged.ladderEnabled = false
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: unchanged, context: db.mainContext,
+            activeSessionID: nil)
+        XCTAssertTrue(try XCTUnwrap(event.coreDefinition).hasValidGoal)
     }
 
 }
@@ -360,7 +566,7 @@ final class PracticeCoreE2ETests: XCTestCase {
             ($0, CoreHandGoal(count: 3, speed: CoreTargetSpeed(bpm: 100)))
         }))
         _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal,
-            context: context, activeSessionID: nil, at: start.addingTimeInterval(-100))
+            context: context, activeSessionID: nil, at: start.addingTimeInterval(-100), timing: .current)
         return (piece, event)
     }
     private func preset(_ bpm: Int, _ unit: TempoReferenceNote = .quarter) -> MetronomePreset {
@@ -539,7 +745,7 @@ final class PracticeCoreE2ETests: XCTestCase {
         let historicalContexts = Dictionary(uniqueKeysWithValues: beforeEdit.map { ($0.id, $0.coreContextData) })
         let goal = CoreGoal(hands: [.left: CoreHandGoal(count: 15, speed: CoreTargetSpeed(bpm: 120, noteUnit: .eighth))])
         _ = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal, context: context,
-                                      activeSessionID: nil, at: start.addingTimeInterval(100))
+                                      activeSessionID: nil, at: start.addingTimeInterval(100), timing: .current)
         let history = CoreAnalysis.planned(try context.fetch(FetchDescriptor<PracticeAttempt>()), division: event.id)
         XCTAssertEqual(CoreAnalysis.count(history, hand: .left, cycleStart: calendar.startOfDay(for: start)), 2)
         XCTAssertEqual(CoreAnalysis.stable(history, hand: .left), 80)

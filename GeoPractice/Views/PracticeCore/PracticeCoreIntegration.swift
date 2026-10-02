@@ -62,16 +62,16 @@ struct CoreFixture {
         context.insert(piece)
         if name == "no-division" { try context.save(); return CoreFixture(path: [.piece(piece.id)]) }
         let event = PracticeEvent(songID: piece.id, name: "第 3 段")
-        let goal: CoreGoal? = ["valid-goal", "long"].contains(name) ? CoreGoal(hands: [
+        let goal: CoreGoal? = ["valid-goal", "long", "only-left", "only-right", "only-together"].contains(name) ? CoreGoal(hands: [
             .left: CoreHandGoal(count: 10), .right: CoreHandGoal(speed: CoreTargetSpeed(bpm: 80)),
             .both: CoreHandGoal(count: 10)
         ]) : nil
-        event.coreDefinitionData = try JSONEncoder().encode(CoreDivisionDefinition(first: 3, last: 3, handMode: .all, goal: goal))
+        event.coreDefinitionData = try JSONEncoder().encode(CoreDivisionDefinition(first: 3, last: 3, handMode: name == "only-together" ? .both : name == "only-left" ? .left : name == "only-right" ? .right : .all, goal: goal))
         context.insert(event)
         try context.save()
         switch name {
         case "piece": return CoreFixture(path: [.piece(piece.id)])
-        case "no-goal", "valid-goal", "long":
+        case "no-goal", "valid-goal", "long", "only-left", "only-right", "only-together":
             return CoreFixture(path: [.piece(piece.id), .division(piece: piece.id, division: event.id)])
         case "recovery":
             return CoreFixture(recovery: CoreRecovery(sessionID: UUID(), divisionID: event.id, pieceName: piece.name, divisionName: event.name))

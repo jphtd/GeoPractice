@@ -81,18 +81,23 @@ final class CoreSessionRuntime: ObservableObject {
         } catch { failure = CoreFlowError.damagedDraft.localizedDescription }
     }
 
-    func begin(piece: PracticeSong, division: PracticeEvent, at date: Date = .now,
+    func begin(piece: PracticeSong, division: PracticeEvent, initialHand: PracticeHand? = nil, at date: Date = .now,
                calendar: Calendar = .current) throws {
         guard failure == nil else { throw CoreFlowError.damagedDraft }
         guard context == nil else { throw CoreIntegrationError.activeSession }
         guard division.songID == piece.id, let definition = division.coreDefinition,
               let structure = piece.coreStructure, definition.fits(structure),
               let goal = definition.goal, goal.isValid(for: definition.handMode) else { throw CoreIntegrationError.invalidGoal }
+        // Resolve before any session, draft, or context mutation. Multi-hand never defaults.
+        guard let hand = initialHand ?? definition.handMode.directInitialHand,
+              definition.handMode.hands.contains(hand) else {
+            throw CoreFlowError.invalidInput("请选择本次练习首先记录的手型。")
+        }
         context = CoreSessionContext(pieceID: piece.id, divisionID: division.id, pieceName: piece.name,
             divisionName: definition.label(mode: structure.mode), handMode: definition.handMode, goal: goal,
             cycleStart: calendar.startOfDay(for: date), timeZoneID: calendar.timeZone.identifier)
         preset = division.preset
-        session.begin(sourceEventID: division.id, initialHand: definition.handMode.hands.first ?? .both, at: date)
+        session.begin(sourceEventID: division.id, initialHand: hand, at: date)
         needsRecovery = false
         persist(at: date)
     }
@@ -104,7 +109,8 @@ final class CoreSessionRuntime: ObservableObject {
     func pause(at date: Date = .now) { session.pause(at: date); persist(at: date) }
     func resume(at date: Date = .now) { session.resume(at: date); needsRecovery = false; persist(at: date) }
     func switchHand(_ hand: PracticeHand, at date: Date = .now) {
-        guard context?.handMode.hands.contains(hand) == true else { return }
+        guard context?.handMode.allowsHandSwitching == true,
+              context?.handMode.hands.contains(hand) == true else { return }
         session.switchHand(to: hand, at: date)
         persist(at: date)
     }

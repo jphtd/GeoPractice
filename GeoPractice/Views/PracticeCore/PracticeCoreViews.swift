@@ -14,6 +14,7 @@ struct PracticeCoreRootView: View {
     @StateObject private var engine = MetronomeEngine()
     @State private var selectedTab = "Practice"
     @State private var sheetRoute: CoreRoute?
+    @State private var initialHandRoute: CoreRoute?
     @State private var analyzeScope: CoreAnalyzeContext?
     @State private var resultDestination: CoreResultDestination?
     @State private var loaded = false
@@ -61,6 +62,24 @@ struct PracticeCoreRootView: View {
                         .toolbar { ToolbarItem(placement: .cancellationAction) { Button("返回") { self.analyzeScope = nil } } }
                 }
             }
+        }
+        .sheet(isPresented: Binding(get: { initialHandRoute != nil }, set: { if !$0 { initialHandRoute = nil; navigation.cancel() } })) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("选择练习手型").coreType(.titleMedium).accessibilityAddTraits(.isHeader)
+                Text("选择本次练习首先记录的手型。").coreType(.body).foregroundStyle(CorePalette.secondary)
+                ForEach(CoreHandMode.all.hands) { hand in
+                    CoreButton(title: hand.title, kind: .secondary) {
+                        guard case .startPractice(let piece, let division) = initialHandRoute else { return }
+                        do {
+                            try startPractice(piece: piece, division: division, initialHand: hand)
+                            initialHandRoute = nil
+                        } catch { initialHandRoute = nil; boundaryMessage = error.localizedDescription }
+                    }.accessibilityIdentifier("core.initialHand.\(hand.rawValue)")
+                }
+                CoreButton(title: "取消", kind: .tertiary) { initialHandRoute = nil; navigation.cancel() }
+            }.padding(24).frame(maxWidth: 720).presentationDetents([.medium, .large])
+                .presentationDragIndicator(.visible)
+                .accessibilityIdentifier("core.initialHand.sheet")
         }
         .sheet(item: $resultDestination) { destination in
             CoreResultView(runtime: runtime, destination: destination, onReturn: returnFromEditor)
@@ -281,13 +300,12 @@ struct PracticeCoreRootView: View {
                 else { analyzeScope = scope }
             case .startPractice(let pieceID, let divisionID):
                 guard recovery == nil, !pendingLegacySession else { throw CoreIntegrationError.activeSession }
-                guard let piece = songs.first(where: { $0.id == pieceID }),
-                      let division = events.first(where: { $0.id == divisionID }) else { throw CoreIntegrationError.wrongDestination }
-                engine.stop()
-                try runtime.begin(piece: piece, division: division)
-                engine.apply(runtime.preset)
-                navigation.path = []
-                selectedTab = "Practice"
+                guard let division = events.first(where: { $0.id == divisionID && $0.songID == pieceID }),
+                      let definition = division.coreDefinition else { throw CoreIntegrationError.wrongDestination }
+                guard runtime.activeID == nil else { throw CoreIntegrationError.activeSession }
+                guard definition.hasValidGoal else { throw CoreIntegrationError.invalidGoal }
+                if definition.handMode.allowsHandSwitching { initialHandRoute = route }
+                else { try startPractice(piece: pieceID, division: divisionID) }
             case .resumeSession(let id):
                 guard runtime.activeID == id else {
                     throw CoreFlowError.invalidInput("此旧版或独立 Debug 草稿尚不能转为新 Session。选择“暂不恢复”可返回首页添加曲目；旧草稿仍保留，待兼容后处理。")
@@ -303,6 +321,19 @@ struct PracticeCoreRootView: View {
                 sheetRoute = route
             }
         } catch { boundaryMessage = error.localizedDescription }
+    }
+    private func startPractice(piece pieceID: UUID, division divisionID: UUID, initialHand: PracticeHand? = nil) throws {
+        guard recovery == nil, !pendingLegacySession else { throw CoreIntegrationError.activeSession }
+        guard let piece = songs.first(where: { $0.id == pieceID }),
+              let division = events.first(where: { $0.id == divisionID && $0.songID == pieceID }) else {
+            throw CoreIntegrationError.wrongDestination
+        }
+        try runtime.begin(piece: piece, division: division, initialHand: initialHand)
+        engine.stop()
+        engine.apply(runtime.preset)
+        navigation.path = []
+        navigation.cancel()
+        selectedTab = "Practice"
     }
     private func loadInitialContext() {
         guard !loaded else { return }

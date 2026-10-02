@@ -203,9 +203,14 @@ struct CoreSessionView: View {
                             Text("有效计时 \(seconds / 60):\(String(format: "%02lld", seconds % 60))").monospacedDigit()
                         }
                     }.padding().frame(maxWidth: .infinity, alignment: .leading).background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
-                    Picker("当前手型", selection: Binding(get: { runtime.session.currentHand }, set: { runtime.switchHand($0) })) {
-                        ForEach(context.handMode.hands) { Text($0.title).tag($0) }
-                    }.pickerStyle(.segmented)
+                    if context.handMode.allowsHandSwitching {
+                        Picker("当前手型", selection: Binding(get: { runtime.session.currentHand }, set: { runtime.switchHand($0) })) {
+                            ForEach(context.handMode.hands) { Text($0.title).tag($0) }
+                        }.pickerStyle(.segmented).accessibilityIdentifier("core.session.handSwitcher")
+                    } else {
+                        Text("当前手型 · \(runtime.session.currentHand.title)").coreType(.body)
+                            .accessibilityIdentifier("core.session.currentHand")
+                    }
                     if let goal = context.goal.hands[runtime.session.currentHand] {
                         Text("本手型本次完成 \(runtime.session.completionSamples(for: runtime.session.currentHand).count) 次"
                              + (goal.count.map { " · 每日目标 \($0) 次" } ?? ""))

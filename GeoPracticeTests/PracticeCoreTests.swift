@@ -258,7 +258,7 @@ final class PracticeCoreE2ETests: XCTestCase {
         let store = try container(url: url), context = store.mainContext
         let (piece, event) = try makeDivision(context)
         let runtime = CoreSessionRuntime(defaults: defaults())
-        try runtime.begin(piece: piece, division: event, at: start, calendar: calendar)
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start, calendar: calendar)
         let sessionID = runtime.activeID
         runtime.record(preset: preset(80), at: start.addingTimeInterval(10))
         runtime.record(preset: preset(160, .eighth), at: start.addingTimeInterval(20))
@@ -323,7 +323,7 @@ final class PracticeCoreE2ETests: XCTestCase {
         let (piece, event) = try makeDivision(context)
         let runtime = CoreSessionRuntime(defaults: defaults())
         let midnight = calendar.startOfDay(for: start).addingTimeInterval(86400)
-        try runtime.begin(piece: piece, division: event, at: midnight.addingTimeInterval(-10), calendar: calendar)
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: midnight.addingTimeInterval(-10), calendar: calendar)
         runtime.record(preset: preset(80), at: midnight.addingTimeInterval(20))
         runtime.record(preset: preset(100), at: midnight.addingTimeInterval(30))
         runtime.finish(at: midnight.addingTimeInterval(40))
@@ -335,7 +335,7 @@ final class PracticeCoreE2ETests: XCTestCase {
         let goal = try XCTUnwrap(event.coreDefinition?.goal)
         let prior = CoreAnalysis.mastery(history, hand: .left, goal: goal, now: midnight.addingTimeInterval(50), calendar: calendar)
         XCTAssertEqual(prior, CoreAnalysis.mastery(history, hand: .left, goal: goal, now: midnight.addingTimeInterval(86400), calendar: calendar))
-        try runtime.begin(piece: piece, division: event, at: midnight.addingTimeInterval(60), calendar: calendar)
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: midnight.addingTimeInterval(60), calendar: calendar)
         runtime.switchHand(.right, at: midnight.addingTimeInterval(61))
         runtime.record(preset: preset(120), at: midnight.addingTimeInterval(62))
         runtime.finish(at: midnight.addingTimeInterval(63)); _ = try runtime.save(division: event, in: context)
@@ -353,13 +353,13 @@ final class PracticeCoreE2ETests: XCTestCase {
         let store = try container(), context = store.mainContext
         let (piece, event) = try makeDivision(context)
         let runtime = CoreSessionRuntime(defaults: defaults())
-        try runtime.begin(piece: piece, division: event, at: start)
-        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event))
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start)
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, initialHand: .left))
         runtime.finish(at: start.addingTimeInterval(1))
         XCTAssertThrowsError(try runtime.save(division: event, in: context))
         try runtime.discardEmpty()
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
-        try runtime.begin(piece: piece, division: event, at: start)
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start)
         runtime.record(preset: preset(100), at: start.addingTimeInterval(1))
         runtime.finish(at: start.addingTimeInterval(2))
         let summary = try XCTUnwrap(runtime.session.reviewSummary)
@@ -388,7 +388,7 @@ final class PracticeCoreE2ETests: XCTestCase {
         let runtime = CoreSessionRuntime(defaults: defaults)
         XCTAssertNotNil(runtime.failure)
         let store = try container(); let (piece, event) = try makeDivision(store.mainContext)
-        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event))
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, initialHand: .left))
         XCTAssertEqual(defaults.data(forKey: CoreSessionRuntime.draftKey), bytes)
     }
     func testEveryNoteUnitMedianKeepsOutliersAndEvenAverage() {
@@ -407,7 +407,7 @@ final class PracticeCoreE2ETests: XCTestCase {
         let runtime = CoreSessionRuntime(defaults: defaults())
         for index in 0..<2 {
             let date = start.addingTimeInterval(Double(index * 60))
-            try runtime.begin(piece: piece, division: event, at: date, calendar: calendar)
+            try runtime.begin(piece: piece, division: event, initialHand: .left, at: date, calendar: calendar)
             runtime.record(preset: preset(80), at: date.addingTimeInterval(1))
             runtime.finish(at: date.addingTimeInterval(2))
             _ = try runtime.save(division: event, in: context)
@@ -432,10 +432,149 @@ final class PracticeCoreE2ETests: XCTestCase {
     func testNewEmptyDraftIsNotRestoredAsFormalSession() throws {
         let store = try container(); let (piece, event) = try makeDivision(store.mainContext)
         let defaults = defaults(), runtime = CoreSessionRuntime(defaults: defaults)
-        try runtime.begin(piece: piece, division: event)
+        try runtime.begin(piece: piece, division: event, initialHand: .left)
         let restored = CoreSessionRuntime(defaults: defaults)
         XCTAssertNil(restored.activeID)
         XCTAssertNil(defaults.data(forKey: CoreSessionRuntime.draftKey))
+    }
+
+    private func samples(_ runtime: CoreSessionRuntime) -> [PracticeCompletionSample] {
+        PracticeHand.allCases.flatMap { runtime.session.completionSamples(for: $0) }.sorted { $0.completedAt < $1.completedAt }
+    }
+
+    func testExactlyFourHandModesAndLegacyRawValues() throws {
+        XCTAssertEqual(CoreHandMode.allCases.map(\.rawValue), ["left", "right", "both", "all"])
+        for mode in CoreHandMode.allCases {
+            let bytes = Data("\"\(mode.rawValue)\"".utf8)
+            XCTAssertEqual(try JSONDecoder().decode(CoreHandMode.self, from: bytes), mode)
+            XCTAssertEqual(try JSONEncoder().encode(mode), bytes)
+        }
+        for invalid in ["leftRight", "leftBoth", "rightBoth", "left,right", ""] {
+            XCTAssertThrowsError(try JSONDecoder().decode(CoreHandMode.self, from: JSONEncoder().encode(invalid)))
+        }
+    }
+
+    func testEverySingleHandStartsDirectlyAndCannotSwitch() throws {
+        for (mode, hand) in [(CoreHandMode.left, PracticeHand.left), (.right, .right), (.both, .both)] {
+            let store = try container()
+            let (piece, event) = try makeDivision(store.mainContext, handMode: mode)
+            let runtime = CoreSessionRuntime(defaults: defaults())
+            XCTAssertFalse(mode.allowsHandSwitching)
+            XCTAssertEqual(mode.directInitialHand, hand)
+            try runtime.begin(piece: piece, division: event, at: start)
+            XCTAssertEqual(runtime.session.currentHand, hand)
+            for candidate in PracticeHand.allCases { runtime.switchHand(candidate, at: start) }
+            XCTAssertEqual(runtime.session.currentHand, hand)
+            runtime.record(preset: preset(100), at: start.addingTimeInterval(1))
+            XCTAssertEqual(samples(runtime).map(\.hand), [hand])
+        }
+    }
+
+    func testMultiHandRequiresExplicitSelectionBeforeSessionOrRecord() throws {
+        let store = try container(); let (piece, event) = try makeDivision(store.mainContext)
+        let storage = defaults(), runtime = CoreSessionRuntime(defaults: storage)
+        XCTAssertTrue(CoreHandMode.all.allowsHandSwitching)
+        XCTAssertNil(CoreHandMode.all.directInitialHand)
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event))
+        runtime.record(preset: preset(100))
+        XCTAssertNil(runtime.context)
+        XCTAssertNil(runtime.activeID)
+        XCTAssertEqual(runtime.count, 0)
+        XCTAssertNil(storage.data(forKey: CoreSessionRuntime.draftKey))
+    }
+
+    func testMultiHandAllThreeExplicitInitialSelectionsAndNoInheritance() throws {
+        let store = try container(); let (piece, event) = try makeDivision(store.mainContext)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        for hand in PracticeHand.allCases {
+            try runtime.begin(piece: piece, division: event, initialHand: hand, at: start)
+            XCTAssertEqual(runtime.session.currentHand, hand)
+            runtime.switchHand(.both)
+            try runtime.discardEmpty()
+            XCTAssertThrowsError(try runtime.begin(piece: piece, division: event))
+            XCTAssertNil(runtime.activeID)
+        }
+    }
+
+    func testSingleHandRejectsInapplicableExplicitInitialSelectionWithoutMutation() throws {
+        let store = try container(); let (piece, event) = try makeDivision(store.mainContext, handMode: .both)
+        let storage = defaults(), runtime = CoreSessionRuntime(defaults: storage)
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, initialHand: .left))
+        XCTAssertNil(runtime.context)
+        XCTAssertNil(storage.data(forKey: CoreSessionRuntime.draftKey))
+    }
+
+    func testSwitchingKeepsIdentityPlaybackBPMCountsAndHistoricalAttribution() throws {
+        let store = try container(); let (piece, event) = try makeDivision(store.mainContext)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start)
+        let id = runtime.activeID
+        runtime.updatePreset(preset(137), at: start)
+        runtime.record(preset: runtime.preset, at: start.addingTimeInterval(1))
+        let left = samples(runtime)
+        for (offset, hand) in [PracticeHand.right, .both].enumerated() {
+            runtime.switchHand(hand, at: start.addingTimeInterval(Double(offset * 2 + 2)))
+            XCTAssertEqual(runtime.activeID, id)
+            XCTAssertTrue(runtime.session.isRunning)
+            XCTAssertEqual(runtime.preset.bpm, 137)
+            XCTAssertEqual(Array(samples(runtime).prefix(1)), left)
+            runtime.record(preset: runtime.preset, at: start.addingTimeInterval(Double(offset * 2 + 3)))
+        }
+        let records = samples(runtime)
+        XCTAssertEqual(records.map(\.hand), [.left, .right, .both])
+        runtime.switchHand(.left, at: start.addingTimeInterval(6))
+        XCTAssertEqual(runtime.session.completionSamples(for: .left).count, 1)
+        XCTAssertEqual(samples(runtime), records)
+        runtime.pause(at: start.addingTimeInterval(7))
+        runtime.switchHand(.right, at: start.addingTimeInterval(8))
+        XCTAssertFalse(runtime.session.isRunning)
+        XCTAssertEqual(runtime.activeID, id)
+        XCTAssertEqual(runtime.preset.bpm, 137)
+        XCTAssertEqual(samples(runtime), records)
+    }
+
+    func testTogetherContextKeepsHistoricalLeftRightFactsAndUsesOnlyTogetherGoal() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, event) = try makeDivision(context)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start)
+        runtime.record(preset: preset(80), at: start.addingTimeInterval(1))
+        runtime.switchHand(.right, at: start.addingTimeInterval(2))
+        runtime.record(preset: preset(90), at: start.addingTimeInterval(3))
+        runtime.finish(at: start.addingTimeInterval(4))
+        let old = try runtime.save(division: event, in: context)
+        let facts = old.completions, metadata = old.coreContextData
+        var definition = try XCTUnwrap(event.coreDefinition)
+        definition.handMode = .both
+        definition.goal = CoreGoal(hands: [.both: CoreHandGoal(count: 1, speed: CoreTargetSpeed(bpm: 100))])
+        event.coreDefinitionData = try JSONEncoder().encode(definition)
+        try context.save()
+        XCTAssertTrue(definition.hasValidGoal, "Left and Right are N/A, not missing goals")
+        try runtime.begin(piece: piece, division: event, at: start.addingTimeInterval(10))
+        runtime.record(preset: preset(100), at: start.addingTimeInterval(11))
+        runtime.finish(at: start.addingTimeInterval(12))
+        _ = try runtime.save(division: event, in: context)
+        let history = CoreAnalysis.planned(try context.fetch(FetchDescriptor<PracticeAttempt>()), division: event.id)
+        XCTAssertEqual(history.count, 2)
+        XCTAssertEqual(old.completions, facts)
+        XCTAssertEqual(old.coreContextData, metadata)
+        XCTAssertEqual(old.coreContext?.handMode, .all)
+        XCTAssertEqual(CoreAnalysis.stable(history, hand: .left), 80)
+        XCTAssertEqual(CoreAnalysis.stable(history, hand: .right), 90)
+        XCTAssertEqual(CoreAnalysis.stable(history, hand: .both), 100)
+        XCTAssertEqual(CoreAnalysis.divisionMastery(history, definition: definition, now: start), 1)
+    }
+
+    func testTogetherDraftRestoresItsHandAndRecords() throws {
+        let store = try container(); let (piece, event) = try makeDivision(store.mainContext, handMode: .both)
+        let storage = defaults(), runtime = CoreSessionRuntime(defaults: storage)
+        try runtime.begin(piece: piece, division: event, at: start)
+        runtime.record(preset: preset(100), at: start.addingTimeInterval(1))
+        let restored = CoreSessionRuntime(defaults: storage)
+        XCTAssertEqual(restored.activeID, runtime.activeID)
+        XCTAssertEqual(restored.context?.handMode, .both)
+        XCTAssertEqual(restored.session.currentHand, .both)
+        XCTAssertEqual(samples(restored), samples(runtime))
     }
 
 }

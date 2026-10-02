@@ -20,18 +20,29 @@ struct CorePieceStructure: Codable, Equatable {
 }
 
 enum CoreHandMode: String, Codable, CaseIterable {
-    case left, right, all
+    case left, right, both, all
     var hands: [PracticeHand] {
         switch self {
         case .left: [.left]
         case .right: [.right]
+        case .both: [.both]
         case .all: [.left, .right, .both]
+        }
+    }
+    var allowsHandSwitching: Bool { self == .all }
+    var directInitialHand: PracticeHand? {
+        switch self {
+        case .left: .left
+        case .right: .right
+        case .both: .both
+        case .all: nil
         }
     }
     var label: String {
         switch self {
         case .left: "仅左手"
         case .right: "仅右手"
+        case .both: "仅合手"
         case .all: "左手 + 右手 + 合手"
         }
     }

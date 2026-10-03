@@ -163,6 +163,7 @@ struct CoreDivisionDefinition: Codable, Equatable {
     // Uninterpreted pre-correction Goal data; never used as current configuration.
     var legacyGoalData: Data?
     var ladderStates: [PracticeHand: CoreLadderState]?
+    var executionCycleStart: Date?
     var nextCycleGoal: CoreGoal?
     var nextCycleAnalyzeTiming: CoreAnalyzeTiming?
     var nextCycleAdjustedStartHands: Set<PracticeHand>?
@@ -338,6 +339,18 @@ enum CoreContracts {
             definition.nextCycleAnalyzeTiming = analyzeTiming
             definition.nextCycleAdjustedStartHands = adjustedStartHands
         } else {
+            // Re-enabling begins a new user-confirmed origin, without backfilling Off records.
+            for hand in definition.handMode.hands where value.ladderEnabled == true {
+                if let config = value.hands[hand]?.ladder,
+                   previous?.ladderEnabled != true || previous?.hands[hand]?.ladder == nil {
+                    let old = definition.ladderStates?[hand]
+                    definition.ladderStates?[hand] = CoreLadderState(
+                        cycleStart: old?.cycleStart ?? calendar.startOfDay(for: date),
+                        cycleStartBPM: config.startBPM, currentBPM: config.startBPM, repsCompleted: 0,
+                        noteUnit: config.noteUnit, previousValidBPM: old?.previousValidBPM,
+                        previousNoteUnit: old?.previousNoteUnit ?? old?.noteUnit)
+                }
+            }
             definition.goal = value
             definition.nextCycleGoal = nil
             definition.nextCycleAnalyzeTiming = nil

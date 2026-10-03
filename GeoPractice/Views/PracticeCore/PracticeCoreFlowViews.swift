@@ -516,13 +516,23 @@ struct CoreSessionView: View {
                         Picker("当前手型", selection: Binding(get: { runtime.session.currentHand }, set: { runtime.switchHand($0) })) {
                             ForEach(context.handMode.hands) { Text($0.title).tag($0) }
                         }.pickerStyle(.segmented).accessibilityIdentifier("core.session.handSwitcher")
+                        .accessibilityRepresentation {
+                            HStack {
+                                ForEach(context.handMode.hands) { hand in
+                                    Button(hand.title) { runtime.switchHand(hand) }
+                                        .accessibilityAddTraits(runtime.session.currentHand == hand ? .isSelected : [])
+                                        .accessibilityIdentifier("core.session.hand.\(hand.rawValue)")
+                                }
+                            }
+                        }
                     } else {
                         Text("当前手型 · \(runtime.session.currentHand.title)").coreType(.body)
                             .accessibilityIdentifier("core.session.currentHand")
                     }
                     if let goal = context.goal.hands[runtime.session.currentHand] {
-                        Text("本手型本次完成 \(runtime.session.completionSamples(for: runtime.session.currentHand).count) 次"
-                             + (goal.count.map { " · 每日目标 \($0) 次" } ?? ""))
+                        Text("本手型本周期完成 \(CoreAnalysis.count(CoreAnalysis.planned(attempts, division: context.divisionID), hand: runtime.session.currentHand, cycleStart: context.cycleStart) + runtime.session.completionSamples(for: runtime.session.currentHand).count) 次"
+                             + (goal.count.map { " · 目标 \($0) 次" } ?? ""))
+                            .accessibilityIdentifier("core.session.count")
                         if let target = goal.speed { Text("目标：\(target.noteUnit.title) = \(target.bpm) BPM").foregroundStyle(.secondary) }
                     }
                 } else {
@@ -533,7 +543,27 @@ struct CoreSessionView: View {
                     PrototypePulseStage(preset: engine.preset, pulse: engine.lastPulse, isPlaying: engine.isPlaying).frame(height: 240)
                 }
                 CoreTempoControls(engine: engine)
-                if let context = runtime.context,
+                if let context = runtime.context, context.goal.ladderEnabled == true,
+                   let config = context.goal.hands[runtime.session.currentHand]?.ladder,
+                   let state = runtime.execution?.ladderStates?[runtime.session.currentHand] {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("当前档 \(state.currentBPM) BPM（\(state.noteUnit.title)） · \(state.repsCompleted) / \(config.repsPerLevel)")
+                            .accessibilityIdentifier("core.session.ladder")
+                        Text(state.startLocked ? "本周期起始 BPM 已锁定；实际速度仍可自由调整。" : "第一条有效阶梯记录前，本周期起始 BPM 可编辑。")
+                            .accessibilityIdentifier("core.session.startLock")
+                        if let target = context.goal.hands[runtime.session.currentHand]?.speed {
+                            Text("阶梯目标 \(target.bpm) BPM")
+                            if state.currentBPM > target.bpm {
+                                Text("当前档高于新目标，停止自动升速；已有进度不回退。")
+                            } else if state.currentBPM == target.bpm {
+                                Text("已达到目标档；保持目标速度完成剩余次数。Session 不会自动结束。")
+                            }
+                        } else if state.currentBPM == 300 {
+                            Text("已到执行上限 300 BPM，可继续记录；这不是目标达成。")
+                        } else { Text("开放式阶梯 · 无目标速度") }
+                    }.font(.caption).foregroundStyle(.secondary)
+                }
+                if let context = runtime.context, context.goal.ladderEnabled != true,
                    let stable = CoreAnalysis.stable(CoreAnalysis.planned(attempts, division: context.divisionID), hand: runtime.session.currentHand) {
                     let suggested = stable / engine.preset.referenceNote.durationInQuarterNotes
                     Text("建议起始速度：\(suggested.formatted(.number.precision(.fractionLength(0...1)))) BPM（\(engine.preset.referenceNote.title)）。可自行修改。")
@@ -571,14 +601,14 @@ private struct CoreTempoControls: View {
     @FocusState private var bpmFocused: Bool
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Stepper("实际速度：\(engine.preset.bpm) BPM", value: Binding(get: { engine.preset.bpm }, set: { engine.setBPM($0) }), in: 20...240)
+            Stepper("实际速度：\(engine.preset.bpm) BPM", value: Binding(get: { engine.preset.bpm }, set: { engine.setBPM($0) }), in: 20...300)
                 .accessibilityIdentifier("core.tempo.bpm")
             HStack {
-                TextField("输入 BPM（20–240）", text: $enteredBPM).keyboardType(.numberPad).textFieldStyle(.roundedBorder).focused($bpmFocused)
+                TextField("输入 BPM（20–300）", text: $enteredBPM).keyboardType(.numberPad).textFieldStyle(.roundedBorder).focused($bpmFocused)
                     .accessibilityIdentifier("core.tempo.input")
                 Button("应用") {
                     guard let value = TempoScrubModel.validatedBPMInput(enteredBPM) else {
-                        inputError = "实际速度须为 20–240 的整数。"; return
+                        inputError = "实际速度须为 20–300 的整数。"; return
                     }
                     engine.setBPM(value); enteredBPM = ""; inputError = nil; bpmFocused = false
                 }.accessibilityIdentifier("core.tempo.apply")
@@ -787,5 +817,46 @@ private struct CoreSavedSessionView: View {
                 }
             }
         }.navigationTitle("已保存 Session").navigationBarTitleDisplayMode(.inline)
+    }
+}
+
+struct CoreCycleStartView: View {
+    let definition: CoreDivisionDefinition
+    let hands: [PracticeHand]
+    let confirm: ([PracticeHand: Int]) throws -> Void
+    @Environment(\.dismiss) private var dismiss
+    @State private var inputs: [PracticeHand: String] = [:]
+    @State private var error: String?
+    var body: some View {
+        NavigationStack {
+            Form {
+                Text("确认新周期起始 BPM").font(.headline)
+                ForEach(hands) { hand in
+                    Section(hand.title) {
+                        if let config = definition.goal?.hands[hand]?.ladder,
+                           let suggestion = definition.ladderStates?[hand]?.suggestedStart(in: config.noteUnit) {
+                            Text("建议 \(suggestion) BPM；请自行确认真实起始速度。")
+                        }
+                        LabeledContent("Start · 起始 BPM") {
+                            TextField("必填", text: Binding(get: { inputs[hand] ?? "" }, set: { inputs[hand] = $0 }))
+                                .keyboardType(.numberPad).accessibilityIdentifier("core.cycle.\(hand.rawValue).start")
+                        }
+                    }
+                }
+                if let error { Text(error).foregroundStyle(.red) }
+                Button("确认并开始") {
+                    do {
+                        var values: [PracticeHand: Int] = [:]
+                        for hand in hands {
+                            guard let bpm = TempoScrubModel.validatedBPMInput(inputs[hand] ?? "") else {
+                                throw CoreFlowError.invalidInput("请为每个手型填写 20–300 的整数起始 BPM。")
+                            }
+                            values[hand] = bpm
+                        }
+                        try confirm(values)
+                    } catch { self.error = error.localizedDescription }
+                }.accessibilityIdentifier("core.cycle.confirm")
+            }.toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
+        }
     }
 }

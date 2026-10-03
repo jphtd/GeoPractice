@@ -29,7 +29,8 @@ enum MetronomeClickKind: String, CaseIterable, Hashable, Sendable {
 /// digital ceiling for a single rendered click, not a system-volume override.
 struct MetronomeClickProfile: Equatable, Sendable {
     static let maximumPeak = 0.60
-    static let maximumDuration: TimeInterval = 0.018
+    // Shorter than the smallest supported event interval at 300 BPM (1/60 s).
+    static let maximumDuration: TimeInterval = 0.016
 
     let frequency: Double
     let targetPeak: Double
@@ -45,7 +46,7 @@ struct MetronomeClickProfile: Equatable, Sendable {
             Self(
                 frequency: 1_800,
                 targetPeak: 0.54,
-                duration: 0.018,
+                duration: 0.016,
                 attackDuration: 0.00035,
                 decayTimeConstant: 0.0058,
                 harmonicMix: 0.34,
@@ -55,7 +56,7 @@ struct MetronomeClickProfile: Equatable, Sendable {
             Self(
                 frequency: 1_450,
                 targetPeak: 0.44,
-                duration: 0.017,
+                duration: 0.015,
                 attackDuration: 0.00038,
                 decayTimeConstant: 0.0052,
                 harmonicMix: 0.30,
@@ -65,7 +66,7 @@ struct MetronomeClickProfile: Equatable, Sendable {
             Self(
                 frequency: 1_050,
                 targetPeak: 0.34,
-                duration: 0.016,
+                duration: 0.014,
                 attackDuration: 0.00042,
                 decayTimeConstant: 0.0048,
                 harmonicMix: 0.27,

@@ -15,6 +15,8 @@ struct PracticeCoreRootView: View {
     @State private var selectedTab = "Practice"
     @State private var sheetRoute: CoreRoute?
     @State private var initialHandRoute: CoreRoute?
+    @State private var selectedInitialHand: (piece: UUID, division: UUID, hand: PracticeHand)?
+    @State private var cycleStartRequest: (piece: UUID, division: UUID, hand: PracticeHand?, definition: CoreDivisionDefinition, hands: [PracticeHand])?
     @State private var analyzeScope: CoreAnalyzeContext?
     @State private var resultDestination: CoreResultDestination?
     @State private var loaded = false
@@ -63,17 +65,20 @@ struct PracticeCoreRootView: View {
                 }
             }
         }
-        .sheet(isPresented: Binding(get: { initialHandRoute != nil }, set: { if !$0 { initialHandRoute = nil; navigation.cancel() } })) {
+        .sheet(isPresented: Binding(get: { initialHandRoute != nil }, set: { if !$0 { initialHandRoute = nil; navigation.cancel() } }), onDismiss: {
+            guard let choice = selectedInitialHand else { return }
+            selectedInitialHand = nil
+            do { try startPractice(piece: choice.piece, division: choice.division, initialHand: choice.hand) }
+            catch { boundaryMessage = error.localizedDescription }
+        }) {
             VStack(alignment: .leading, spacing: 16) {
                 Text("选择练习手型").coreType(.titleMedium).accessibilityAddTraits(.isHeader)
                 Text("选择本次练习首先记录的手型。").coreType(.body).foregroundStyle(CorePalette.secondary)
                 ForEach(CoreHandMode.all.hands) { hand in
                     CoreButton(title: hand.title, kind: .secondary) {
                         guard case .startPractice(let piece, let division) = initialHandRoute else { return }
-                        do {
-                            try startPractice(piece: piece, division: division, initialHand: hand)
-                            initialHandRoute = nil
-                        } catch { initialHandRoute = nil; boundaryMessage = error.localizedDescription }
+                        selectedInitialHand = (piece, division, hand)
+                        initialHandRoute = nil
                     }.accessibilityIdentifier("core.initialHand.\(hand.rawValue)")
                 }
                 CoreButton(title: "取消", kind: .tertiary) { initialHandRoute = nil; navigation.cancel() }
@@ -83,6 +88,14 @@ struct PracticeCoreRootView: View {
         }
         .sheet(item: $resultDestination) { destination in
             CoreResultView(runtime: runtime, destination: destination, onReturn: returnFromEditor)
+        }
+        .sheet(isPresented: Binding(get: { cycleStartRequest != nil }, set: { if !$0 { cycleStartRequest = nil } })) {
+            if let request = cycleStartRequest {
+                CoreCycleStartView(definition: request.definition, hands: request.hands) { starts in
+                    try startPractice(piece: request.piece, division: request.division, initialHand: request.hand, confirmedStarts: starts)
+                    cycleStartRequest = nil
+                }
+            }
         }
         .alert("操作提示", isPresented: Binding(get: { boundaryMessage != nil }, set: { if !$0 { boundaryMessage = nil } })) {
             if canDeferLegacyRecovery { Button("暂不恢复", action: deferLegacyRecovery) }
@@ -325,13 +338,18 @@ struct PracticeCoreRootView: View {
             }
         } catch { boundaryMessage = error.localizedDescription }
     }
-    private func startPractice(piece pieceID: UUID, division divisionID: UUID, initialHand: PracticeHand? = nil) throws {
+    private func startPractice(piece pieceID: UUID, division divisionID: UUID, initialHand: PracticeHand? = nil, confirmedStarts: [PracticeHand: Int]? = nil) throws {
         guard recovery == nil, !pendingLegacySession else { throw CoreIntegrationError.activeSession }
         guard let piece = songs.first(where: { $0.id == pieceID }),
               let division = events.first(where: { $0.id == divisionID && $0.songID == pieceID }) else {
             throw CoreIntegrationError.wrongDestination
         }
-        try runtime.begin(piece: piece, division: division, initialHand: initialHand)
+        let prepared = try CoreSessionRuntime.prepare(division: division)
+        if confirmedStarts == nil && !prepared.needsStart.isEmpty {
+            cycleStartRequest = (pieceID, divisionID, initialHand, prepared.definition, prepared.needsStart)
+            return
+        }
+        try runtime.begin(piece: piece, division: division, initialHand: initialHand, confirmedStarts: confirmedStarts ?? [:])
         engine.stop()
         engine.apply(runtime.preset)
         navigation.path = []

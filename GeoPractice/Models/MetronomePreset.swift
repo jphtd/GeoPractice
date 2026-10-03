@@ -2,7 +2,7 @@ import Foundation
 
 enum TempoScrubModel {
     static let minimumBPM = 20
-    static let maximumBPM = 240
+    static let maximumBPM = 300
     static let pointsPerBPM: Double = 3
 
     static func bpm(start: Int, horizontalTranslation: Double) -> Int {

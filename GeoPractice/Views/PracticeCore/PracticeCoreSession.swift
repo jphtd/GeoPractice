@@ -53,12 +53,14 @@ final class CoreSessionRuntime: ObservableObject {
     @Published private(set) var preset = MetronomePreset.standard
     @Published var needsRecovery = false
     @Published private(set) var failure: String?
+    @Published private(set) var execution: CoreDivisionDefinition?
     private let defaults: UserDefaults
     private struct Draft: Codable {
         var session: PracticeSession
         var context: CoreSessionContext
         var preset: MetronomePreset
         var savedAt: Date
+        var execution: CoreDivisionDefinition?
     }
     var activeID: UUID? { context == nil ? nil : session.sessionID }
     var count: Int { PracticeHand.allCases.reduce(0) { $0 + session.completionSamples(for: $1).count } }
@@ -74,6 +76,7 @@ final class CoreSessionRuntime: ObservableObject {
             session = draft.session
             context = draft.context
             preset = draft.preset
+            execution = draft.execution
             if count == 0 { clear(); return } // SES-04: never retain an empty formal session after exit.
             // Exclude process downtime, keeping identity and real samples.
             session.pause(at: draft.savedAt)
@@ -82,7 +85,7 @@ final class CoreSessionRuntime: ObservableObject {
     }
 
     func begin(piece: PracticeSong, division: PracticeEvent, initialHand: PracticeHand? = nil, at date: Date = .now,
-               calendar: Calendar = .current) throws {
+               calendar: Calendar = .current, confirmedStarts: [PracticeHand: Int] = [:]) throws {
         guard failure == nil else { throw CoreFlowError.damagedDraft }
         guard context == nil else { throw CoreIntegrationError.activeSession }
         guard division.songID == piece.id, let definition = division.coreDefinition,
@@ -93,13 +96,91 @@ final class CoreSessionRuntime: ObservableObject {
               definition.handMode.hands.contains(hand) else {
             throw CoreFlowError.invalidInput("请选择本次练习首先记录的手型。")
         }
+        var prepared = try Self.prepare(division: division, at: date, calendar: calendar)
+        for hand in prepared.needsStart {
+            guard let start = confirmedStarts[hand], let config = prepared.definition.goal?.hands[hand]?.ladder else {
+                throw CoreFlowError.invalidInput("请确认新周期每个手型的起始 BPM。")
+            }
+            let old = definition.ladderStates?[hand]
+            let previous = old?.previousValidBPM.map {
+                Int((Double($0) * (old?.previousNoteUnit ?? config.noteUnit).quarterMultiplier / config.noteUnit.quarterMultiplier).rounded())
+            } ?? 300
+            let ceiling = min(previous, prepared.definition.goal?.hands[hand]?.speed?.bpm ?? 300)
+            guard (20...max(20, ceiling)).contains(start) else {
+                throw CoreFlowError.invalidInput("\(hand.title)：起始 BPM 须在 20–\(ceiling) 之间。")
+            }
+            prepared.definition.goal?.hands[hand]?.ladder?.startBPM = start
+            if start == prepared.definition.goal?.hands[hand]?.speed?.bpm {
+                prepared.definition.goal?.hands[hand]?.ladder?.retainsLockedOrigin = true
+            }
+        }
+        let effectiveGoal = prepared.definition.goal ?? goal
+        for hand in definition.handMode.hands where effectiveGoal.ladderEnabled == true {
+            guard let config = effectiveGoal.hands[hand]?.ladder else { continue }
+            let old = prepared.definition.ladderStates?[hand]
+            var state: CoreLadderState
+            if let old, old.cycleStart == prepared.cycle {
+                state = old
+                let ratio = old.noteUnit.quarterMultiplier / config.noteUnit.quarterMultiplier
+                let bpm = Int((Double(old.currentBPM) * ratio).rounded())
+                if Double(bpm) * config.noteUnit.quarterMultiplier != Double(old.currentBPM) * old.noteUnit.quarterMultiplier {
+                    state.repsCompleted = 0
+                }
+                state.currentBPM = bpm
+                state.cycleStartBPM = Int((Double(old.cycleStartBPM) * ratio).rounded())
+                state.noteUnit = config.noteUnit
+                if !state.startLocked { state.cycleStartBPM = config.startBPM; state.currentBPM = config.startBPM }
+            } else {
+                state = CoreLadderState(cycleStart: prepared.cycle, cycleStartBPM: config.startBPM,
+                    currentBPM: config.startBPM, repsCompleted: 0, noteUnit: config.noteUnit,
+                    previousValidBPM: old?.previousValidBPM, previousNoteUnit: old?.previousNoteUnit ?? old?.noteUnit)
+            }
+            if prepared.definition.ladderStates == nil { prepared.definition.ladderStates = [:] }
+            prepared.definition.ladderStates?[hand] = state
+        }
+        execution = prepared.definition
         context = CoreSessionContext(pieceID: piece.id, divisionID: division.id, pieceName: piece.name,
-            divisionName: definition.label(mode: structure.mode), handMode: definition.handMode, goal: goal,
-            cycleStart: calendar.startOfDay(for: date), timeZoneID: calendar.timeZone.identifier)
+            divisionName: definition.label(mode: structure.mode), handMode: definition.handMode, goal: effectiveGoal,
+            cycleStart: prepared.cycle, timeZoneID: calendar.timeZone.identifier)
         preset = division.preset
         session.begin(sourceEventID: division.id, initialHand: hand, at: date)
         needsRecovery = false
         persist(at: date)
+    }
+
+    // Resolve boundaries once at Session start. A running Session never changes its cycle.
+    static func prepare(division: PracticeEvent, at date: Date = .now, calendar: Calendar = .current)
+        throws -> (definition: CoreDivisionDefinition, cycle: Date, needsStart: [PracticeHand]) {
+        guard var definition = division.coreDefinition, var goal = definition.goal else { throw CoreIntegrationError.invalidGoal }
+        let today = calendar.startOfDay(for: date)
+        let oldCycle = definition.executionCycleStart ?? definition.ladderStates?.values.map(\.cycleStart).min()
+        var reset = goal.reset ?? CoreResetConfiguration()
+        var anchor = min(calendar.startOfDay(for: reset.anchor ?? oldCycle ?? today), today)
+        var cycle = oldCycle ?? anchor
+        if reset.enabled {
+            if let pending = reset.pendingDays, let effective = reset.pendingEffectiveAt, date >= effective {
+                reset.days = pending; anchor = effective; reset.anchor = effective
+                reset.pendingDays = nil; reset.pendingEffectiveAt = nil
+                cycle = effective
+            }
+            let days = max(0, calendar.dateComponents([.day], from: anchor, to: today).day ?? 0)
+            let boundary = calendar.date(byAdding: .day, value: days / reset.days * reset.days, to: anchor) ?? anchor
+            // Off -> On changes the anchor without clearing existing facts that day.
+            if oldCycle == nil || boundary > anchor || cycle == anchor { cycle = boundary }
+        }
+        reset.anchor = anchor
+        let changed = oldCycle != nil && cycle > oldCycle!
+        let hasPending = changed && definition.nextCycleGoal != nil
+        if hasPending {
+            goal = definition.nextCycleGoal!
+            definition.nextCycleGoal = nil; definition.nextCycleAnalyzeTiming = nil
+            definition.nextCycleAdjustedStartHands = nil
+        }
+        goal.reset = reset
+        definition.goal = goal; definition.executionCycleStart = cycle
+        let needsStart = changed && !hasPending && goal.ladderEnabled == true
+            ? definition.handMode.hands.filter { goal.hands[$0]?.ladder != nil } : []
+        return (definition, cycle, needsStart)
     }
 
     func updatePreset(_ value: MetronomePreset, at date: Date = .now) {
@@ -118,6 +199,24 @@ final class CoreSessionRuntime: ObservableObject {
         guard session.isRunning else { return }
         self.preset = preset.normalized
         session.recordCompletion(for: session.currentHand, preset: preset, at: date)
+        if let goal = context?.goal, goal.ladderEnabled == true,
+           let config = goal.hands[session.currentHand]?.ladder,
+           var state = execution?.ladderStates?[session.currentHand] {
+            let actual = Double(self.preset.bpm) * self.preset.referenceNote.durationInQuarterNotes
+            let rung = Double(state.currentBPM) * state.noteUnit.quarterMultiplier
+            if actual == rung {
+                state.firstValidRecordAt = state.firstValidRecordAt ?? date
+                state.previousValidBPM = self.preset.bpm
+                state.previousNoteUnit = CoreNoteUnit(rawValue: self.preset.referenceNote.rawValue)
+                state.repsCompleted = min(config.repsPerLevel, state.repsCompleted + (state.repsCompleted < config.repsPerLevel ? 1 : 0))
+                let ceiling = goal.hands[session.currentHand]?.speed?.bpm ?? 300
+                if state.repsCompleted >= config.repsPerLevel && state.currentBPM < ceiling {
+                    state.currentBPM = min(ceiling, state.currentBPM + config.stepBPM)
+                    state.repsCompleted = 0
+                }
+                execution?.ladderStates?[session.currentHand] = state
+            }
+        }
         persist(at: date)
     }
     func finish(at date: Date = .now) {
@@ -131,7 +230,7 @@ final class CoreSessionRuntime: ObservableObject {
     func persist(at date: Date = .now) {
         guard let context else { return }
         do {
-            defaults.set(try JSONEncoder().encode(Draft(session: session, context: context, preset: preset, savedAt: date)), forKey: Self.draftKey)
+            defaults.set(try JSONEncoder().encode(Draft(session: session, context: context, preset: preset, savedAt: date, execution: execution)), forKey: Self.draftKey)
         } catch { failure = error.localizedDescription }
     }
     @discardableResult
@@ -139,8 +238,16 @@ final class CoreSessionRuntime: ObservableObject {
         guard let context, context.divisionID == division.id, context.pieceID == division.songID,
               let summary = session.reviewSummary else { throw CoreIntegrationError.wrongDestination }
         guard !summary.completions.isEmpty else { throw CoreFlowError.noRecording }
-        let result = try division.commit(summary: summary, in: modelContext,
+        let oldDefinition = division.coreDefinitionData
+        if let execution { division.coreDefinitionData = try JSONEncoder().encode(execution) }
+        let result: PracticeAttemptCommitResult
+        do {
+            result = try division.commit(summary: summary, in: modelContext,
                                          coreContextData: JSONEncoder().encode(context))
+        } catch {
+            division.coreDefinitionData = oldDefinition
+            throw error
+        }
         clear()
         return result.attempt
     }
@@ -150,7 +257,7 @@ final class CoreSessionRuntime: ObservableObject {
     }
     private func clear() {
         defaults.removeObject(forKey: Self.draftKey)
-        session.reset(); context = nil; needsRecovery = false
+        session.reset(); context = nil; execution = nil; needsRecovery = false
     }
 }
 

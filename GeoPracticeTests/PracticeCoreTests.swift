@@ -913,3 +913,235 @@ final class PracticeCoreE2ETests: XCTestCase {
     }
 
 }
+
+extension PracticeCoreTests {
+    private func ladderSetup(start: Int = 40, step: Int = 2, target: Int? = 44, reps: Int = 1,
+                             mode: CoreHandMode = .all, date: Date = Date(timeIntervalSince1970: 1_790_928_000))
+        throws -> (ModelContainer, PracticeSong, PracticeEvent, CoreSessionRuntime, UserDefaults, Date) {
+        let store = try container()
+        let piece = PracticeSong(name: "Node 3")
+        piece.coreStructureData = try JSONEncoder().encode(CorePieceStructure(mode: .sections, total: 6))
+        let division = PracticeEvent(songID: piece.id, name: "1")
+        let goal = CoreGoal(hands: Dictionary(uniqueKeysWithValues: mode.hands.map {
+            ($0, CoreHandGoal(count: 5, speed: target.map { CoreTargetSpeed(bpm: $0) },
+                ladder: CoreLadderConfiguration(startBPM: start, stepBPM: step, repsPerLevel: reps)))
+        }), ladderEnabled: true, reset: CoreResetConfiguration(anchor: Calendar.current.startOfDay(for: date)))
+        division.coreDefinitionData = try JSONEncoder().encode(CoreDivisionDefinition(first: 1, last: 1, handMode: mode, goal: goal))
+        store.mainContext.insert(piece); store.mainContext.insert(division); try store.mainContext.save()
+        let defaults = UserDefaults(suiteName: "Node3.\(UUID())")!
+        return (store, piece, division, CoreSessionRuntime(defaults: defaults, restore: false), defaults, date)
+    }
+    private func record(_ runtime: CoreSessionRuntime, _ bpm: Int, unit: TempoReferenceNote = .quarter, date: Date) {
+        var preset = MetronomePreset.standard; preset.bpm = bpm; preset.referenceNote = unit
+        runtime.record(preset: preset, at: date)
+    }
+
+    func testNode3ControlledExecutionRealRecordsAndTargetHold() throws {
+        let (store, piece, division, runtime, _, date) = try ladderSetup()
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date)
+        XCTAssertEqual(runtime.preset.bpm, division.preset.bpm) // BPM-02 is isolated, never forced to 40.
+        record(runtime, 40, date: date)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.left]?.currentBPM, 42)
+        XCTAssertEqual(runtime.preset.bpm, 40)
+        record(runtime, 42, date: date)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.left]?.currentBPM, 44)
+        record(runtime, 44, date: date)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.left]?.currentBPM, 44)
+        XCTAssertEqual(runtime.count, 3)
+        XCTAssertTrue(runtime.session.isRunning)
+        record(runtime, 44, date: date); record(runtime, 44, date: date)
+        XCTAssertEqual(runtime.count, 5)
+        XCTAssertTrue(runtime.session.isRunning)
+        runtime.finish(at: date.addingTimeInterval(5))
+        let attempt = try runtime.save(division: division, in: store.mainContext)
+        XCTAssertEqual(attempt.completions.map { $0.preset.bpm }, [40, 42, 44, 44, 44])
+        XCTAssertEqual(division.coreDefinition?.ladderStates?[.left]?.currentBPM, 44)
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date.addingTimeInterval(10))
+        XCTAssertEqual(runtime.execution?.ladderStates?[.left]?.currentBPM, 44)
+    }
+
+    func testNode3MismatchIsolationEquivalenceAndRecovery() throws {
+        let (store, piece, division, runtime, defaults, date) = try ladderSetup(reps: 2)
+        defer { withExtendedLifetime(store) {} }
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date)
+        record(runtime, 39, date: date)
+        XCTAssertFalse(runtime.execution!.ladderStates![.left]!.startLocked)
+        record(runtime, 80, unit: .eighth, date: date)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.left]?.repsCompleted, 1)
+        XCTAssertTrue(runtime.execution!.ladderStates![.left]!.startLocked)
+        for hand in [PracticeHand.right, .both] {
+            runtime.switchHand(hand, at: date)
+            XCTAssertEqual(runtime.preset.bpm, 80)
+            XCTAssertEqual(runtime.execution?.ladderStates?[hand]?.repsCompleted, 0)
+            record(runtime, 80, unit: .eighth, date: date)
+        }
+        runtime.switchHand(.left, at: date)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.left]?.repsCompleted, 1)
+        record(runtime, 40, date: date)
+        record(runtime, 40, date: date) // old rung cannot receive another rep
+        XCTAssertEqual(runtime.execution?.ladderStates?[.left]?.currentBPM, 42)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.left]?.repsCompleted, 0)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.right]?.repsCompleted, 1)
+        let recovered = CoreSessionRuntime(defaults: defaults)
+        XCTAssertTrue(recovered.needsRecovery)
+        XCTAssertEqual(recovered.execution, runtime.execution)
+        XCTAssertEqual(recovered.count, 6)
+        XCTAssertEqual(recovered.session.completionSamples(for: .left).map { $0.preset.bpm }, [39, 80, 40, 40])
+    }
+
+    func testNode3ShortStepAndOpenEndedCeiling() throws {
+        for target in [Int?.some(108), nil] {
+            let (store, piece, division, runtime, _, date) = try ladderSetup(start: target == nil ? 298 : 100, step: 3, target: target, mode: .both)
+            try runtime.begin(piece: piece, division: division, at: date)
+            defer { withExtendedLifetime(store) {} }
+            let bpms = target == nil ? [298, 300, 300] : [100, 103, 106, 108]
+            for bpm in bpms { record(runtime, bpm, date: date) }
+            XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, target ?? 300)
+            XCTAssertTrue(runtime.session.isRunning)
+            XCTAssertEqual(runtime.session.completionSamples(for: .both).map { $0.preset.bpm }, bpms)
+            if target == nil { XCTAssertNil(runtime.context?.goal.hands[.both]?.speed) }
+        }
+    }
+
+    func testNode3OnlyHandsOffAndActualRange() throws {
+        for mode in [CoreHandMode.left, .right, .both] {
+            let (store, piece, division, runtime, _, date) = try ladderSetup(mode: mode)
+            defer { withExtendedLifetime(store) {} }
+            var definition = division.coreDefinition!
+            definition.goal?.ladderEnabled = false
+            division.coreDefinitionData = try JSONEncoder().encode(definition)
+            try runtime.begin(piece: piece, division: division, at: date)
+            for bpm in [40, 241, 299, 300] { record(runtime, bpm, date: date) }
+            XCTAssertNil(runtime.execution?.ladderStates)
+            XCTAssertEqual(runtime.session.completionSamples(for: mode.hands[0]).map { $0.preset.bpm }, [40, 241, 299, 300])
+        }
+        XCTAssertNil(TempoScrubModel.validatedBPMInput("301"))
+        let engine = MetronomeEngine()
+        engine.setBPM(300)
+        XCTAssertEqual(engine.effectivePlaybackPreset.bpm, 300)
+    }
+
+    func testNode3CyclePendingAndSessionAcrossMidnight() throws {
+        var calendar = Calendar(identifier: .gregorian); calendar.timeZone = TimeZone(secondsFromGMT: 0)!
+        let date = Date(timeIntervalSince1970: 1_790_928_000)
+        let (store, piece, division, runtime, _, _) = try ladderSetup(mode: .both, date: date)
+        var definition = division.coreDefinition!
+        definition.goal?.reset?.anchor = calendar.startOfDay(for: date)
+        var pending = definition.goal!
+        pending.hands[.both]?.ladder?.startBPM = 30
+        pending.hands[.both]?.speed?.bpm = 38
+        definition.nextCycleGoal = pending
+        division.coreDefinitionData = try JSONEncoder().encode(definition)
+        try runtime.begin(piece: piece, division: division, at: date, calendar: calendar)
+        record(runtime, 40, date: date)
+        let oldCycle = runtime.context!.cycleStart
+        record(runtime, 42, date: date.addingTimeInterval(86_400))
+        XCTAssertEqual(runtime.context?.cycleStart, oldCycle)
+        XCTAssertEqual(runtime.context?.goal.hands[.both]?.speed?.bpm, 44)
+        runtime.finish(at: date.addingTimeInterval(86_401))
+        _ = try runtime.save(division: division, in: store.mainContext)
+        try runtime.begin(piece: piece, division: division, at: date.addingTimeInterval(86_402), calendar: calendar)
+        XCTAssertEqual(runtime.context?.goal.hands[.both]?.speed?.bpm, 38)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 30)
+        XCTAssertFalse(runtime.execution!.ladderStates![.both]!.startLocked)
+        XCTAssertNil(runtime.execution?.nextCycleGoal)
+    }
+
+    func testNode3NewCycleRequiresConfirmedStartAndPreservesHistory() throws {
+        let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
+        try runtime.begin(piece: piece, division: division, at: date)
+        record(runtime, 40, date: date)
+        runtime.finish(at: date.addingTimeInterval(1))
+        let attempt = try runtime.save(division: division, in: store.mainContext)
+        let history = attempt.completions
+        let next = date.addingTimeInterval(86_400)
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: division, at: next))
+        XCTAssertNil(runtime.context)
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: division, at: next, confirmedStarts: [.both: 41]))
+        try runtime.begin(piece: piece, division: division, at: next, confirmedStarts: [.both: 30])
+        XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 30)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.repsCompleted, 0)
+        XCTAssertFalse(runtime.execution!.ladderStates![.both]!.startLocked)
+        XCTAssertEqual(attempt.completions, history)
+    }
+
+    func testNode3CadenceEditDoesNotResetToday() throws {
+        let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
+        try runtime.begin(piece: piece, division: division, at: date)
+        record(runtime, 40, date: date)
+        runtime.finish(at: date.addingTimeInterval(1))
+        _ = try runtime.save(division: division, in: store.mainContext)
+        var goal = division.coreDefinition!.goal!; goal.reset?.days = 7
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal, context: store.mainContext,
+            activeSessionID: nil, at: date.addingTimeInterval(2), isPro: true)
+        let today = try CoreSessionRuntime.prepare(division: division, at: date.addingTimeInterval(3))
+        XCTAssertTrue(today.needsStart.isEmpty)
+        XCTAssertEqual(today.definition.ladderStates?[.both]?.currentBPM, 42)
+        let tomorrow = try CoreSessionRuntime.prepare(division: division, at: date.addingTimeInterval(86_400))
+        XCTAssertEqual(tomorrow.definition.goal?.reset?.days, 7)
+        XCTAssertEqual(tomorrow.needsStart, [.both])
+    }
+    func testNode3CurrentEditsPreserveProgressAndStartLock() throws {
+        let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
+        try runtime.begin(piece: piece, division: division, at: date)
+        record(runtime, 40, date: date)
+        runtime.finish(at: date.addingTimeInterval(1))
+        let saved = try runtime.save(division: division, in: store.mainContext)
+        let facts = saved.completions
+        var goal = division.coreDefinition!.goal!
+        goal.hands[.both]?.ladder?.startBPM = 38
+        XCTAssertThrowsError(try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
+            context: store.mainContext, activeSessionID: nil, at: date, isPro: true, timing: .current))
+        goal.hands[.both]?.ladder?.startBPM = 40
+        goal.hands[.both]?.speed?.bpm = 39
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
+            context: store.mainContext, activeSessionID: nil, at: date, isPro: true, timing: .current)
+        try runtime.begin(piece: piece, division: division, at: date)
+        record(runtime, 42, date: date)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 42)
+        XCTAssertEqual(saved.completions, facts)
+    }
+
+    func testNode3ReenableUsesNewConfirmedOriginWithoutBackfill() throws {
+        let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
+        try runtime.begin(piece: piece, division: division, at: date)
+        record(runtime, 40, date: date)
+        runtime.finish(at: date.addingTimeInterval(1))
+        _ = try runtime.save(division: division, in: store.mainContext)
+        var goal = division.coreDefinition!.goal!; goal.ladderEnabled = false
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
+            context: store.mainContext, activeSessionID: nil, at: date, isPro: true, timing: .current)
+        try runtime.begin(piece: piece, division: division, at: date)
+        record(runtime, 42, date: date)
+        runtime.finish(at: date.addingTimeInterval(1))
+        _ = try runtime.save(division: division, in: store.mainContext)
+        goal.ladderEnabled = true; goal.hands[.both]?.ladder?.startBPM = 30
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
+            context: store.mainContext, activeSessionID: nil, at: date, isPro: true, timing: .current)
+        try runtime.begin(piece: piece, division: division, at: date)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 30)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.repsCompleted, 0)
+        XCTAssertFalse(runtime.execution!.ladderStates![.both]!.startLocked)
+        XCTAssertEqual(try store.mainContext.fetch(FetchDescriptor<PracticeAttempt>()).count, 2)
+    }
+
+    func testNode3UnitMigrationResetsOnlyRoundedRungProgress() throws {
+        for unit in [CoreNoteUnit.eighth, .dottedQuarter] {
+            let (store, piece, division, runtime, _, date) = try ladderSetup(start: 41, target: 80, reps: 2, mode: .both)
+            try runtime.begin(piece: piece, division: division, at: date)
+            record(runtime, 41, date: date)
+            runtime.finish(at: date.addingTimeInterval(1))
+            _ = try runtime.save(division: division, in: store.mainContext)
+            var goal = division.coreDefinition!.goal!
+            let converted = goal.hands[.both]!.ladder!.converted(to: unit)
+            goal.hands[.both]?.ladder = converted
+            goal.hands[.both]?.speed = CoreTargetSpeed(bpm: Int((80 / unit.quarterMultiplier).rounded()), noteUnit: unit)
+            _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
+                context: store.mainContext, activeSessionID: nil, at: date, isPro: true, timing: .current)
+            try runtime.begin(piece: piece, division: division, at: date)
+            XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.repsCompleted, unit == .eighth ? 1 : 0)
+            XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.previousValidBPM, 41)
+        }
+    }
+
+}

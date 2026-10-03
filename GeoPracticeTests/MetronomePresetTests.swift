@@ -421,7 +421,7 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(TempoScrubModel.bpm(start: 120, horizontalTranslation: 3), 121)
         XCTAssertEqual(TempoScrubModel.bpm(start: 120, horizontalTranslation: -3), 119)
         XCTAssertEqual(TempoScrubModel.bpm(start: 30, horizontalTranslation: -300), 20)
-        XCTAssertEqual(TempoScrubModel.bpm(start: 240, horizontalTranslation: 300), 240)
+        XCTAssertEqual(TempoScrubModel.bpm(start: 240, horizontalTranslation: 300), 300)
     }
 
     func testTempoScrubPrimaryAxisAndDirectEntryValidation() {
@@ -433,7 +433,9 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertNil(TempoScrubModel.validatedBPMInput(""))
         XCTAssertEqual(TempoScrubModel.validatedBPMInput("20"), 20)
         XCTAssertNil(TempoScrubModel.validatedBPMInput("19"))
-        XCTAssertNil(TempoScrubModel.validatedBPMInput("241"))
+        XCTAssertEqual(TempoScrubModel.validatedBPMInput("241"), 241)
+        XCTAssertEqual(TempoScrubModel.validatedBPMInput("300"), 300)
+        XCTAssertNil(TempoScrubModel.validatedBPMInput("301"))
         XCTAssertNil(TempoScrubModel.validatedBPMInput("88.5"))
         XCTAssertNil(TempoScrubModel.validatedBPMInput("Allegro"))
     }
@@ -606,7 +608,7 @@ final class MetronomePresetTests: XCTestCase {
             }
         }
         let shortestSupportedInterval = try XCTUnwrap(supportedIntervals.min())
-        XCTAssertEqual(shortestSupportedInterval, 1.0 / 48.0, accuracy: 0.000_001)
+        XCTAssertEqual(shortestSupportedInterval, 1.0 / 60.0, accuracy: 0.000_001)
         XCTAssertTrue(
             profiles.allSatisfy {
                 $0.duration < shortestSupportedInterval
@@ -682,7 +684,7 @@ final class MetronomePresetTests: XCTestCase {
             grouping: "4+4"
         ).normalized
 
-        XCTAssertEqual(invalid.bpm, 240)
+        XCTAssertEqual(invalid.bpm, 300)
         XCTAssertEqual(invalid.beats, 7)
         XCTAssertEqual(invalid.subdivision, 1)
         XCTAssertEqual(invalid.grouping, "3+4")

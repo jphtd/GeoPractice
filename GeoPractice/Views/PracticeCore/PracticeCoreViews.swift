@@ -36,8 +36,16 @@ struct PracticeCoreRootView: View {
     var body: some View {
         Group {
             if selectedTab == "GeoBeat" {
-                CoreSessionView(runtime: runtime, engine: engine, isGeoBeat: true,
-                    openGeoBeat: {}, finish: finishSession, onRoute: request)
+                NavigationStack {
+                    CoreSessionView(
+                        runtime: runtime,
+                        engine: engine,
+                        isGeoBeat: true,
+                        openGeoBeat: {},
+                        finish: finishSession,
+                        onRoute: request
+                    )
+                }
             } else if selectedTab == "Analyze" {
                 NavigationStack { CoreAnalyzeView(scope: .overall) }
             } else {

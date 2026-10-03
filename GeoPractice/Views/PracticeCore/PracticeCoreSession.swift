@@ -143,7 +143,16 @@ final class CoreSessionRuntime: ObservableObject {
         context = CoreSessionContext(pieceID: piece.id, divisionID: division.id, pieceName: piece.name,
             divisionName: definition.label(mode: structure.mode), handMode: definition.handMode, goal: effectiveGoal,
             cycleStart: prepared.cycle, timeZoneID: calendar.timeZone.identifier)
-        preset = division.preset
+        var initialPreset = division.preset
+
+        if effectiveGoal.ladderEnabled == true,
+           let ladderState = execution?.ladderStates?[hand],
+           let referenceNote = TempoReferenceNote(rawValue: ladderState.noteUnit.rawValue) {
+            initialPreset.bpm = ladderState.currentBPM
+            initialPreset.referenceNote = referenceNote
+        }
+
+        preset = initialPreset.normalized
         session.begin(sourceEventID: division.id, initialHand: hand, at: date)
         needsRecovery = false
         persist(at: date)
@@ -192,8 +201,21 @@ final class CoreSessionRuntime: ObservableObject {
     func resume(at date: Date = .now) { session.resume(at: date); needsRecovery = false; persist(at: date) }
     func switchHand(_ hand: PracticeHand, at date: Date = .now) {
         guard context?.handMode.allowsHandSwitching == true,
-              context?.handMode.hands.contains(hand) == true else { return }
+              context?.handMode.hands.contains(hand) == true,
+              hand != session.currentHand else { return }
+
         session.switchHand(to: hand, at: date)
+
+        if context?.goal.ladderEnabled == true,
+           let state = execution?.ladderStates?[hand],
+           let referenceNote = TempoReferenceNote(rawValue: state.noteUnit.rawValue) {
+
+            var handPreset = preset
+            handPreset.bpm = state.currentBPM
+            handPreset.referenceNote = referenceNote
+            preset = handPreset.normalized
+        }
+
         persist(at: date)
     }
     func record(preset: MetronomePreset, at date: Date = .now) {
@@ -214,6 +236,15 @@ final class CoreSessionRuntime: ObservableObject {
                 if state.repsCompleted >= config.repsPerLevel && state.currentBPM < ceiling {
                     state.currentBPM = min(ceiling, state.currentBPM + config.stepBPM)
                     state.repsCompleted = 0
+
+                    var nextPreset = self.preset
+                    nextPreset.bpm = state.currentBPM
+
+                    if let nextReference = TempoReferenceNote(rawValue: state.noteUnit.rawValue) {
+                        nextPreset.referenceNote = nextReference
+                    }
+
+                    self.preset = nextPreset.normalized
                 }
                 execution?.ladderStates?[session.currentHand] = state
             }

@@ -500,6 +500,25 @@ struct CoreSessionView: View {
     let openGeoBeat: () -> Void
     let finish: () -> Void
     var onRoute: (CoreRoute) -> Void = { _ in }
+    @State private var continueAfterTargets = false
+    private func allTargetCountsReached(in context: CoreSessionContext) -> Bool {
+        context.handMode.hands.allSatisfy { hand in
+            guard let targetCount = context.goal.hands[hand]?.count else {
+                return false
+            }
+
+            let savedCount = CoreAnalysis.count(
+                CoreAnalysis.planned(attempts, division: context.divisionID),
+                hand: hand,
+                cycleStart: context.cycleStart
+            )
+
+            let currentSessionCount =
+                runtime.session.completionSamples(for: hand).count
+
+            return savedCount + currentSessionCount >= targetCount
+        }
+    }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
@@ -535,7 +554,10 @@ struct CoreSessionView: View {
                         }
                     }.padding().frame(maxWidth: .infinity, alignment: .leading).background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
                     if context.handMode.allowsHandSwitching {
-                        Picker("当前手型", selection: Binding(get: { runtime.session.currentHand }, set: { runtime.switchHand($0) })) {
+                        Picker("当前手型", selection: Binding(get: { runtime.session.currentHand }, set: {
+                            runtime.switchHand($0)
+                            engine.apply(runtime.preset)
+                        })) {
                             ForEach(context.handMode.hands) { Text($0.title).tag($0) }
                         }.pickerStyle(.segmented).accessibilityIdentifier("core.session.handSwitcher")
                         .accessibilityRepresentation {
@@ -552,9 +574,36 @@ struct CoreSessionView: View {
                             .accessibilityIdentifier("core.session.currentHand")
                     }
                     if let goal = context.goal.hands[runtime.session.currentHand] {
-                        Text("本手型本周期完成 \(CoreAnalysis.count(CoreAnalysis.planned(attempts, division: context.divisionID), hand: runtime.session.currentHand, cycleStart: context.cycleStart) + runtime.session.completionSamples(for: runtime.session.currentHand).count) 次"
-                             + (goal.count.map { " · 目标 \($0) 次" } ?? ""))
-                            .accessibilityIdentifier("core.session.count")
+                        let actualCount =
+                            CoreAnalysis.count(
+                                CoreAnalysis.planned(attempts, division: context.divisionID),
+                                hand: runtime.session.currentHand,
+                                cycleStart: context.cycleStart
+                            )
+                            + runtime.session.completionSamples(
+                                for: runtime.session.currentHand
+                            ).count
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("练习次数")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            if let targetCount = goal.count {
+                                Text("\(actualCount)/\(targetCount)")
+                                    .font(.system(size: 32, weight: .black, design: .rounded))
+                                    .monospacedDigit()
+                                    .contentTransition(.numericText())
+                                    .animation(.easeOut(duration: 0.20), value: actualCount)
+                            } else {
+                                Text("\(actualCount)")
+                                    .font(.system(size: 32, weight: .black, design: .rounded))
+                                    .monospacedDigit()
+                                    .contentTransition(.numericText())
+                                    .animation(.easeOut(duration: 0.20), value: actualCount)
+                            }
+                        }
+                        .accessibilityIdentifier("core.session.count")
                         if let target = goal.speed { Text("目标：\(target.noteUnit.title) = \(target.bpm) BPM").foregroundStyle(.secondary) }
                     }
                 } else {
@@ -562,7 +611,26 @@ struct CoreSessionView: View {
                     Text("当前使用节拍器不会改变任何划分的 Goal 或 Stable BPM。").font(.callout).foregroundStyle(.secondary)
                 }
                 if isGeoBeat {
-                    PrototypePulseStage(preset: engine.preset, pulse: engine.lastPulse, isPlaying: engine.isPlaying).frame(height: 240)
+                    PrototypePulseStage(
+                        preset: engine.preset,
+                        pulse: engine.lastPulse,
+                        isPlaying: engine.isPlaying
+                    )
+                    .frame(height: 240)
+                    .contentShape(Rectangle())
+                    .onTapGesture {
+                        if engine.isPlaying {
+                            engine.pause()
+                            runtime.pause()
+                        } else {
+                            engine.start()
+                            if engine.isPlaying {
+                                runtime.resume()
+                            }
+                        }
+                    }
+                    .accessibilityLabel(engine.isPlaying ? "节拍器正在运行" : "节拍器已暂停")
+                    .accessibilityHint("轻点切换运行状态")
                 }
                 CoreTempoControls(engine: engine)
                 if let context = runtime.context, context.goal.ladderEnabled == true,
@@ -592,29 +660,54 @@ struct CoreSessionView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if let message = engine.errorMessage { Text(message).foregroundStyle(.red) }
-                if isGeoBeat {
-                    CoreButton(title: engine.isPlaying ? "暂停练习 / 节拍器" : "播放 / 继续练习", kind: runtime.context == nil ? .primary : .secondary) {
-                        if engine.isPlaying { engine.pause(); runtime.pause() }
-                        else { engine.start(); if engine.isPlaying { runtime.resume() } }
-                    }.accessibilityIdentifier("core.geobeat.play")
-                    if runtime.context != nil {
-                        CoreButton(title: "完成一次 · \(runtime.session.currentHand.title)") { runtime.record(preset: engine.effectivePlaybackPreset) }
-                            .disabled(!runtime.session.isRunning).accessibilityIdentifier("core.session.record")
-                        Text("每完整练习一次后点一次。每条记录保留当时的手型、BPM 和音符单位；节拍声本身不会自动计为一次完成。").font(.caption).foregroundStyle(.secondary)
-                    }
-                } else {
+                if !isGeoBeat {
                     CoreButton(title: "进入 GeoBeat 练习", action: openGeoBeat).accessibilityIdentifier("core.session.openGeoBeat")
                     CoreButton(title: runtime.session.isRunning ? "暂停计时" : "继续计时", kind: .secondary) {
                         if runtime.session.isRunning { runtime.pause(); engine.pause() } else { runtime.resume() }
                     }
                 }
-                if runtime.context != nil {
-                    CoreButton(title: "结束练习", kind: .secondary, action: finish).accessibilityIdentifier("core.session.finish")
-                }
+                
             }.padding().frame(maxWidth: 720).frame(maxWidth: .infinity)
-        }.background(CorePalette.canvas)
-    }
-}
+        }
+        .background(CorePalette.canvas)
+        .safeAreaInset(edge: .bottom) {
+            if isGeoBeat, let context = runtime.context {
+                if allTargetCountsReached(in: context) && !continueAfterTargets {
+                    HStack(spacing: 12) {
+                        CoreButton(title: "继续练习") {
+                            continueAfterTargets = true
+                        }
+
+                        CoreButton(title: "结束练习", action: finish)
+                    }
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(CorePalette.canvas)
+
+                } else {
+                    CoreButton(title: "完成一次 · \(runtime.session.currentHand.title)") {
+                        runtime.record(preset: engine.effectivePlaybackPreset)
+                        engine.apply(runtime.preset)
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    }
+                    .disabled(!runtime.session.isRunning)
+                    .accessibilityIdentifier("core.session.record")
+                    .padding(.horizontal)
+                    .padding(.vertical, 8)
+                    .background(CorePalette.canvas)
+                }
+            }
+        }
+        .padding(.bottom, 56)
+        .toolbar {
+            ToolbarItem(placement: .topBarTrailing) {
+                if runtime.context != nil {
+                    Button("结束练习", action: finish)
+                        .accessibilityIdentifier("core.session.finish")
+                }
+            }
+        }
+    }    }
 
 private struct CoreTempoControls: View {
     @ObservedObject var engine: MetronomeEngine
@@ -949,3 +1042,4 @@ struct CoreExitHandoffView: View {
         }
     }
 }
+

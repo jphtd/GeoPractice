@@ -63,11 +63,11 @@
       <CommandLineArguments>
          <CommandLineArgument
             argument = "-practice-core-fixture"
-            isEnabled = "NO">
+            isEnabled = "YES">
          </CommandLineArgument>
          <CommandLineArgument
             argument = "no-division"
-            isEnabled = "NO">
+            isEnabled = "YES">
          </CommandLineArgument>
       </CommandLineArguments>
    </LaunchAction>

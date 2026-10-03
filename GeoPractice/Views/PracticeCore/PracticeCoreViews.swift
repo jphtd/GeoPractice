@@ -18,7 +18,9 @@ struct PracticeCoreRootView: View {
     @State private var selectedInitialHand: (piece: UUID, division: UUID, hand: PracticeHand)?
     @State private var cycleStartRequest: (piece: UUID, division: UUID, hand: PracticeHand?, definition: CoreDivisionDefinition, hands: [PracticeHand])?
     @State private var analyzeScope: CoreAnalyzeContext?
-    @State private var resultDestination: CoreResultDestination?
+    @Environment(\.modelContext) private var modelContext
+    @State private var exitDestination: CoreExitDestination?
+    @State private var exitError: String?
     @State private var loaded = false
     private let checkpoint = Timer.publish(every: 15, on: .main, in: .common).autoconnect()
     let fixture: CoreFixture?
@@ -35,7 +37,7 @@ struct PracticeCoreRootView: View {
         Group {
             if selectedTab == "GeoBeat" {
                 CoreSessionView(runtime: runtime, engine: engine, isGeoBeat: true,
-                    openGeoBeat: {}, finish: finishSession)
+                    openGeoBeat: {}, finish: finishSession, onRoute: request)
             } else if selectedTab == "Analyze" {
                 NavigationStack { CoreAnalyzeView(scope: .overall) }
             } else {
@@ -53,8 +55,13 @@ struct PracticeCoreRootView: View {
         }
         .sheet(isPresented: Binding(get: { sheetRoute != nil }, set: { if !$0 { sheetRoute = nil; navigation.cancel() } })) {
             if let sheetRoute {
-                CoreEditorView(route: sheetRoute, songs: songs, events: events,
-                    activeSessionID: runtime.activeID ?? recovery?.sessionID, onSaved: returnFromEditor)
+                switch sheetRoute {
+                case .archivePiece, .deletePiece, .editDivision:
+                    CoreExitHandoffView(route: sheetRoute, songs: songs, events: events)
+                default:
+                    CoreEditorView(route: sheetRoute, songs: songs, events: events,
+                        activeSessionID: runtime.activeID ?? recovery?.sessionID, onSaved: returnFromEditor)
+                }
             }
         }
         .sheet(isPresented: Binding(get: { analyzeScope != nil }, set: { if !$0 { analyzeScope = nil } })) {
@@ -86,8 +93,9 @@ struct PracticeCoreRootView: View {
                 .presentationDragIndicator(.visible)
                 .accessibilityIdentifier("core.initialHand.sheet")
         }
-        .sheet(item: $resultDestination) { destination in
-            CoreResultView(runtime: runtime, destination: destination, onReturn: returnFromEditor)
+        .sheet(isPresented: Binding(get: { runtime.exitRequest != nil }, set: { _ in }), onDismiss: continueAfterExit) {
+            CoreExitDecisionView(saveOnly: runtime.exitRequest?.saveOnly == true, error: exitError, choose: resolveExit)
+                .interactiveDismissDisabled()
         }
         .sheet(isPresented: Binding(get: { cycleStartRequest != nil }, set: { if !$0 { cycleStartRequest = nil } })) {
             if let request = cycleStartRequest {
@@ -117,7 +125,7 @@ struct PracticeCoreRootView: View {
             Group {
                 if runtime.context != nil && !runtime.needsRecovery {
                     CoreSessionView(runtime: runtime, engine: engine, isGeoBeat: false,
-                        openGeoBeat: { selectedTab = "GeoBeat" }, finish: finishSession)
+                        openGeoBeat: { selectedTab = "GeoBeat" }, finish: finishSession, onRoute: request)
                 } else { CoreScreen { home } }
             }
             .navigationDestination(for: CorePage.self) { page in
@@ -297,14 +305,50 @@ struct PracticeCoreRootView: View {
         recovery = nil
     }
     private func finishSession() {
-        guard let context = runtime.context else { return }
-        engine.stop()
-        runtime.finish()
-        resultDestination = CoreResultDestination(context: context)
+        exitError = nil
+        do { try runtime.requestExit(.ordinary) }
+        catch { boundaryMessage = error.localizedDescription }
+    }
+    private func resolveExit(_ choice: CoreExitChoice) {
+        guard let id = runtime.context?.divisionID, let division = events.first(where: { $0.id == id }) else { return }
+        do {
+            exitDestination = try runtime.resolveExit(choice, division: division, in: modelContext)
+            exitError = nil
+            if choice != .cancel { engine.stop() }
+            else { navigation.cancel() }
+        } catch { exitError = error.localizedDescription }
+    }
+    private func continueAfterExit() {
+        guard let destination = exitDestination else { return }
+        exitDestination = nil
+        switch destination {
+        case .piece(let id):
+            selectedTab = "Practice"; navigation.path = [.piece(id)]; navigation.cancel()
+        case .route(let route):
+            selectedTab = "Practice"
+            request(route)
+        }
     }
     private func request(_ route: CoreRoute) {
         navigation.request(route)
         do {
+            if let context = runtime.context {
+                let guarded: Bool
+                switch route {
+                case .startPractice(let piece, let division):
+                    guard let target = events.first(where: { $0.id == division && $0.songID == piece }),
+                          target.coreDefinition?.hasValidGoal == true else { throw CoreIntegrationError.invalidGoal }
+                    guarded = division != context.divisionID || piece != context.pieceID
+                case .archivePiece(let piece), .deletePiece(let piece): guarded = piece == context.pieceID
+                case .editDivision: guarded = true
+                default: guarded = false
+                }
+                if guarded {
+                    exitError = nil
+                    try runtime.requestExit(.transition(route))
+                    return
+                }
+            }
             switch route {
             case .geoBeat:
                 selectedTab = "GeoBeat"
@@ -329,9 +373,8 @@ struct PracticeCoreRootView: View {
                 runtime.needsRecovery = false
                 navigation.path = []
                 selectedTab = "Practice"
-                if runtime.session.reviewSummary != nil, let context = runtime.context {
-                    resultDestination = CoreResultDestination(context: context)
-                } else { runtime.resume() }
+                if runtime.session.reviewSummary != nil { runtime.continuePractice() }
+                else { runtime.resume() }
             default:
                 guard runtime.activeID == nil && recovery == nil else { throw CoreIntegrationError.activeSession }
                 sheetRoute = route

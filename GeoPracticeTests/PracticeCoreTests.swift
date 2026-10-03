@@ -1145,3 +1145,137 @@ extension PracticeCoreTests {
     }
 
 }
+
+
+extension PracticeCoreTests {
+    func testNode4OrdinarySaveDiscardCancelAndFormalLadderRollback() throws {
+        for choice in [CoreExitChoice.save, .discard, .cancel] {
+            let (store, piece, division, runtime, defaults, date) = try ladderSetup(mode: .both)
+            try runtime.begin(piece: piece, division: division, at: date)
+            record(runtime, 35, date: date)
+            runtime.finish(at: date.addingTimeInterval(1))
+            let prior = try runtime.save(division: division, in: store.mainContext)
+            let baseline = division.coreDefinitionData
+            let priorRecords = prior.completions
+            try runtime.begin(piece: piece, division: division, at: date.addingTimeInterval(2))
+            record(runtime, 40, date: date.addingTimeInterval(3))
+            record(runtime, 42, date: date.addingTimeInterval(4))
+            XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 44)
+            let temporary = runtime.execution
+            let activeID = runtime.activeID
+            try runtime.requestExit(.ordinary)
+            XCTAssertEqual(runtime.activeID, activeID)
+            let destination = try runtime.resolveExit(choice, division: division, in: store.mainContext, at: date.addingTimeInterval(5))
+            XCTAssertEqual(prior.completions, priorRecords)
+            if choice == .cancel {
+                XCTAssertNil(destination)
+                XCTAssertEqual(runtime.activeID, activeID)
+                XCTAssertEqual(runtime.execution, temporary)
+                XCTAssertEqual(runtime.count, 2)
+                XCTAssertTrue(runtime.session.isRunning)
+                XCTAssertEqual(division.coreDefinitionData, baseline)
+                XCTAssertNil(runtime.exitRequest)
+            } else {
+                XCTAssertEqual(destination, .piece(piece.id))
+                XCTAssertNil(runtime.activeID)
+                XCTAssertNil(defaults.data(forKey: CoreSessionRuntime.draftKey))
+                XCTAssertNil(CoreSessionRuntime(defaults: defaults).activeID)
+                XCTAssertEqual(division.bothCount, choice == .save ? 3 : 1)
+                XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), choice == .save ? 2 : 1)
+                if choice == .discard { XCTAssertEqual(division.coreDefinitionData, baseline) }
+                try runtime.begin(piece: piece, division: division, at: date.addingTimeInterval(6))
+                XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, choice == .save ? 44 : 40)
+                XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.repsCompleted, 0)
+            }
+        }
+    }
+
+    func testNode4A05RetainsOriginalActionForEveryDecision() throws {
+        for action in 0..<4 {
+            for choice in [CoreExitChoice.save, .discard, .cancel] {
+                let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
+                let route: CoreRoute
+                switch action {
+                case 0: route = .startPractice(piece: UUID(), division: UUID())
+                case 1: route = .startPractice(piece: piece.id, division: UUID())
+                case 2: route = .archivePiece(piece.id)
+                default: route = .deletePiece(piece.id)
+                }
+                try runtime.begin(piece: piece, division: division, at: date)
+                record(runtime, 40, date: date)
+                try runtime.requestExit(.transition(route))
+                let result = try runtime.resolveExit(choice, division: division, in: store.mainContext, at: date)
+                XCTAssertEqual(result, choice == .cancel ? nil : .route(route))
+                XCTAssertEqual(runtime.activeID != nil, choice == .cancel)
+                XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), choice == .save ? 1 : 0)
+                XCTAssertFalse(piece.isArchived)
+                XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeSong>()), 1, "Guard never performs Delete itself")
+            }
+        }
+    }
+
+    func testNode4Hand05RejectsDiscardAndAllowsSaveOrCancel() throws {
+        let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
+        let route = CoreRoute.editDivision(piece: piece.id, division: division.id)
+        try runtime.begin(piece: piece, division: division, at: date)
+        record(runtime, 40, date: date)
+        try runtime.requestExit(.transition(route))
+        XCTAssertTrue(runtime.exitRequest!.saveOnly)
+        XCTAssertThrowsError(try runtime.resolveExit(.discard, division: division, in: store.mainContext))
+        XCTAssertEqual(runtime.count, 1)
+        XCTAssertNotNil(runtime.activeID)
+        XCTAssertNil(try runtime.resolveExit(.cancel, division: division, in: store.mainContext))
+        try runtime.requestExit(.transition(route))
+        XCTAssertEqual(try runtime.resolveExit(.save, division: division, in: store.mainContext, at: date), .route(route))
+        XCTAssertNil(runtime.activeID)
+        XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 1)
+    }
+
+    func testNode4EmptySaveCreatesNoFakeHistoryOrRecovery() throws {
+        let (store, piece, division, runtime, defaults, date) = try ladderSetup(mode: .both)
+        try runtime.begin(piece: piece, division: division, at: date)
+        try runtime.requestExit(.ordinary)
+        XCTAssertEqual(try runtime.resolveExit(.save, division: division, in: store.mainContext, at: date), .piece(piece.id))
+        XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+        XCTAssertNil(defaults.data(forKey: CoreSessionRuntime.draftKey))
+        XCTAssertNil(CoreSessionRuntime(defaults: defaults).activeID)
+    }
+
+    func testNode4FailedExitKeepsGuardAndProvisionalState() throws {
+        let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
+        try runtime.begin(piece: piece, division: division, at: date)
+        record(runtime, 40, date: date)
+        let original = runtime.execution
+        try runtime.requestExit(.ordinary)
+        let wrong = PracticeEvent(songID: piece.id, name: "wrong")
+        XCTAssertThrowsError(try runtime.resolveExit(.save, division: wrong, in: store.mainContext))
+        XCTAssertNotNil(runtime.activeID)
+        XCTAssertEqual(runtime.exitRequest, .ordinary)
+        XCTAssertEqual(runtime.execution, original)
+        XCTAssertTrue(runtime.session.isRunning)
+        XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+    }
+    func testNode4TransactionFailureRetainsActiveSessionAndAllowsRetry() throws {
+        let (store, piece, division, runtime, defaults, date) = try ladderSetup(mode: .both)
+        let before = division.coreDefinitionData
+        try runtime.begin(piece: piece, division: division, at: date)
+        record(runtime, 40, date: date)
+        let id = runtime.activeID
+        try runtime.requestExit(.ordinary)
+        enum DiskError: Error { case unavailable }
+        XCTAssertThrowsError(try runtime.resolveExit(.save, division: division, in: store.mainContext, at: date,
+            saving: { throw DiskError.unavailable }))
+        XCTAssertEqual(runtime.activeID, id)
+        XCTAssertTrue(runtime.session.isRunning)
+        XCTAssertEqual(runtime.count, 1)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 42)
+        XCTAssertEqual(runtime.exitRequest, .ordinary)
+        XCTAssertEqual(division.coreDefinitionData, before)
+        XCTAssertEqual(division.bothCount, 0)
+        XCTAssertNotNil(defaults.data(forKey: CoreSessionRuntime.draftKey))
+        XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+        XCTAssertEqual(try runtime.resolveExit(.save, division: division, in: store.mainContext, at: date), .piece(piece.id))
+        XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 1)
+    }
+
+}

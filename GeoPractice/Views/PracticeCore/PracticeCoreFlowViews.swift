@@ -491,18 +491,40 @@ private struct CoreGoalInputRow: View {
 }
 
 struct CoreSessionView: View {
+    @Query private var songs: [PracticeSong]
+    @Query private var events: [PracticeEvent]
     @Query private var attempts: [PracticeAttempt]
     @ObservedObject var runtime: CoreSessionRuntime
     @ObservedObject var engine: MetronomeEngine
     var isGeoBeat: Bool
     let openGeoBeat: () -> Void
     let finish: () -> Void
+    var onRoute: (CoreRoute) -> Void = { _ in }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
                 Text(isGeoBeat ? "GeoBeat" : "当前计划练习").font(.largeTitle.bold())
                 CoreTestLabel()
                 if let context = runtime.context {
+                    Menu("练习操作") {
+                        Menu("切换曲目") {
+                            ForEach(songs.filter { !$0.isArchived && $0.id != context.pieceID }) { piece in
+                                Menu(piece.name) {
+                                    ForEach(events.filter { $0.songID == piece.id && $0.coreDefinition?.hasValidGoal == true }) { division in
+                                        Button(division.name) { onRoute(.startPractice(piece: piece.id, division: division.id)) }
+                                    }
+                                }
+                            }
+                        }
+                        Menu("切换练习划分") {
+                            ForEach(events.filter { $0.songID == context.pieceID && $0.id != context.divisionID && $0.coreDefinition?.hasValidGoal == true }) { division in
+                                Button(division.name) { onRoute(.startPractice(piece: context.pieceID, division: division.id)) }
+                            }
+                        }
+                        Button("归档当前曲目") { onRoute(.archivePiece(context.pieceID)) }
+                        Button("删除当前曲目", role: .destructive) { onRoute(.deletePiece(context.pieceID)) }
+                        Button("编辑划分范围 / 适用手型") { onRoute(.editDivision(piece: context.pieceID, division: context.divisionID)) }
+                    }.accessibilityIdentifier("core.session.actions")
                     VStack(alignment: .leading, spacing: 8) {
                         Text("正在记录到当前 Session").font(.headline)
                         Text("《\(context.pieceName)》 · \(context.divisionName)")
@@ -857,6 +879,73 @@ struct CoreCycleStartView: View {
                     } catch { self.error = error.localizedDescription }
                 }.accessibilityIdentifier("core.cycle.confirm")
             }.toolbar { ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } } }
+        }
+    }
+}
+
+struct CoreExitDecisionView: View {
+    let saveOnly: Bool
+    let error: String?
+    let choose: (CoreExitChoice) -> Void
+    var body: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            Text(saveOnly ? "保存并结束后编辑" : "结束练习？").font(.title2.bold())
+            if saveOnly { Text("编辑划分范围或适用手型前，必须先保存并结束当前练习。") }
+            Button("保存并结束") { choose(.save) }.accessibilityIdentifier("core.exit.save")
+            if !saveOnly {
+                Button("不保存并结束", role: .destructive) { choose(.discard) }.accessibilityIdentifier("core.exit.discard")
+            }
+            Button("取消", role: .cancel) { choose(.cancel) }.accessibilityIdentifier("core.exit.cancel")
+            if let error { Text(error).foregroundStyle(.red).accessibilityIdentifier("core.exit.error") }
+        }.padding(24).presentationDetents([.medium])
+    }
+}
+
+// Node 4 owns the continuation boundary only. Lifecycle/edit mutations are deferred by explicit scope.
+struct CoreExitHandoffView: View {
+    let route: CoreRoute
+    let songs: [PracticeSong]
+    let events: [PracticeEvent]
+    @Environment(\.dismiss) private var dismiss
+    private var pieceID: UUID? {
+        switch route {
+        case .archivePiece(let id), .deletePiece(let id), .editDivision(let id, _): id
+        default: nil
+        }
+    }
+    private var title: String {
+        switch route {
+        case .archivePiece: "归档曲目"
+        case .deletePiece: "删除曲目？"
+        case .editDivision: "编辑练习划分"
+        default: ""
+        }
+    }
+    private var identifier: String {
+        switch route {
+        case .archivePiece: "core.continuation.archive"
+        case .deletePiece: "core.continuation.deleteConfirmation"
+        case .editDivision: "core.continuation.divisionEdit"
+        default: "core.continuation"
+        }
+    }
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    CoreTestLabel()
+                    Text(title).font(.headline).accessibilityIdentifier(identifier)
+                    Text(songs.first { $0.id == pieceID }?.name ?? "")
+                }
+                if case .editDivision(_, let id) = route,
+                   let division = events.first(where: { $0.id == id }), let definition = division.coreDefinition {
+                    Section {
+                        Text(division.name)
+                        Text("适用手型 · \(definition.handMode.label)")
+                    }
+                }
+            }.navigationTitle(title)
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
         }
     }
 }

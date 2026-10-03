@@ -204,11 +204,28 @@ enum CoreRoute: Equatable {
     case pieceSettings(UUID)
     case createDivision(piece: UUID, mode: CoreDivisionMode)
     case editGoal(piece: UUID, division: UUID)
+    case editDivision(piece: UUID, division: UUID)
+    case archivePiece(UUID), deletePiece(UUID)
     case startPractice(piece: UUID, division: UUID)
     case freePractice
     case geoBeat(activeSession: UUID?)
     case analyze(CoreAnalyzeContext)
     case resumeSession(UUID)
+}
+
+// Exit retains the original request; no intermediate Result destination is introduced.
+enum CoreExitRequest: Equatable {
+    case ordinary
+    case transition(CoreRoute)
+    var saveOnly: Bool {
+        if case .transition(.editDivision) = self { return true }
+        return false
+    }
+}
+enum CoreExitChoice { case save, discard, cancel }
+enum CoreExitDestination: Equatable {
+    case piece(UUID)
+    case route(CoreRoute)
 }
 
 struct CoreRecovery: Equatable {

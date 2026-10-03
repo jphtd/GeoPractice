@@ -68,14 +68,37 @@ struct CoreFixture {
         ]) : nil
         event.coreDefinitionData = try JSONEncoder().encode(CoreDivisionDefinition(first: 3, last: 3, handMode: name == "only-together" ? .both : name == "only-left" ? .left : name == "only-right" ? .right : .all, goal: goal))
         context.insert(event)
-        if name == "ladder-execution" || name == "ladder-open" || name == "ladder-short" || name == "ladder-cycle" {
+        if name == "ladder-execution" || name == "ladder-open" || name == "ladder-short" || name == "ladder-cycle" || name == "node4-exit" {
             let start = name == "ladder-open" ? 298 : name == "ladder-short" ? 100 : 40
             let target: CoreTargetSpeed? = name == "ladder-open" ? nil : CoreTargetSpeed(bpm: name == "ladder-short" ? 108 : 44)
-            let config = CoreLadderConfiguration(startBPM: start, stepBPM: ["ladder-execution", "ladder-cycle"].contains(name) ? 2 : 3, repsPerLevel: 1)
+            let config = CoreLadderConfiguration(startBPM: start, stepBPM: ["ladder-execution", "ladder-cycle", "node4-exit"].contains(name) ? 2 : 3, repsPerLevel: 1)
             let goal = CoreGoal(hands: Dictionary(uniqueKeysWithValues: PracticeHand.allCases.map {
                 ($0, CoreHandGoal(count: 5, speed: target, ladder: config))
             }), ladderEnabled: true, reset: CoreResetConfiguration())
             event.coreDefinitionData = try JSONEncoder().encode(CoreDivisionDefinition(first: 3, last: 3, handMode: .all, goal: goal))
+        }
+        if name == "node4-exit" {
+            var definition = event.coreDefinition!
+            definition.handMode = .both
+            event.coreDefinitionData = try JSONEncoder().encode(definition)
+            let qa = CoreSessionRuntime(defaults: UserDefaults(suiteName: "Node4Fixture.\(UUID())")!, restore: false)
+            let date = Date.now.addingTimeInterval(-60)
+            try qa.begin(piece: piece, division: event, at: date)
+            var preset = MetronomePreset.standard; preset.bpm = 35
+            qa.record(preset: preset, at: date.addingTimeInterval(1))
+            qa.finish(at: date.addingTimeInterval(2))
+            _ = try qa.save(division: event, in: context)
+            let otherDivision = PracticeEvent(songID: piece.id, name: "第 5 段")
+            var other = definition; other.first = 5; other.last = 5
+            otherDivision.coreDefinitionData = try JSONEncoder().encode(other)
+            context.insert(otherDivision)
+            let otherPiece = PracticeSong(name: "切换验证曲目")
+            otherPiece.coreStructureData = piece.coreStructureData
+            context.insert(otherPiece)
+            let target = PracticeEvent(songID: otherPiece.id, name: "第 1 段")
+            other.first = 1; other.last = 1
+            target.coreDefinitionData = try JSONEncoder().encode(other)
+            context.insert(target)
         }
         if name == "ladder-cycle" {
             let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Calendar.current.startOfDay(for: .now))!
@@ -110,7 +133,7 @@ struct CoreFixture {
         try context.save()
         switch name {
         case "piece": return CoreFixture(path: [.piece(piece.id)])
-        case "no-goal", "valid-goal", "long", "only-left", "only-right", "only-together", "ladder-history", "ladder-execution", "ladder-open", "ladder-short", "ladder-cycle":
+        case "no-goal", "valid-goal", "long", "only-left", "only-right", "only-together", "ladder-history", "ladder-execution", "ladder-open", "ladder-short", "ladder-cycle", "node4-exit":
             return CoreFixture(path: [.piece(piece.id), .division(piece: piece.id, division: event.id)])
         case "recovery":
             return CoreFixture(recovery: CoreRecovery(sessionID: UUID(), divisionID: event.id, pieceName: piece.name, divisionName: event.name))

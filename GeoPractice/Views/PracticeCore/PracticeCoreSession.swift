@@ -51,6 +51,7 @@ final class CoreSessionRuntime: ObservableObject {
     @Published private(set) var session = PracticeSession()
     @Published private(set) var context: CoreSessionContext?
     @Published private(set) var preset = MetronomePreset.standard
+    @Published private(set) var exitRequest: CoreExitRequest?
     @Published var needsRecovery = false
     @Published private(set) var failure: String?
     @Published private(set) var execution: CoreDivisionDefinition?
@@ -219,6 +220,46 @@ final class CoreSessionRuntime: ObservableObject {
         }
         persist(at: date)
     }
+    func requestExit(_ request: CoreExitRequest) throws {
+        guard context != nil else { throw CoreIntegrationError.wrongDestination }
+        guard exitRequest == nil else { return }
+        exitRequest = request
+    }
+
+    // Count and Ladder remain provisional until Save; Discard only releases the draft.
+    @discardableResult
+    func resolveExit(_ choice: CoreExitChoice, division: PracticeEvent, in modelContext: ModelContext,
+                     at date: Date = .now, saving: (() throws -> Void)? = nil) throws -> CoreExitDestination? {
+        guard let context, let request = exitRequest else { throw CoreIntegrationError.wrongDestination }
+        if choice == .cancel { exitRequest = nil; return nil }
+        guard division.id == context.divisionID && division.songID == context.pieceID else {
+            throw CoreIntegrationError.wrongDestination
+        }
+        if request.saveOnly && choice == .discard {
+            throw CoreFlowError.invalidInput("修改练习划分范围或适用手型前，必须保存并结束当前练习。")
+        }
+        let destination: CoreExitDestination
+        switch request {
+        case .ordinary: destination = .piece(context.pieceID)
+        case .transition(let route): destination = .route(route)
+        }
+        if choice == .save && count > 0 {
+            let originalSession = session
+            finish(at: date)
+            do { _ = try save(division: division, in: modelContext, saving: saving) }
+            catch {
+                session = originalSession
+                persist(at: date)
+                throw error
+            }
+        } else {
+            // SES-04: even Save & End does not manufacture an empty formal Session.
+            clear()
+        }
+        exitRequest = nil
+        return destination
+    }
+
     func finish(at date: Date = .now) {
         _ = session.finish(at: date)
         persist(at: date)
@@ -234,7 +275,7 @@ final class CoreSessionRuntime: ObservableObject {
         } catch { failure = error.localizedDescription }
     }
     @discardableResult
-    func save(division: PracticeEvent, in modelContext: ModelContext) throws -> PracticeAttempt {
+    func save(division: PracticeEvent, in modelContext: ModelContext, saving: (() throws -> Void)? = nil) throws -> PracticeAttempt {
         guard let context, context.divisionID == division.id, context.pieceID == division.songID,
               let summary = session.reviewSummary else { throw CoreIntegrationError.wrongDestination }
         guard !summary.completions.isEmpty else { throw CoreFlowError.noRecording }
@@ -243,7 +284,7 @@ final class CoreSessionRuntime: ObservableObject {
         let result: PracticeAttemptCommitResult
         do {
             result = try division.commit(summary: summary, in: modelContext,
-                                         coreContextData: JSONEncoder().encode(context))
+                                         coreContextData: JSONEncoder().encode(context), saving: saving ?? { try modelContext.save() })
         } catch {
             division.coreDefinitionData = oldDefinition
             throw error
@@ -257,7 +298,7 @@ final class CoreSessionRuntime: ObservableObject {
     }
     private func clear() {
         defaults.removeObject(forKey: Self.draftKey)
-        session.reset(); context = nil; execution = nil; needsRecovery = false
+        session.reset(); context = nil; execution = nil; needsRecovery = false; exitRequest = nil
     }
 }
 

@@ -64,7 +64,7 @@ struct PracticeCoreRootView: View {
         .sheet(isPresented: Binding(get: { sheetRoute != nil }, set: { if !$0 { sheetRoute = nil; navigation.cancel() } })) {
             if let sheetRoute {
                 switch sheetRoute {
-                case .archivePiece, .deletePiece, .editDivision:
+                case .archivePiece, .deletePiece:
                     CoreExitHandoffView(route: sheetRoute, songs: songs, events: events)
                 default:
                     CoreEditorView(route: sheetRoute, songs: songs, events: events,
@@ -239,6 +239,10 @@ struct PracticeCoreRootView: View {
                     Text(definition.label(mode: structure.mode)).coreType(.titleLarge).accessibilityAddTraits(.isHeader)
                     Text("适用手型 · \(definition.handMode.label)").coreType(.body).foregroundStyle(CorePalette.secondary)
                 }
+                CoreNavigationRow(title: "编辑练习划分") {
+                    request(.editDivision(piece: piece.id, division: division.id))
+                }
+                .padding(.top, 24)
                 VStack(alignment: .leading, spacing: 12) {
                     section("Goal")
                     if definition.hasValidGoal {

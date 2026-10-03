@@ -45,21 +45,40 @@ struct CoreEditorView: View {
 
     private var piece: PracticeSong? {
         let id: UUID?
+
         switch route {
-        case .createDivision(let value, _), .pieceSettings(let value): id = value
-        case .editGoal(let value, _): id = value
-        default: id = nil
+        case .createDivision(let value, _):
+            id = value
+
+        case .editDivision(let value, _):
+            id = value
+
+        case .editGoal(let value, _):
+            id = value
+
+        case .pieceSettings(let value):
+            id = value
+
+        default:
+            id = nil
         }
+
         return songs.first { $0.id == id }
     }
     private var division: PracticeEvent? {
-        if case .editGoal(_, let id) = route { return events.first { $0.id == id } }
-        return nil
+        switch route {
+        case .editGoal(_, let id), .editDivision(_, let id):
+            return events.first { $0.id == id }
+
+        default:
+            return nil
+        }
     }
     private var title: String {
         switch route {
         case .addPiece: "添加曲目"
         case .createDivision: "创建练习划分"
+        case .editDivision: "编辑练习划分"
         case .editGoal: division?.coreDefinition?.hasValidGoal == true ? "编辑 Goal" : "设置 Goal"
         case .pieceSettings: "曲目设置"
         default: "全部曲目"
@@ -81,41 +100,67 @@ struct CoreEditorView: View {
                         }
                         TextField("总数（可选）", text: $total).keyboardType(.numberPad)
                     }
-                case .createDivision:
+                case .createDivision, .editDivision:
                     Section("《\(piece?.name ?? "")》 · \(piece?.coreStructure?.label ?? "")") {
-                        Text(piece?.coreStructure?.mode == .sections ? "段落范围" : "小节范围").coreType(.titleSmall)
+                        Text(piece?.coreStructure?.mode == .sections ? "段落范围" : "小节范围")
+                            .coreType(.titleSmall)
+
                         LabeledContent(piece?.coreStructure?.mode == .sections ? "起始段落" : "起始小节") {
-                            TextField("", text: $first).multilineTextAlignment(.trailing).keyboardType(.numberPad)
+                            TextField("", text: $first)
+                                .multilineTextAlignment(.trailing)
+                                .keyboardType(.numberPad)
                                 .accessibilityIdentifier("core.division.first")
                         }
+
                         LabeledContent(piece?.coreStructure?.mode == .sections ? "结束段落" : "结束小节") {
-                            TextField("", text: $last).multilineTextAlignment(.trailing).keyboardType(.numberPad)
+                            TextField("", text: $last)
+                                .multilineTextAlignment(.trailing)
+                                .keyboardType(.numberPad)
                                 .accessibilityIdentifier("core.division.last")
                         }
-                        Text("范围不能与现有划分重叠，可以保留未划分区域。").coreType(.caption)
+
+                        Text("范围不能与现有划分重叠，可以保留未划分区域。")
+                            .coreType(.caption)
                     }
+
                     Section("适用手型") {
                         ForEach(CoreHandMode.allCases, id: \.self) { mode in
-                            Button { handMode = mode } label: {
+                            Button {
+                                handMode = mode
+                            } label: {
                                 HStack {
                                     Text(mode.label).coreType(.body)
                                     Spacer()
                                     Image(systemName: handMode == mode ? "checkmark.circle.fill" : "circle")
-                                }.foregroundStyle(CorePalette.primary).padding(.vertical, 8)
-                            }.accessibilityAddTraits(handMode == mode ? .isSelected : [])
-                                .accessibilityIdentifier("core.division.hand.\(mode.rawValue)")
+                                }
+                                .foregroundStyle(CorePalette.primary)
+                                .padding(.vertical, 8)
+                            }
+                            .accessibilityAddTraits(handMode == mode ? .isSelected : [])
+                            .accessibilityIdentifier("core.division.hand.\(mode.rawValue)")
                         }
                     }
-                    Section("Goal（可选）") {
-                        if setupGoal {
-                            CoreButton(title: "暂不设置 Goal", kind: .tertiary) { setupGoal = false }
-                        } else {
-                            Text("暂不设置 Goal").coreType(.body)
-                            CoreButton(title: "同时设置 Goal", kind: .secondary) { setupGoal = true }
+
+                    if case .createDivision = route {
+                        Section("Goal（可选）") {
+                            if setupGoal {
+                                CoreButton(title: "暂不设置 Goal", kind: .tertiary) {
+                                    setupGoal = false
+                                }
+                            } else {
+                                Text("暂不设置 Goal").coreType(.body)
+
+                                CoreButton(title: "同时设置 Goal", kind: .secondary) {
+                                    setupGoal = true
+                                }
                                 .accessibilityIdentifier("core.division.enableGoal")
+                            }
+                        }
+
+                        if setupGoal {
+                            goalFields(for: handMode)
                         }
                     }
-                    if setupGoal { goalFields(for: handMode) }
                 case .editGoal:
                     if let mode = division?.coreDefinition?.handMode {
                         Section {
@@ -174,12 +219,31 @@ struct CoreEditorView: View {
         }
     }
     private var isEditable: Bool {
-        switch route { case .createDivision, .editGoal: true; default: false }
+        switch route {
+        case .createDivision, .editDivision, .editGoal:
+            return true
+        default:
+            return false
+        }
     }
     private var isCreating: Bool { if case .createDivision = route { true } else { false } }
     private var hasUnsavedChanges: Bool {
-        if isCreating { return !first.isEmpty || !last.isEmpty || handMode != .all || setupGoal || goals != initialGoals || reset != initialReset }
-        if case .editGoal = route { return goals != initialGoals || ladderEnabled != initialLadderEnabled || reset != initialReset }
+        if isCreating {
+            return !first.isEmpty || !last.isEmpty || handMode != .all || setupGoal || goals != initialGoals ||
+                reset != initialReset
+        }
+
+        if case .editDivision = route,
+           let definition = division?.coreDefinition {
+            return first != String(definition.first) ||
+                last != String(definition.last) ||
+                handMode != definition.handMode
+        }
+
+        if case .editGoal = route {
+            return goals != initialGoals || ladderEnabled != initialLadderEnabled || reset != initialReset
+        }
+
         return false
     }
     private func cancel() {
@@ -348,6 +412,15 @@ struct CoreEditorView: View {
     }
     private func populate() {
         guard !didPopulate else { return }; didPopulate = true
+        if case .editDivision = route {
+            guard let definition = division?.coreDefinition else { return }
+
+            first = String(definition.first)
+            last = String(definition.last)
+            handMode = definition.handMode
+
+            return
+        }
         guard let goal = division?.coreDefinition?.goal else { return }
         let displayed = division?.coreDefinition?.nextCycleGoal ?? goal
         goals = displayed.hands.mapValues { value in
@@ -430,6 +503,28 @@ struct CoreEditorView: View {
                         goal: setupGoal ? try basicGoal(for: handMode) : nil),
                     context: modelContext, activeSessionID: activeSessionID, isPro: canConfigurePro)
                 onSaved(page)
+            case .editDivision:
+                guard let piece,
+                      let division,
+                      var definition = division.coreDefinition,
+                      let first = try optionalPositive(first, label: "起始位置"),
+                      let last = try optionalPositive(last, label: "结束位置") else {
+                    throw CoreFlowError.invalidInput("请填写起始和结束位置。")
+                }
+
+                definition.first = first
+                definition.last = last
+                definition.handMode = handMode
+
+                onSaved(
+                    try CoreContracts.saveEditedDivision(
+                        piece: piece,
+                        division: division,
+                        definition: definition,
+                        context: modelContext,
+                        activeSessionID: activeSessionID
+                    )
+                )
             case .editGoal:
                 guard let division, let definition = division.coreDefinition, let piece else { throw CoreIntegrationError.missingMetadata }
                 let goal = try basicGoal(for: definition.handMode)

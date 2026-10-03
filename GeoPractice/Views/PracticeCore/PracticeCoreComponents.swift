@@ -159,15 +159,25 @@ struct CoreActionCard: View {
 }
 
 struct CoreNavigationRow: View {
+    let title: String
     let action: () -> Void
+
+    init(title: String = "查看分析", action: @escaping () -> Void) {
+        self.title = title
+        self.action = action
+    }
+
     var body: some View {
         Button(action: action) {
             HStack(spacing: 12) {
-                Text("查看分析").coreType(.label)
+                Text(title).coreType(.label)
                 Spacer()
                 Image(systemName: "chevron.right").accessibilityHidden(true)
-            }.frame(minHeight: 44).contentShape(Rectangle())
-        }.buttonStyle(CorePressStyle())
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(CorePressStyle())
     }
 }
 

@@ -434,6 +434,57 @@ enum CoreContracts {
         do { try context.save() } catch { context.delete(event); throw error }
         return .piece(piece.id)
     }
+    
+    static func saveEditedDivision(
+        piece: PracticeSong,
+        division: PracticeEvent,
+        definition: CoreDivisionDefinition,
+        context: ModelContext,
+        activeSessionID: UUID?
+    ) throws -> CorePage {
+        guard activeSessionID == nil else {
+            throw CoreIntegrationError.activeSession
+        }
+
+        guard let structure = piece.coreStructure else {
+            throw CoreIntegrationError.missingMetadata
+        }
+
+        let pieceID = piece.id
+
+        let existing = try context.fetch(
+            FetchDescriptor<PracticeEvent>(
+                predicate: #Predicate { $0.songID == pieceID }
+            )
+        )
+
+        guard existing.allSatisfy({ $0.coreDefinition != nil }) else {
+            throw CoreIntegrationError.missingMetadata
+        }
+
+        let otherDefinitions = existing
+            .filter { $0.id != division.id }
+            .compactMap(\.coreDefinition)
+
+        try validateDivision(
+            definition,
+            structure: structure,
+            existing: otherDefinitions
+        )
+
+        division.name = definition.label(mode: structure.mode)
+        division.coreDefinitionData = try JSONEncoder().encode(definition)
+        division.updatedAt = .now
+
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
+
+        return .division(piece: piece.id, division: division.id)
+    }
 
     static func startRoute(piece: UUID, division: UUID, definition: CoreDivisionDefinition,
                            activeSessionID: UUID?) throws -> CoreRoute {

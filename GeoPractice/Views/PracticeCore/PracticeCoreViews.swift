@@ -15,6 +15,8 @@ struct PracticeCoreRootView: View {
     @StateObject private var engine = MetronomeEngine()
     @State private var selectedTab = "Practice"
     @State private var sheetRoute: CoreRoute?
+    @State private var recentlyDeletedUndoID: UUID?
+    @State private var showUndoSuccess = false
     @State private var initialHandRoute: CoreRoute?
     @State private var selectedInitialHand: (piece: UUID, division: UUID, hand: PracticeHand)?
     @State private var cycleStartRequest: (piece: UUID, division: UUID, hand: PracticeHand?, definition: CoreDivisionDefinition, hands: [PracticeHand])?
@@ -56,8 +58,71 @@ struct PracticeCoreRootView: View {
         }
         .tint(CorePalette.accent)
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            CoreBottomNavigation(activeSessionID: runtime.activeID ?? recovery?.sessionID,
-                selectedTab: selectedTab, onPractice: { selectedTab = "Practice" }, onRoute: request)
+            VStack(spacing: 8) {
+                if recentlyDeletedUndoID != nil || showUndoSuccess {
+                    ZStack {
+                        HStack(spacing: 14) {
+                            Text("已移至最近删除")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(CorePalette.primary)
+
+                            Button("撤销") {
+                                undoRecentlyDeletedPiece()
+                            }
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(CorePalette.accent)
+                        }
+                        .opacity(showUndoSuccess ? 0 : 1)
+                        .scaleEffect(showUndoSuccess ? 0.92 : 1)
+
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 15, weight: .bold))
+                            .foregroundStyle(CorePalette.accent)
+                            .opacity(showUndoSuccess ? 1 : 0)
+                            .scaleEffect(showUndoSuccess ? 1 : 0.65)
+                    }
+                    .frame(
+                        width: showUndoSuccess ? 40 : 196,
+                        height: 40
+                    )
+                    .background(
+                        ZStack {
+                            Capsule()
+                                .fill(.regularMaterial)
+
+                            Capsule()
+                                .fill(CorePalette.accent.opacity(0.08))
+                        }
+                    )
+                    .overlay {
+                        Capsule()
+                            .stroke(
+                                CorePalette.accent.opacity(0.16),
+                                lineWidth: 0.5
+                            )
+                    }
+                    .shadow(
+                        color: .black.opacity(0.10),
+                        radius: 10,
+                        y: 4
+                    )
+                    .frame(maxWidth: .infinity)
+                    .animation(
+                        .spring(
+                            response: 0.42,
+                            dampingFraction: 0.72,
+                            blendDuration: 0.1
+                        ),
+                        value: showUndoSuccess
+                    )
+                }
+                CoreBottomNavigation(
+                    activeSessionID: runtime.activeID ?? recovery?.sessionID,
+                    selectedTab: selectedTab,
+                    onPractice: { selectedTab = "Practice" },
+                    onRoute: request
+                )
+            }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             if fixture != nil { Text("Debug 场景 · 数据不持久保存。真实流程测试请关闭启动参数。")
@@ -75,16 +140,14 @@ struct PracticeCoreRootView: View {
                         events: events,
                         activeSessionID: runtime.activeID ?? recovery?.sessionID,
                         onCompleted: {
-                            self.sheetRoute = nil
-                            selectedTab = "Practice"
-
-                            if case .deletePiece = sheetRoute, subscription.isPro {
-                                navigation.path = [.recentlyDeleted]
-                            } else {
-                                navigation.path = []
+                            if case .deletePiece(let id) = sheetRoute, subscription.isPro {
+                                recentlyDeletedUndoID = id
                             }
 
+                            self.sheetRoute = nil
+                            navigation.path = []
                             navigation.cancel()
+                            selectedTab = "Practice"
                         },
                         onCancel: {
                             switch sheetRoute {
@@ -464,6 +527,45 @@ struct PracticeCoreRootView: View {
             }
         } catch { boundaryMessage = error.localizedDescription }
     }
+    private func undoRecentlyDeletedPiece() {
+        guard
+            let id = recentlyDeletedUndoID,
+            let piece = songs.first(where: {
+                $0.id == id && $0.deletedAt != nil
+            })
+        else {
+            recentlyDeletedUndoID = nil
+            return
+        }
+
+        do {
+            try CoreContracts.restoreRecentlyDeletedPiece(
+                piece: piece,
+                context: modelContext,
+                isPro: subscription.isPro
+            )
+
+            withAnimation(
+                .spring(
+                    response: 0.42,
+                    dampingFraction: 0.72,
+                    blendDuration: 0.1
+                )
+            ) {
+                showUndoSuccess = true
+                recentlyDeletedUndoID = nil
+            }
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
+                withAnimation(.easeOut(duration: 0.2)) {
+                    showUndoSuccess = false
+                }
+            }
+        } catch {
+            boundaryMessage = error.localizedDescription
+        }
+    }
+
     private func startPractice(piece pieceID: UUID, division divisionID: UUID, initialHand: PracticeHand? = nil, confirmedStarts: [PracticeHand: Int]? = nil) throws {
         guard recovery == nil, !pendingLegacySession else { throw CoreIntegrationError.activeSession }
         guard let piece = songs.first(where: { $0.id == pieceID && $0.deletedAt == nil }),

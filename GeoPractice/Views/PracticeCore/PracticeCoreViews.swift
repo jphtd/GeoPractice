@@ -142,8 +142,16 @@ struct PracticeCoreRootView: View {
                         onCompleted: {
                             if case .deletePiece(let id) = sheetRoute, subscription.isPro {
                                 recentlyDeletedUndoID = id
-                            }
+                                showUndoSuccess = false
 
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+                                    if recentlyDeletedUndoID == id && !showUndoSuccess {
+                                        withAnimation(.easeOut(duration: 0.2)) {
+                                            recentlyDeletedUndoID = nil
+                                        }
+                                    }
+                                }
+                            }
                             self.sheetRoute = nil
                             navigation.path = []
                             navigation.cancel()

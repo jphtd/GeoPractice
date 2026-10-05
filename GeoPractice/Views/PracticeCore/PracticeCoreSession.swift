@@ -89,7 +89,7 @@ final class CoreSessionRuntime: ObservableObject {
                calendar: Calendar = .current, confirmedStarts: [PracticeHand: Int] = [:]) throws {
         guard failure == nil else { throw CoreFlowError.damagedDraft }
         guard context == nil else { throw CoreIntegrationError.activeSession }
-        guard division.songID == piece.id, let definition = division.coreDefinition,
+        guard piece.deletedAt == nil, division.songID == piece.id, let definition = division.coreDefinition,
               let structure = piece.coreStructure, definition.fits(structure),
               let goal = definition.goal, goal.isValid(for: definition.handMode) else { throw CoreIntegrationError.invalidGoal }
         // Resolve before any session, draft, or context mutation. Multi-hand never defaults.

@@ -19,6 +19,7 @@ struct CoreEditorView: View {
     let events: [PracticeEvent]
     let activeSessionID: UUID?
     let onSaved: (CorePage) -> Void
+    var onRoute: (CoreRoute) -> Void = { _ in }
     @State private var name = ""
     @State private var mode = CoreDivisionMode.measures
     @State private var total = ""
@@ -63,7 +64,7 @@ struct CoreEditorView: View {
             id = nil
         }
 
-        return songs.first { $0.id == id }
+        return songs.first { $0.id == id && $0.deletedAt == nil }
     }
     private var division: PracticeEvent? {
         switch route {
@@ -170,19 +171,52 @@ struct CoreEditorView: View {
                         goalFields(for: mode)
                     }
                 case .pieceSettings:
-                    if let piece, let structure = piece.coreStructure {
+                    if let piece {
                         Section("《\(piece.name)》") {
+                          if let structure = piece.coreStructure {
                             Text(structure.label)
                             NavigationLink("创建练习划分") {
                                 CoreEditorView(route: .createDivision(piece: piece.id, mode: structure.mode),
                                     songs: songs, events: events, activeSessionID: activeSessionID, onSaved: onSaved)
                             }
                             Text("本测试版本保留曲目结构，不提供结构重划或历史迁移。").font(.caption)
+                          }
+                            if piece.isArchived {
+                                Text("已归档 · 练习历史保留")
+
+                                Section("归档") {
+                                    Button {
+                                        onRoute(.unarchivePiece(piece.id))
+                                    } label: {
+                                        Label("取消归档", systemImage: "archivebox")
+                                    }
+                                }
+                            } else {
+                                Section("归档") {
+                                    Button {
+                                        onRoute(.archivePiece(piece.id))
+                                    } label: {
+                                        Label("归档曲目", systemImage: "archivebox")
+                                    }
+                                }
+                            }
+                            Section("删除") {
+                            Button("删除曲目", role: .destructive) {
+                                onRoute(.deletePiece(piece.id))
+                            }
                         }
                     }
+                    }
                 default:
-                    ForEach(songs) { song in
+                    ForEach(songs.filter { $0.deletedAt == nil }) { song in
                         Button(song.name) { onSaved(.piece(song.id)); dismiss() }
+                    }
+                    if subscription.isPro {
+                        Section {
+                            NavigationLink("Piece Recently Deleted") {
+                                CoreRecentlyDeletedView()
+                            }
+                        }
                     }
                 }
                 if let error { Section { Text(error).foregroundStyle(.red) } }
@@ -622,7 +656,7 @@ struct CoreSessionView: View {
                 if let context = runtime.context {
                     Menu("练习操作") {
                         Menu("切换曲目") {
-                            ForEach(songs.filter { !$0.isArchived && $0.id != context.pieceID }) { piece in
+                            ForEach(songs.filter { $0.deletedAt == nil && !$0.isArchived && $0.id != context.pieceID }) { piece in
                                 Menu(piece.name) {
                                     ForEach(events.filter { $0.songID == piece.id && $0.coreDefinition?.hasValidGoal == true }) { division in
                                         Button(division.name) { onRoute(.startPractice(piece: piece.id, division: division.id)) }
@@ -857,6 +891,7 @@ struct CoreAnalyzeView: View {
     }
     private var filteredEvents: [PracticeEvent] {
         events.filter { event in
+            guard songs.contains(where: { $0.id == event.songID && $0.deletedAt == nil }) else { return false }
             switch scope {
             case .overall: return event.coreDefinition != nil
             case .piece(let piece): return event.songID == piece
@@ -1089,12 +1124,172 @@ struct CoreExitDecisionView: View {
     }
 }
 
-// Node 4 owns the continuation boundary only. Lifecycle/edit mutations are deferred by explicit scope.
+struct CoreRecentlyDeletedView: View {
+    @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var subscription: SubscriptionStore
+    @Query private var songs: [PracticeSong]
+
+    @State private var error: String?
+
+    private var deletedPieces: [PracticeSong] {
+        songs
+            .filter { $0.deletedAt != nil }
+            .sorted {
+                ($0.deletedAt ?? .distantPast) > ($1.deletedAt ?? .distantPast)
+            }
+    }
+
+    var body: some View {
+        Form {
+            if subscription.isPro {
+                if deletedPieces.isEmpty {
+                    Section {
+                        Text("没有最近删除的曲目。")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
+                    ForEach(deletedPieces) { piece in
+                        Section {
+                            Text(piece.name)
+
+                            Text("Recently Deleted")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            Text("7 天保留期内可以恢复；保留期结束后将永久删除。")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+
+                            if let expiration = piece.deletionExpiresAt {
+                                Text("永久删除时间：\(expiration.formatted(date: .abbreviated, time: .shortened))")
+                                    .font(.caption)
+                            }
+
+                            Button("恢复") {
+                                restore(piece)
+                            }
+                        }
+                    }
+                }
+
+                if let error {
+                    Section {
+                        Text(error)
+                            .foregroundStyle(.red)
+                    }
+                }
+            }
+        }
+        .navigationTitle("Piece Recently Deleted")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear { if !subscription.isPro { dismiss() } }
+        .onChange(of: subscription.isPro) { _, isPro in if !isPro { dismiss() } }
+    }
+
+    private func restore(_ piece: PracticeSong) {
+        do {
+            try CoreContracts.restoreRecentlyDeletedPiece(
+                piece: piece,
+                context: modelContext,
+                isPro: subscription.isPro
+            )
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+}
+struct CoreArchiveView: View {
+    @Query(sort: [SortDescriptor(\PracticeSong.sortIndex), SortDescriptor(\PracticeSong.createdAt)]) private var songs: [PracticeSong]
+    @Environment(\.dismiss) private var dismiss
+    let activeSessionID: UUID?
+    let onRoute: (CoreRoute) -> Void
+    private var archivedPieces: [PracticeSong] { songs.filter { $0.isArchived && $0.deletedAt == nil } }
+    var body: some View {
+        NavigationStack {
+            Form {
+                if archivedPieces.isEmpty {
+                    ContentUnavailableView("暂无归档曲目", systemImage: "archivebox",
+                        description: Text("归档的曲目会显示在这里，练习历史仍然保留。"))
+                } else {
+                    Section {
+                        ForEach(archivedPieces) { piece in
+                            Button { onRoute(.pieceSettings(piece.id)) } label: {
+                                VStack(alignment: .leading) {
+                                    Text(piece.name)
+                                    Text("已归档 · 管理曲目").font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        }
+                    }
+                    Section {
+                        Button("删除全部已归档曲目", role: .destructive) { onRoute(.deleteAllArchivedPieces) }
+                    }
+                }
+            }.navigationTitle("已归档曲目")
+                .navigationBarTitleDisplayMode(.inline)
+            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }       }
+    }
+}
+
+// A05 completes the Session before presenting this confirmation.
 struct CoreExitHandoffView: View {
     let route: CoreRoute
     let songs: [PracticeSong]
     let events: [PracticeEvent]
+    var activeSessionID: UUID? = nil
+
     @Environment(\.dismiss) private var dismiss
+    @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var subscription: SubscriptionStore
+
+    @State private var error: String?
+
+    var onCompleted: () -> Void = {}
+    var onCancel: () -> Void = {}
+    private func confirmDelete(_ piece: PracticeSong) {
+        do {
+            switch subscription.effectiveAccessState {
+            case .checking:
+                error = "正在确认订阅状态，请稍后再试。"
+
+            case .entitled:
+                try CoreContracts.movePieceToRecentlyDeleted(
+                    piece: piece,
+                    context: modelContext,
+                    activeSessionID: activeSessionID,
+                    isPro: subscription.isPro
+                )
+                onCompleted()
+                dismiss()
+
+            case .notEntitled:
+                try CoreContracts.permanentlyDeletePiece(
+                    piece: piece,
+                    context: modelContext,
+                    activeSessionID: activeSessionID
+                )
+                onCompleted()
+                dismiss()
+            }
+        } catch {
+            self.error = error.localizedDescription
+        }
+    }
+    private func confirmArchive(_ piece: PracticeSong) {
+        do {
+            try CoreContracts.archivePiece(piece: piece, context: modelContext, activeSessionID: activeSessionID)
+            onCompleted(); dismiss()
+        } catch { self.error = error.localizedDescription}
+    }
+    private func confirmBulkDelete() {
+        guard subscription.effectiveAccessState != .checking else { return }
+        do {
+            try CoreContracts.deleteAllArchivedPieces(context: modelContext,
+                activeSessionID: activeSessionID, isPro: subscription.isPro)
+            onCompleted(); dismiss()
+        } catch { self.error = error.localizedDescription }
+    }
     private var pieceID: UUID? {
         switch route {
         case .archivePiece(let id), .deletePiece(let id), .editDivision(let id, _): id
@@ -1103,7 +1298,8 @@ struct CoreExitHandoffView: View {
     }
     private var title: String {
         switch route {
-        case .archivePiece: "归档曲目"
+        case .archivePiece: "归档曲目？"
+        case .deleteAllArchivedPieces: subscription.isPro ? "删除全部已归档曲目？" : "永久删除全部已归档曲目？"
         case .deletePiece: "删除曲目？"
         case .editDivision: "编辑练习划分"
         default: ""
@@ -1112,6 +1308,7 @@ struct CoreExitHandoffView: View {
     private var identifier: String {
         switch route {
         case .archivePiece: "core.continuation.archive"
+        case .deleteAllArchivedPieces: "core.archive.deleteAllConfirmation"
         case .deletePiece: "core.continuation.deleteConfirmation"
         case .editDivision: "core.continuation.divisionEdit"
         default: "core.continuation"
@@ -1125,6 +1322,69 @@ struct CoreExitHandoffView: View {
                     Text(title).font(.headline).accessibilityIdentifier(identifier)
                     Text(songs.first { $0.id == pieceID }?.name ?? "")
                 }
+                if case .archivePiece = route,
+                   let piece = songs.first(where: { $0.id == pieceID && $0.deletedAt == nil }) {
+                    Section { Text("这首曲目将离开当前练习，已有练习历史继续保留。归档不会删除曲目，也不会进入最近删除。") }
+                    Section {
+                        Button("归档曲目") { confirmArchive(piece) }
+                        Button("取消", role: .cancel) { onCancel() }                    }
+                    if let error { Section { Text(error).foregroundStyle(.red) } }
+                }
+                if case .deleteAllArchivedPieces = route {
+                    Section {
+                        switch subscription.effectiveAccessState {
+                        case .checking: Text("正在确认订阅状态…")
+                        case .entitled: Text("所有已归档曲目将进入 Piece Recently Deleted，保留 7 天；期间可以恢复为已归档状态，到期后永久删除。")
+                        case .notEntitled: Text("所有已归档曲目将被永久删除。此操作无法撤销。")
+                        }
+                    }
+                    Section {
+                        Button(subscription.isPro ? "删除全部" : "全部永久删除", role: .destructive) { confirmBulkDelete() }
+                            .disabled(subscription.effectiveAccessState == .checking)
+                        Button("取消", role: .cancel) { onCancel() }
+                    }
+                    if let error { Section { Text(error).foregroundStyle(.red) } }
+                }
+                if case .deletePiece = route,
+                   let piece = songs.first(where: { $0.id == pieceID }) {
+
+                    Section {
+                        switch subscription.effectiveAccessState {
+                        case .checking:
+                            Text("正在确认订阅状态…")
+                                .foregroundStyle(.secondary)
+
+                        case .entitled:
+                            Text("这首曲目将进入 Piece Recently Deleted，并保留 7 天。保留期内可以恢复；到期后将永久删除。")
+                                .foregroundStyle(.secondary)
+
+                        case .notEntitled:
+                            Text("这首曲目将被永久删除。此操作无法撤销。")
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    Section {
+                        Button(
+                            subscription.isPro ? "删除曲目" : "永久删除",
+                            role: .destructive
+                        ) {
+                            confirmDelete(piece)
+                        }
+                        .disabled(subscription.effectiveAccessState == .checking)
+
+                        Button("取消", role: .cancel) {
+                            dismiss()
+                        }
+                    }
+
+                    if let error {
+                        Section {
+                            Text(error)
+                                .foregroundStyle(.red)
+                        }
+                    }
+                }
                 if case .editDivision(_, let id) = route,
                    let division = events.first(where: { $0.id == id }), let definition = division.coreDefinition {
                     Section {
@@ -1133,7 +1393,7 @@ struct CoreExitHandoffView: View {
                     }
                 }
             }.navigationTitle(title)
-                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { onCancel() } } }
         }
     }
 }

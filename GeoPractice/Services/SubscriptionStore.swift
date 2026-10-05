@@ -66,7 +66,16 @@ final class SubscriptionStore: ObservableObject {
     @Published private(set) var isBusy = false
     @Published private(set) var message: String?
 
-    var isPro: Bool { accessState == .entitled }
+    var effectiveAccessState: AccessState {
+    #if DEBUG
+        if ProcessInfo.processInfo.arguments.contains("-practice-core-pro") {
+            return .entitled
+        }
+    #endif
+        return accessState
+    }
+
+    var isPro: Bool { effectiveAccessState == .entitled }
     var canMakePayments: Bool { AppStore.canMakePayments }
 
     private var isPreparing = false

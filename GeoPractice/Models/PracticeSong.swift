@@ -12,6 +12,8 @@ final class PracticeSong {
     var coreStructureData: Data?
     var group: String
     var isArchived: Bool
+    var deletedAt: Date?
+    var deletionExpiresAt: Date? { deletedAt?.addingTimeInterval(7 * 24 * 60 * 60) }
     var multiplier: Int
     var resetsDaily: Bool
     var endDate: Date
@@ -425,7 +427,7 @@ final class PracticeLibraryStore: ObservableObject {
         let now = Date.now
         let calendar = Calendar.autoupdatingCurrent
         var didAutoArchive = false
-        for song in songModels where !song.isArchived
+        for song in songModels where song.deletedAt == nil && !song.isArchived
             && Self.hasPassedEndDate(song.endDate, now: now, calendar: calendar) {
             song.isArchived = true
             song.updatedAt = now
@@ -448,7 +450,11 @@ final class PracticeLibraryStore: ObservableObject {
         songIDByEventID = eventModels.reduce(into: [:]) { result, event in
             if let songID = event.songID { result[event.id] = songID }
         }
-        records = attempts.map { attempt in
+        let deletedSongIDs = Set(songModels.filter { $0.deletedAt != nil }.map(\.id))
+        records = attempts.filter { attempt in
+            guard let songID = eventsByID[attempt.eventID]?.songID else { return true }
+            return !deletedSongIDs.contains(songID)
+        }.map { attempt in
             attempt.makeStatisticsSnapshot(
                 eventNameFallback: eventsByID[attempt.eventID]?.name ?? "未命名练习"
             )
@@ -458,7 +464,7 @@ final class PracticeLibraryStore: ObservableObject {
             return $0.id.uuidString < $1.id.uuidString
         }
 
-        songs = songModels.map { song in
+        songs = songModels.filter { $0.deletedAt == nil }.map { song in
             let childEvents = eventModels
                 .filter { $0.songID == song.id }
                 .sorted(by: Self.eventOrder)
@@ -1817,6 +1823,7 @@ private struct PracticeLibraryBackupDocument: Codable {
         let coreStructureData: Data?
         let group: String
         let isArchived: Bool
+        let deletedAt: Date?
         let multiplier: Int
         let resetsDaily: Bool
         let endDate: Date
@@ -1830,6 +1837,7 @@ private struct PracticeLibraryBackupDocument: Codable {
             coreStructureData = value.coreStructureData
             group = value.group
             isArchived = value.isArchived
+            deletedAt = value.deletedAt
             multiplier = 1
             resetsDaily = value.resetsDaily
             endDate = value.endDate
@@ -1851,11 +1859,13 @@ private struct PracticeLibraryBackupDocument: Codable {
                 createdAt: createdAt,
                 updatedAt: updatedAt
             )
+            value.deletedAt = deletedAt
             value.coreStructureData = coreStructureData
             return value
         }
 
         func apply(to value: PracticeSong) {
+            value.deletedAt = deletedAt
             value.coreStructureData = coreStructureData
             value.id = id
             value.name = name

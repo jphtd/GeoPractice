@@ -192,6 +192,7 @@ extension PracticeEvent {
 enum CorePage: Hashable {
     case piece(UUID)
     case division(piece: UUID, division: UUID)
+    case recentlyDeleted
 }
 
 enum CoreAnalyzeContext: Hashable {
@@ -200,12 +201,12 @@ enum CoreAnalyzeContext: Hashable {
 
 // Typed outgoing contracts; a request alone NEVER starts a session or changes data.
 enum CoreRoute: Equatable {
-    case addPiece, allPieces
+    case addPiece, allPieces, archivedPieces, deleteAllArchivedPieces
     case pieceSettings(UUID)
     case createDivision(piece: UUID, mode: CoreDivisionMode)
     case editGoal(piece: UUID, division: UUID)
     case editDivision(piece: UUID, division: UUID)
-    case archivePiece(UUID), deletePiece(UUID)
+    case archivePiece(UUID), unarchivePiece(UUID), deletePiece(UUID)
     case startPractice(piece: UUID, division: UUID)
     case freePractice
     case geoBeat(activeSession: UUID?)
@@ -259,6 +260,182 @@ enum CoreIntegrationError: LocalizedError {
 
 @MainActor
 enum CoreContracts {
+    static func archivePiece(piece: PracticeSong, context: ModelContext,
+                             activeSessionID: UUID?, at date: Date = .now) throws {
+        guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }
+        guard piece.deletedAt == nil else { throw CoreIntegrationError.wrongDestination }
+        guard !piece.isArchived else { return }
+        piece.isArchived = true
+        piece.updatedAt = date
+        do { try context.save() }
+        catch { context.rollback(); throw error }
+    }
+
+    static func deleteAllArchivedPieces(context: ModelContext, activeSessionID: UUID?,
+                                        isPro: Bool, at date: Date = .now) throws {
+        guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }
+        let pieces = try context.fetch(FetchDescriptor<PracticeSong>())
+            .filter { $0.isArchived && $0.deletedAt == nil }
+        do {
+            for piece in pieces {
+                if isPro {
+                    try movePieceToRecentlyDeleted(piece: piece, context: context,
+                        activeSessionID: nil, isPro: true, at: date, saveChanges: false)
+                } else {
+                    try permanentlyDeletePiece(piece: piece, context: context,
+                        activeSessionID: nil, saveChanges: false)
+                }
+            }
+            try context.save()
+        } catch { context.rollback(); throw error }
+    }
+    
+    static func archivePiece(
+        piece: PracticeSong,
+        context: ModelContext,
+        activeSessionID: UUID?
+    ) throws {
+        guard activeSessionID == nil else {
+            throw CoreIntegrationError.activeSession
+        }
+
+        guard piece.deletedAt == nil else {
+            throw CoreIntegrationError.wrongDestination
+        }
+
+        piece.isArchived = true
+        piece.updatedAt = .now
+
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+    static func unarchivePiece(
+        piece: PracticeSong,
+        context: ModelContext,
+        at date: Date = .now
+    ) throws {
+        guard piece.deletedAt == nil else {
+            throw CoreIntegrationError.wrongDestination
+        }
+
+        guard piece.isArchived else { return }
+
+        piece.isArchived = false
+        piece.updatedAt = date
+
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+    static func movePieceToRecentlyDeleted(
+        piece: PracticeSong,
+        context: ModelContext,
+        activeSessionID: UUID?,
+        isPro: Bool,
+        at date: Date = .now,
+        saveChanges: Bool = true
+    ) throws {
+        guard isPro else { throw CoreFlowError.invalidInput("此操作需要 Pro 权限。") }
+        guard activeSessionID == nil else {
+            throw CoreIntegrationError.activeSession
+        }
+
+        guard piece.deletedAt == nil else { return }
+        piece.deletedAt = date
+        piece.updatedAt = date
+
+        do {
+            if saveChanges { try context.save() }
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+
+    static func restoreRecentlyDeletedPiece(
+        piece: PracticeSong,
+        context: ModelContext,
+        isPro: Bool,
+        at date: Date = .now
+    ) throws {
+        guard isPro else { throw CoreFlowError.invalidInput("此操作需要 Pro 权限。") }
+        guard let expiration = piece.deletionExpiresAt else { return }
+        guard date < expiration else {
+            try permanentlyDeletePiece(piece: piece, context: context, activeSessionID: nil)
+            throw CoreFlowError.invalidInput("保留期已结束，此曲目已永久删除。")
+        }
+        piece.deletedAt = nil
+        piece.updatedAt = date
+
+        do {
+            try context.save()
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
+    static func expireDeletedPieces(in context: ModelContext, at date: Date = .now) throws {
+        let pieces = try context.fetch(FetchDescriptor<PracticeSong>())
+        for piece in pieces where piece.deletionExpiresAt.map({ $0 <= date }) == true {
+            try permanentlyDeletePiece(piece: piece, context: context, activeSessionID: nil)
+        }
+    }
+
+    static func permanentlyDeletePiece(
+        piece: PracticeSong,
+        context: ModelContext,
+        activeSessionID: UUID?,
+        saveChanges: Bool = true
+    ) throws {
+        guard activeSessionID == nil else {
+            throw CoreIntegrationError.activeSession
+        }
+
+        let pieceID = piece.id
+
+        do {
+            let events = try context.fetch(
+                FetchDescriptor<PracticeEvent>(
+                    predicate: #Predicate { $0.songID == pieceID }
+                )
+            )
+
+            let folders = try context.fetch(FetchDescriptor<PracticeFolder>())
+
+            for event in events {
+                PracticeFolder.move(
+                    eventID: event.id,
+                    to: nil,
+                    among: folders
+                )
+
+                try PracticeAttempt.deleteAll(
+                    for: event.id,
+                    in: context
+                )
+
+                try PracticeDailyGoal.deleteAll(
+                    for: event.id,
+                    in: context
+                )
+
+                context.delete(event)
+            }
+
+            context.delete(piece)
+            if saveChanges { try context.save() }
+        } catch {
+            context.rollback()
+            throw error
+        }
+    }
     static func savePiece(name: String, structure: CorePieceStructure, context: ModelContext,
                           activeSessionID: UUID?) throws -> PracticeSong {
         guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }

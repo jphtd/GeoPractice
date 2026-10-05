@@ -1279,3 +1279,115 @@ extension PracticeCoreTests {
     }
 
 }
+
+extension PracticeCoreTests {
+    func testPieceDeletionRestorePreservesStateAndHistory() throws {
+        for archived in [false, true] {
+            let (db, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
+            piece.isArchived = archived; piece.endDate = .distantFuture
+            try runtime.begin(piece: piece, division: division, at: date)
+            record(runtime, 40, date: date); runtime.finish(at: date.addingTimeInterval(1))
+            _ = try runtime.save(division: division, in: db.mainContext)
+            let originalDefinition = division.coreDefinitionData
+            let originalAttempts = try db.mainContext.fetch(FetchDescriptor<PracticeAttempt>()).map(\.id)
+            XCTAssertThrowsError(try CoreContracts.movePieceToRecentlyDeleted(piece: piece, context: db.mainContext, activeSessionID: UUID(), isPro: true, at: date))
+            XCTAssertNil(piece.deletedAt)
+            XCTAssertThrowsError(try CoreContracts.movePieceToRecentlyDeleted(piece: piece, context: db.mainContext, activeSessionID: nil, isPro: false, at: date))
+            try CoreContracts.movePieceToRecentlyDeleted(piece: piece, context: db.mainContext, activeSessionID: nil, isPro: true, at: date)
+            // Repeated deletion cannot extend retention.
+            try CoreContracts.movePieceToRecentlyDeleted(piece: piece, context: db.mainContext, activeSessionID: nil, isPro: true, at: date.addingTimeInterval(50))
+            XCTAssertEqual(piece.deletedAt, date)
+            XCTAssertThrowsError(try runtime.begin(piece: piece, division: division, at: date))
+            let library = try PracticeLibraryStore(modelContext: db.mainContext)
+            XCTAssertTrue(library.songs.isEmpty); XCTAssertTrue(library.records.isEmpty)
+            XCTAssertThrowsError(try CoreContracts.restoreRecentlyDeletedPiece(piece: piece, context: db.mainContext, isPro: false, at: date))
+            try CoreContracts.restoreRecentlyDeletedPiece(piece: piece, context: db.mainContext, isPro: true, at: date.addingTimeInterval(604799))
+            XCTAssertNil(piece.deletedAt); XCTAssertEqual(piece.isArchived, archived)
+            XCTAssertEqual(division.coreDefinitionData, originalDefinition)
+            XCTAssertEqual(try db.mainContext.fetch(FetchDescriptor<PracticeAttempt>()).map(\.id), originalAttempts)
+            try library.reload(); XCTAssertEqual(library.songs.count, 1); XCTAssertEqual(library.records.count, 1)
+        }
+    }
+
+    func testPieceDeletionExpirationAndFreeDeleteRemoveGraph() throws {
+        for expires in [false, true] {
+            let (db, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
+            try runtime.begin(piece: piece, division: division, at: date)
+            record(runtime, 40, date: date); runtime.finish(at: date.addingTimeInterval(1))
+            _ = try runtime.save(division: division, in: db.mainContext)
+            if expires {
+                try CoreContracts.movePieceToRecentlyDeleted(piece: piece, context: db.mainContext, activeSessionID: nil, isPro: true, at: date)
+                try CoreContracts.expireDeletedPieces(in: db.mainContext, at: date.addingTimeInterval(604799))
+                XCTAssertEqual(try db.mainContext.fetchCount(FetchDescriptor<PracticeSong>()), 1)
+                try CoreContracts.expireDeletedPieces(in: db.mainContext, at: date.addingTimeInterval(604800))
+            } else {
+                try CoreContracts.permanentlyDeletePiece(piece: piece, context: db.mainContext, activeSessionID: nil)
+            }
+            XCTAssertEqual(try db.mainContext.fetchCount(FetchDescriptor<PracticeSong>()), 0)
+            XCTAssertEqual(try db.mainContext.fetchCount(FetchDescriptor<PracticeEvent>()), 0)
+            XCTAssertEqual(try db.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+            XCTAssertEqual(try db.mainContext.fetchCount(FetchDescriptor<PracticeDailyGoal>()), 0)
+        }
+    }
+
+    func testPieceDeletionExpiredRestoreCannotResurrect() throws {
+        let (db, piece, _, _, _, date) = try ladderSetup()
+        try CoreContracts.movePieceToRecentlyDeleted(piece: piece, context: db.mainContext, activeSessionID: nil, isPro: true, at: date)
+        XCTAssertThrowsError(try CoreContracts.restoreRecentlyDeletedPiece(piece: piece, context: db.mainContext, isPro: true, at: date.addingTimeInterval(604800)))
+        XCTAssertEqual(try db.mainContext.fetchCount(FetchDescriptor<PracticeSong>()), 0)
+    }
+
+    func testPieceDeletionBackupAndCloudMergePreserveDeletionAndRestore() throws {
+        let (db, piece, _, _, _, _) = try ladderSetup()
+        piece.endDate = .distantFuture; piece.isArchived = true
+        let date = Date.now.addingTimeInterval(10)
+        let library = try PracticeLibraryStore(modelContext: db.mainContext)
+        let original = try library.makeBackupData()
+        let baseline = try ICloudBackupMerger.makeLocalEnvelope(payload: original, baseline: nil, modifiedAt: date, deviceID: "A")
+        try CoreContracts.movePieceToRecentlyDeleted(piece: piece, context: db.mainContext, activeSessionID: nil, isPro: true, at: date)
+        let deleted = try ICloudBackupMerger.makeLocalEnvelope(payload: library.makeBackupData(), baseline: baseline, modifiedAt: date.addingTimeInterval(1), deviceID: "A")
+        let merged = try ICloudBackupMerger.merge(local: baseline, remote: deleted, modifiedAt: date.addingTimeInterval(2), deviceID: "B")
+        let other = try container(); let otherLibrary = try PracticeLibraryStore(modelContext: other.mainContext)
+        try otherLibrary.restoreBackup(from: merged.payload)
+        let imported = try XCTUnwrap(other.mainContext.fetch(FetchDescriptor<PracticeSong>()).first)
+        XCTAssertEqual(imported.deletedAt, date); XCTAssertTrue(imported.isArchived)
+        XCTAssertTrue(otherLibrary.songs.isEmpty)
+        try CoreContracts.restoreRecentlyDeletedPiece(piece: piece, context: db.mainContext, isPro: true, at: date.addingTimeInterval(3))
+        let restored = try ICloudBackupMerger.makeLocalEnvelope(payload: library.makeBackupData(), baseline: deleted, modifiedAt: date.addingTimeInterval(3), deviceID: "A")
+        let restoredMerge = try ICloudBackupMerger.merge(local: deleted, remote: restored, modifiedAt: date.addingTimeInterval(4), deviceID: "B")
+        try otherLibrary.restoreBackup(from: restoredMerge.payload)
+        let restoredPiece = try XCTUnwrap(other.mainContext.fetch(FetchDescriptor<PracticeSong>()).first)
+        XCTAssertNil(restoredPiece.deletedAt); XCTAssertTrue(restoredPiece.isArchived)
+        try CoreContracts.permanentlyDeletePiece(piece: piece, context: db.mainContext, activeSessionID: nil)
+        let removed = try ICloudBackupMerger.makeLocalEnvelope(payload: library.makeBackupData(), baseline: restored, modifiedAt: date.addingTimeInterval(5), deviceID: "A")
+        let final = try ICloudBackupMerger.merge(local: deleted, remote: removed, modifiedAt: date.addingTimeInterval(6), deviceID: "B")
+        try otherLibrary.restoreBackup(from: final.payload)
+        XCTAssertEqual(try other.mainContext.fetchCount(FetchDescriptor<PracticeSong>()), 0)
+        // Earlier backups without deletedAt remain readable.
+        try otherLibrary.restoreBackup(from: original)
+        XCTAssertNil(try other.mainContext.fetch(FetchDescriptor<PracticeSong>()).first?.deletedAt)
+    }
+
+    func testPieceDeletionSurvivesPersistentStoreReopen() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("piece.store")
+        let date = Date.now
+        do {
+            let db = try container(url: url)
+            let piece = PracticeSong(name: "Deleted archived", isArchived: true)
+            db.mainContext.insert(piece)
+            try CoreContracts.movePieceToRecentlyDeleted(piece: piece, context: db.mainContext, activeSessionID: nil, isPro: true, at: date)
+        }
+        do {
+            let db = try container(url: url)
+            let piece = try XCTUnwrap(db.mainContext.fetch(FetchDescriptor<PracticeSong>()).first)
+            XCTAssertEqual(piece.deletedAt, date); XCTAssertTrue(piece.isArchived)
+            try CoreContracts.restoreRecentlyDeletedPiece(piece: piece, context: db.mainContext, isPro: true, at: date.addingTimeInterval(1))
+        }
+        let db = try container(url: url)
+        let piece = try XCTUnwrap(db.mainContext.fetch(FetchDescriptor<PracticeSong>()).first)
+        XCTAssertNil(piece.deletedAt); XCTAssertTrue(piece.isArchived)
+    }
+}

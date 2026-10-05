@@ -9,6 +9,7 @@ struct PracticeCoreRootView: View {
     @State private var boundaryMessage: String?
     @State private var recovery: CoreRecovery?
     @State private var pendingLegacySession = false
+    @EnvironmentObject private var subscription: SubscriptionStore
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var runtime: CoreSessionRuntime
     @StateObject private var engine = MetronomeEngine()
@@ -31,8 +32,9 @@ struct PracticeCoreRootView: View {
         _runtime = StateObject(wrappedValue: CoreSessionRuntime(defaults: defaults, restore: fixture == nil))
     }
 
-    private var currentPieces: [PracticeSong] { songs.filter { !$0.isArchived } }
-
+    private var currentPieces: [PracticeSong] {
+        songs.filter { !$0.isArchived && $0.deletedAt == nil }
+    }
     var body: some View {
         Group {
             if selectedTab == "GeoBeat" {
@@ -64,11 +66,42 @@ struct PracticeCoreRootView: View {
         .sheet(isPresented: Binding(get: { sheetRoute != nil }, set: { if !$0 { sheetRoute = nil; navigation.cancel() } })) {
             if let sheetRoute {
                 switch sheetRoute {
-                case .archivePiece, .deletePiece:
-                    CoreExitHandoffView(route: sheetRoute, songs: songs, events: events)
+                case .archivedPieces:
+                    CoreArchiveView(activeSessionID: runtime.activeID ?? recovery?.sessionID, onRoute: request)
+                case .archivePiece, .deletePiece, .deleteAllArchivedPieces:
+                    CoreExitHandoffView(
+                        route: sheetRoute,
+                        songs: songs,
+                        events: events,
+                        activeSessionID: runtime.activeID ?? recovery?.sessionID,
+                        onCompleted: {
+                            self.sheetRoute = nil
+                            selectedTab = "Practice"
+
+                            if case .deletePiece = sheetRoute, subscription.isPro {
+                                navigation.path = [.recentlyDeleted]
+                            } else {
+                                navigation.path = []
+                            }
+
+                            navigation.cancel()
+                        },
+                        onCancel: {
+                            switch sheetRoute {
+                            case .archivePiece(let id), .deletePiece(let id):
+                                self.sheetRoute = .pieceSettings(id)
+
+                            case .deleteAllArchivedPieces:
+                                self.sheetRoute = .archivedPieces
+
+                            default:
+                                self.sheetRoute = nil
+                            }
+                        }                    )
                 default:
                     CoreEditorView(route: sheetRoute, songs: songs, events: events,
-                        activeSessionID: runtime.activeID ?? recovery?.sessionID, onSaved: returnFromEditor)
+                        activeSessionID: runtime.activeID ?? recovery?.sessionID, onSaved: returnFromEditor,
+                                   onRoute: request)
                 }
             }
         }
@@ -117,15 +150,22 @@ struct PracticeCoreRootView: View {
             if canDeferLegacyRecovery { Button("暂不恢复", action: deferLegacyRecovery) }
             Button("返回", role: .cancel) { boundaryMessage = nil; navigation.cancel() }
         } message: { Text(boundaryMessage ?? "") }
-        .onAppear { loadInitialContext() }
-        .onReceive(checkpoint) { _ in runtime.persist() }
+        .onAppear { expireDeletedPieces(); loadInitialContext() }
+        .onReceive(checkpoint) { _ in runtime.persist(); expireDeletedPieces() }
         .onChange(of: engine.preset) { _, value in runtime.updatePreset(value) }
         .onChange(of: engine.isPlaying) { previous, current in
             if previous && !current { runtime.pause() }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { engine.pause(); runtime.pause() }
+            else { expireDeletedPieces() }
         }
+    }
+
+    private func expireDeletedPieces() {
+        guard songs.contains(where: { $0.deletionExpiresAt.map { $0 <= Date.now } == true }) else { return }
+        do { try CoreContracts.expireDeletedPieces(in: modelContext) }
+        catch { boundaryMessage = error.localizedDescription }
     }
 
     private var practiceStack: some View {
@@ -139,16 +179,18 @@ struct PracticeCoreRootView: View {
             .navigationDestination(for: CorePage.self) { page in
                 switch page {
                 case .piece(let id):
-                    if let piece = songs.first(where: { $0.id == id }), let structure = piece.coreStructure {
+                    if let piece = songs.first(where: { $0.id == id && $0.deletedAt == nil }), let structure = piece.coreStructure {
                         pieceDetail(piece, structure: structure)
                     }
                 case .division(let pieceID, let divisionID):
-                    if let piece = songs.first(where: { $0.id == pieceID }),
+                    if let piece = songs.first(where: { $0.id == pieceID && $0.deletedAt == nil }),
                        let structure = piece.coreStructure,
                        let division = events.first(where: { $0.id == divisionID && $0.songID == pieceID }),
                        let definition = division.coreDefinition {
                         divisionDetail(piece, division: division, definition: definition, structure: structure)
                     }
+                case .recentlyDeleted:
+                    if subscription.isPro { CoreRecentlyDeletedView() }
                 }
             }
         }
@@ -171,6 +213,9 @@ struct PracticeCoreRootView: View {
                 CoreEmptyState(title: "还没有曲目", copy: "添加你的第一首曲目，开始建立练习计划。", button: "添加曲目") {
                     request(.addPiece)
                 }.padding(.top, 24).accessibilityIdentifier("practice.empty")
+                if !songs.isEmpty {
+                    CoreButton(title: "查看全部曲目", kind: .tertiary) { request(.allPieces) }
+                }
             case .recovery(let session):
                 VStack(alignment: .leading, spacing: 16) {
                     Text("练习已暂停").coreType(.caption).padding(.horizontal, 12).padding(.vertical, 4)
@@ -190,6 +235,9 @@ struct PracticeCoreRootView: View {
                 }.coreCard().accessibilityIdentifier("practice.recovery")
             }
         }.padding(.top, 24)
+        if currentRecovery == nil {
+            CoreButton(title: "已归档曲目", kind: .tertiary) { request(.archivedPieces) }
+        }
     }
 
     private func pieceDetail(_ piece: PracticeSong, structure: CorePieceStructure) -> some View {
@@ -309,10 +357,18 @@ struct PracticeCoreRootView: View {
     private func returnFromEditor(_ page: CorePage) {
         sheetRoute = nil
         selectedTab = "Practice"
+
         switch page {
-        case .piece: navigation.path = [page]
-        case .division(let piece, _): navigation.path = [.piece(piece), page]
+        case .piece:
+            navigation.path = [page]
+
+        case .division(let piece, _):
+            navigation.path = [.piece(piece), page]
+
+        case .recentlyDeleted:
+            navigation.path = [.recentlyDeleted]
         }
+
         navigation.cancel()
         recovery = nil
     }
@@ -352,6 +408,8 @@ struct PracticeCoreRootView: View {
                           target.coreDefinition?.hasValidGoal == true else { throw CoreIntegrationError.invalidGoal }
                     guarded = division != context.divisionID || piece != context.pieceID
                 case .archivePiece(let piece), .deletePiece(let piece): guarded = piece == context.pieceID
+                case .deleteAllArchivedPieces:
+                    guarded = songs.contains { $0.id == context.pieceID && $0.isArchived && $0.deletedAt == nil }
                 case .editDivision: guarded = true
                 default: guarded = false
                 }
@@ -387,6 +445,19 @@ struct PracticeCoreRootView: View {
                 selectedTab = "Practice"
                 if runtime.session.reviewSummary != nil { runtime.continuePractice() }
                 else { runtime.resume() }
+            case .unarchivePiece(let pieceID):
+                guard let piece = songs.first(where: {
+                    $0.id == pieceID && $0.deletedAt == nil
+                }) else {
+                    throw CoreIntegrationError.wrongDestination
+                }
+
+                try CoreContracts.unarchivePiece(
+                    piece: piece,
+                    context: modelContext
+                )
+
+                sheetRoute = .archivedPieces
             default:
                 guard runtime.activeID == nil && recovery == nil else { throw CoreIntegrationError.activeSession }
                 sheetRoute = route
@@ -395,7 +466,7 @@ struct PracticeCoreRootView: View {
     }
     private func startPractice(piece pieceID: UUID, division divisionID: UUID, initialHand: PracticeHand? = nil, confirmedStarts: [PracticeHand: Int]? = nil) throws {
         guard recovery == nil, !pendingLegacySession else { throw CoreIntegrationError.activeSession }
-        guard let piece = songs.first(where: { $0.id == pieceID }),
+        guard let piece = songs.first(where: { $0.id == pieceID && $0.deletedAt == nil }),
               let division = events.first(where: { $0.id == divisionID && $0.songID == pieceID }) else {
             throw CoreIntegrationError.wrongDestination
         }

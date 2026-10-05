@@ -4,3 +4,6 @@ work/
 *.xcuserstate
 xcuserdata/
 .DS_Store
+# Local AI / design skills
+.agents/
+skills-lock.json

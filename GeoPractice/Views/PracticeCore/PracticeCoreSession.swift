@@ -146,6 +146,7 @@ final class CoreSessionRuntime: ObservableObject {
         var initialPreset = division.preset
 
         if effectiveGoal.ladderEnabled == true,
+           effectiveGoal.hands[hand]?.ladder != nil,
            let ladderState = execution?.ladderStates?[hand],
            let referenceNote = TempoReferenceNote(rawValue: ladderState.noteUnit.rawValue) {
             initialPreset.bpm = ladderState.currentBPM
@@ -207,6 +208,7 @@ final class CoreSessionRuntime: ObservableObject {
         session.switchHand(to: hand, at: date)
 
         if context?.goal.ladderEnabled == true,
+           context?.goal.hands[hand]?.ladder != nil,
            let state = execution?.ladderStates?[hand],
            let referenceNote = TempoReferenceNote(rawValue: state.noteUnit.rawValue) {
 

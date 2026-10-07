@@ -692,7 +692,10 @@ struct CoreSessionView: View {
                         .accessibilityRepresentation {
                             HStack {
                                 ForEach(context.handMode.hands) { hand in
-                                    Button(hand.title) { runtime.switchHand(hand) }
+                                    Button(hand.title) {
+                                        runtime.switchHand(hand)
+                                        engine.apply(runtime.preset)
+                                    }
                                         .accessibilityAddTraits(runtime.session.currentHand == hand ? .isSelected : [])
                                         .accessibilityIdentifier("core.session.hand.\(hand.rawValue)")
                                 }

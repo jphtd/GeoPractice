@@ -939,10 +939,11 @@ extension PracticeCoreTests {
     func testNode3ControlledExecutionRealRecordsAndTargetHold() throws {
         let (store, piece, division, runtime, _, date) = try ladderSetup()
         try runtime.begin(piece: piece, division: division, initialHand: .left, at: date)
-        XCTAssertEqual(runtime.preset.bpm, division.preset.bpm) // BPM-02 is isolated, never forced to 40.
+        XCTAssertEqual(runtime.preset.bpm, 40) // A09: entry adopts the selected Hand's current rung.
+        XCTAssertEqual(runtime.preset.referenceNote, .quarter)
         record(runtime, 40, date: date)
         XCTAssertEqual(runtime.execution?.ladderStates?[.left]?.currentBPM, 42)
-        XCTAssertEqual(runtime.preset.bpm, 40)
+        XCTAssertEqual(runtime.preset.bpm, 42) // A09: rung completion hands off Actual BPM.
         record(runtime, 42, date: date)
         XCTAssertEqual(runtime.execution?.ladderStates?[.left]?.currentBPM, 44)
         record(runtime, 44, date: date)
@@ -958,6 +959,7 @@ extension PracticeCoreTests {
         XCTAssertEqual(division.coreDefinition?.ladderStates?[.left]?.currentBPM, 44)
         try runtime.begin(piece: piece, division: division, initialHand: .left, at: date.addingTimeInterval(10))
         XCTAssertEqual(runtime.execution?.ladderStates?[.left]?.currentBPM, 44)
+        XCTAssertEqual(runtime.preset.bpm, 44, "Entry resumes saved rung, not Start BPM")
     }
 
     func testNode3MismatchIsolationEquivalenceAndRecovery() throws {
@@ -971,7 +973,8 @@ extension PracticeCoreTests {
         XCTAssertTrue(runtime.execution!.ladderStates![.left]!.startLocked)
         for hand in [PracticeHand.right, .both] {
             runtime.switchHand(hand, at: date)
-            XCTAssertEqual(runtime.preset.bpm, 80)
+            XCTAssertEqual(runtime.preset.bpm, 40) // A09: selected Hand owns BPM and Note Unit.
+            XCTAssertEqual(runtime.preset.referenceNote, .quarter)
             XCTAssertEqual(runtime.execution?.ladderStates?[hand]?.repsCompleted, 0)
             record(runtime, 80, unit: .eighth, date: date)
         }
@@ -997,6 +1000,8 @@ extension PracticeCoreTests {
             let bpms = target == nil ? [298, 300, 300] : [100, 103, 106, 108]
             for bpm in bpms { record(runtime, bpm, date: date) }
             XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, target ?? 300)
+            XCTAssertEqual(runtime.preset.bpm, target ?? 300)
+            XCTAssertNil(runtime.session.reviewSummary, "Target / execution ceiling is not Session end")
             XCTAssertTrue(runtime.session.isRunning)
             XCTAssertEqual(runtime.session.completionSamples(for: .both).map { $0.preset.bpm }, bpms)
             if target == nil { XCTAssertNil(runtime.context?.goal.hands[.both]?.speed) }
@@ -1472,5 +1477,88 @@ extension PracticeCoreTests {
         }
         XCTAssertEqual(historicalSession.completions, originalSamples)
         XCTAssertEqual(historicalSession.coreContextData, originalContext)
+    }
+}
+
+
+extension PracticeCoreTests {
+    func testA09HandoffAcceptanceSequenceKeepsIndependentRungsAndSession() throws {
+        let (store, piece, division, runtime, _, date) = try ladderSetup()
+        defer { withExtendedLifetime(store) {} }
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date)
+        let id = runtime.activeID
+        record(runtime, 40, date: date)
+        record(runtime, 42, date: date)
+        let leftFacts = runtime.session.completionSamples(for: .left)
+        XCTAssertEqual(runtime.preset.bpm, 44)
+        runtime.switchHand(.right, at: date)
+        XCTAssertEqual(runtime.preset.bpm, 40)
+        record(runtime, 40, date: date)
+        XCTAssertEqual(runtime.preset.bpm, 42)
+        for (hand, bpm) in [(PracticeHand.both, 40), (.right, 42), (.left, 44)] {
+            runtime.switchHand(hand, at: date)
+            XCTAssertEqual(runtime.preset.bpm, bpm)
+            XCTAssertEqual(runtime.execution?.ladderStates?[hand]?.currentBPM, bpm)
+            XCTAssertEqual(runtime.activeID, id)
+            XCTAssertTrue(runtime.session.isRunning)
+            XCTAssertEqual(runtime.session.completionSamples(for: .left), leftFacts)
+        }
+        XCTAssertEqual(runtime.session.completionSamples(for: .right).count, 1)
+        XCTAssertTrue(runtime.session.completionSamples(for: .both).isEmpty)
+        XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+    }
+
+    func testA09NonParticipatingHandIgnoresDormantRungOnEntryAndSwitch() throws {
+        let (store, piece, division, runtime, _, date) = try ladderSetup()
+        defer { withExtendedLifetime(store) {} }
+        var definition = try XCTUnwrap(division.coreDefinition)
+        definition.goal?.hands[.right]?.ladder = nil
+        let dormant = CoreLadderState(cycleStart: Calendar.current.startOfDay(for: date), cycleStartBPM: 88,
+            currentBPM: 88, repsCompleted: 1, noteUnit: .half)
+        definition.ladderStates = [.right: dormant]
+        division.coreDefinitionData = try JSONEncoder().encode(definition)
+        try runtime.begin(piece: piece, division: division, initialHand: .right, at: date)
+        XCTAssertEqual(runtime.preset, division.preset.normalized)
+        runtime.switchHand(.left, at: date)
+        XCTAssertEqual(runtime.preset.bpm, 40)
+        var manual = runtime.preset; manual.bpm = 117; manual.referenceNote = .eighth
+        runtime.updatePreset(manual, at: date)
+        runtime.switchHand(.right, at: date)
+        XCTAssertEqual(runtime.preset, manual.normalized, "Non-Ladder hand retains Actual BPM / Note Unit")
+        runtime.record(preset: manual, at: date)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.right], dormant)
+        XCTAssertEqual(runtime.session.completionSamples(for: .right).map { $0.preset.bpm }, [117])
+    }
+
+    func testA09EquivalentRungAdvanceHandoffsStandardUnitAndManualMismatchDoesNotProgress() throws {
+        let (store, piece, division, runtime, _, date) = try ladderSetup(target: 88, reps: 2)
+        defer { withExtendedLifetime(store) {} }
+        var definition = try XCTUnwrap(division.coreDefinition)
+        definition.goal?.hands[.right]?.ladder = CoreLadderConfiguration(startBPM: 80, stepBPM: 2, repsPerLevel: 2, noteUnit: .eighth)
+        definition.goal?.hands[.right]?.speed = CoreTargetSpeed(bpm: 88, noteUnit: .eighth)
+        division.coreDefinitionData = try JSONEncoder().encode(definition)
+        try runtime.begin(piece: piece, division: division, initialHand: .right, at: date)
+        XCTAssertEqual(runtime.preset.bpm, 80)
+        XCTAssertEqual(runtime.preset.referenceNote, .eighth)
+        record(runtime, 160, unit: .sixteenth, date: date)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.right]?.repsCompleted, 1)
+        record(runtime, 160, unit: .sixteenth, date: date)
+        XCTAssertEqual(runtime.preset.bpm, 82)
+        XCTAssertEqual(runtime.preset.referenceNote, .eighth)
+        let engine = MetronomeEngine(); engine.apply(runtime.preset)
+        XCTAssertEqual(engine.effectivePlaybackPreset.bpm, 82)
+        XCTAssertEqual(engine.effectivePlaybackPreset.referenceNote, .eighth)
+        let state = runtime.execution?.ladderStates?[.right]
+        record(runtime, 99, unit: .quarter, date: date)
+        XCTAssertEqual(runtime.preset.bpm, 99, "Manual Actual BPM remains editable")
+        XCTAssertEqual(runtime.execution?.ladderStates?[.right], state)
+        runtime.switchHand(.left, at: date)
+        XCTAssertEqual(runtime.preset.bpm, 40)
+        XCTAssertEqual(runtime.preset.referenceNote, .quarter)
+        runtime.switchHand(.right, at: date)
+        XCTAssertEqual(runtime.preset.bpm, 82)
+        XCTAssertEqual(runtime.preset.referenceNote, .eighth)
+        XCTAssertEqual(runtime.session.completionSamples(for: .right).map { $0.preset.bpm }, [160, 160, 99])
+        XCTAssertEqual(runtime.session.completionSamples(for: .right).map { $0.preset.referenceNote }, [.sixteenth, .sixteenth, .quarter])
     }
 }

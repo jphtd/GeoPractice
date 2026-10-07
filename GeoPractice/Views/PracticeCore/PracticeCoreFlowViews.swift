@@ -1261,7 +1261,6 @@ struct CoreExitHandoffView: View {
                     isPro: subscription.isPro
                 )
                 onCompleted()
-                dismiss()
 
             case .notEntitled:
                 try CoreContracts.permanentlyDeletePiece(
@@ -1270,7 +1269,6 @@ struct CoreExitHandoffView: View {
                     activeSessionID: activeSessionID
                 )
                 onCompleted()
-                dismiss()
             }
         } catch {
             self.error = error.localizedDescription

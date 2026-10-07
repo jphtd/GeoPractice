@@ -16,7 +16,8 @@ struct PracticeCoreRootView: View {
     @State private var selectedTab = "Practice"
     @State private var sheetRoute: CoreRoute?
     @State private var recentlyDeletedUndoID: UUID?
-    @State private var showUndoSuccess = false
+    @State private var undoPresentationID = UUID()
+    @State private var deleteFromArchive = false
     @State private var initialHandRoute: CoreRoute?
     @State private var selectedInitialHand: (piece: UUID, division: UUID, hand: PracticeHand)?
     @State private var cycleStartRequest: (piece: UUID, division: UUID, hand: PracticeHand?, definition: CoreDivisionDefinition, hands: [PracticeHand])?
@@ -59,63 +60,7 @@ struct PracticeCoreRootView: View {
         .tint(CorePalette.accent)
         .safeAreaInset(edge: .bottom, spacing: 0) {
             VStack(spacing: 8) {
-                if recentlyDeletedUndoID != nil || showUndoSuccess {
-                    ZStack {
-                        HStack(spacing: 14) {
-                            Text("已移至最近删除")
-                                .font(.subheadline.weight(.semibold))
-                                .foregroundStyle(CorePalette.primary)
-
-                            Button("撤销") {
-                                undoRecentlyDeletedPiece()
-                            }
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(CorePalette.accent)
-                        }
-                        .opacity(showUndoSuccess ? 0 : 1)
-                        .scaleEffect(showUndoSuccess ? 0.92 : 1)
-
-                        Image(systemName: "checkmark")
-                            .font(.system(size: 15, weight: .bold))
-                            .foregroundStyle(CorePalette.accent)
-                            .opacity(showUndoSuccess ? 1 : 0)
-                            .scaleEffect(showUndoSuccess ? 1 : 0.65)
-                    }
-                    .frame(
-                        width: showUndoSuccess ? 40 : 196,
-                        height: 40
-                    )
-                    .background(
-                        ZStack {
-                            Capsule()
-                                .fill(.regularMaterial)
-
-                            Capsule()
-                                .fill(CorePalette.accent.opacity(0.08))
-                        }
-                    )
-                    .overlay {
-                        Capsule()
-                            .stroke(
-                                CorePalette.accent.opacity(0.16),
-                                lineWidth: 0.5
-                            )
-                    }
-                    .shadow(
-                        color: .black.opacity(0.10),
-                        radius: 10,
-                        y: 4
-                    )
-                    .frame(maxWidth: .infinity)
-                    .animation(
-                        .spring(
-                            response: 0.42,
-                            dampingFraction: 0.72,
-                            blendDuration: 0.1
-                        ),
-                        value: showUndoSuccess
-                    )
-                }
+                if sheetRoute == nil { quickUndo }
                 CoreBottomNavigation(
                     activeSessionID: runtime.activeID ?? recovery?.sessionID,
                     selectedTab: selectedTab,
@@ -133,6 +78,7 @@ struct PracticeCoreRootView: View {
                 switch sheetRoute {
                 case .archivedPieces:
                     CoreArchiveView(activeSessionID: runtime.activeID ?? recovery?.sessionID, onRoute: request)
+                        .safeAreaInset(edge: .bottom) { quickUndo }
                 case .archivePiece, .deletePiece, .deleteAllArchivedPieces:
                     CoreExitHandoffView(
                         route: sheetRoute,
@@ -141,18 +87,14 @@ struct PracticeCoreRootView: View {
                         activeSessionID: runtime.activeID ?? recovery?.sessionID,
                         onCompleted: {
                             if case .deletePiece(let id) = sheetRoute, subscription.isPro {
+                                undoPresentationID = UUID()
                                 recentlyDeletedUndoID = id
-                                showUndoSuccess = false
-
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
-                                    if recentlyDeletedUndoID == id && !showUndoSuccess {
-                                        withAnimation(.easeOut(duration: 0.2)) {
-                                            recentlyDeletedUndoID = nil
-                                        }
-                                    }
-                                }
                             }
-                            self.sheetRoute = nil
+                            if case .deletePiece = sheetRoute, deleteFromArchive {
+                                self.sheetRoute = .archivedPieces
+                            } else {
+                                self.sheetRoute = nil
+                            }
                             navigation.path = []
                             navigation.cancel()
                             selectedTab = "Practice"
@@ -469,6 +411,10 @@ struct PracticeCoreRootView: View {
         }
     }
     private func request(_ route: CoreRoute) {
+        if case .deletePiece(let id) = route {
+            deleteFromArchive = songs.first(where: { $0.id == id })?.isArchived == true
+        }
+
         navigation.request(route)
         do {
             if let context = runtime.context {
@@ -535,42 +481,21 @@ struct PracticeCoreRootView: View {
             }
         } catch { boundaryMessage = error.localizedDescription }
     }
-    private func undoRecentlyDeletedPiece() {
-        guard
-            let id = recentlyDeletedUndoID,
-            let piece = songs.first(where: {
-                $0.id == id && $0.deletedAt != nil
-            })
-        else {
-            recentlyDeletedUndoID = nil
-            return
-        }
-
-        do {
-            try CoreContracts.restoreRecentlyDeletedPiece(
-                piece: piece,
-                context: modelContext,
-                isPro: subscription.isPro
-            )
-
-            withAnimation(
-                .spring(
-                    response: 0.42,
-                    dampingFraction: 0.72,
-                    blendDuration: 0.1
-                )
-            ) {
-                showUndoSuccess = true
-                recentlyDeletedUndoID = nil
-            }
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.7) {
-                withAnimation(.easeOut(duration: 0.2)) {
-                    showUndoSuccess = false
+    @ViewBuilder private var quickUndo: some View {
+        if let id = recentlyDeletedUndoID {
+            CoreQuickUndoView(restore: {
+                guard let piece = songs.first(where: { $0.id == id && $0.deletedAt != nil }) else { return false }
+                do {
+                    try CoreContracts.restoreRecentlyDeletedPiece(piece: piece, context: modelContext, isPro: subscription.isPro)
+                    return true
+                } catch {
+                    boundaryMessage = error.localizedDescription
+                    return false
                 }
-            }
-        } catch {
-            boundaryMessage = error.localizedDescription
+            }, finish: { presentationID in
+                if undoPresentationID == presentationID { recentlyDeletedUndoID = nil }
+            }, presentationID: undoPresentationID)
+            .id(undoPresentationID)
         }
     }
 
@@ -624,5 +549,107 @@ private struct CoreScreen<Content: View>: View {
                     .frame(maxWidth: .infinity, alignment: .top)
             }.background(CorePalette.canvas).foregroundStyle(CorePalette.primary)
         }.toolbar(.hidden, for: .navigationBar)
+    }
+}
+
+// One presentation owns its countdown and success task; removal cancels both.
+private struct CoreQuickUndoView: View {
+    let restore: () -> Bool
+    let finish: (UUID) -> Void
+    let presentationID: UUID
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    private enum Focus: Hashable { case message, undo }
+    @AccessibilityFocusState private var focus: Focus?
+    @State private var bounds = CGSize.zero
+    @State private var success = false
+    @State private var visible = false
+    @State private var exiting = false
+    @State private var remaining: TimeInterval = 4
+    private var paused: Bool { focus != nil }
+
+    var body: some View {
+        ZStack {
+            HStack(spacing: 14) {
+                Text("已移至最近删除")
+                    .accessibilityFocused($focus, equals: .message)
+                Button("撤销") {
+                    guard !success && !exiting else { return }
+                    if restore() {
+                        success = true
+                    }
+                }
+                .foregroundStyle(CorePalette.accent)
+                .disabled(success || exiting)
+                .accessibilityFocused($focus, equals: .undo)
+            }
+            .font(.subheadline.weight(.semibold))
+            .padding(.horizontal, 16).padding(.vertical, 10)
+            .fixedSize(horizontal: false, vertical: true)
+            .onGeometryChange(for: CGSize.self) { $0.size } action: { size in
+                if !success { bounds = size }
+            }
+            .opacity(success ? 0 : 1)
+            .animation(.easeInOut(duration: 0.28), value: success)
+            .accessibilityHidden(success)
+            Image(systemName: "checkmark")
+                .font(.system(size: 15, weight: .bold))
+                .foregroundStyle(CorePalette.accent)
+                .opacity(success ? 1 : 0)
+                .animation(.easeInOut(duration: 0.28), value: success)
+                .accessibilityLabel("已恢复")
+                .accessibilityHidden(!success)
+        }
+        .frame(width: success ? 32 : (bounds.width > 0 ? bounds.width : nil),
+               height: success ? 32 : (bounds.height > 0 ? bounds.height : nil))
+        .animation(reduceMotion ? nil : .easeInOut(duration: 0.28), value: success)
+        .clipped()
+        .background(.regularMaterial, in: Capsule())
+        .overlay { Capsule().stroke(CorePalette.accent.opacity(0.16), lineWidth: 0.5) }
+        .shadow(color: .black.opacity(0.10), radius: 10, y: 4)
+        .opacity(visible ? 1 : 0)
+        .offset(y: reduceMotion || visible ? 0 : 4)
+        .frame(maxWidth: .infinity)
+        .onChange(of: dynamicTypeSize) { _, _ in
+            if !success { bounds = .zero }
+        }
+        .task {
+            withAnimation(.easeOut(duration: 0.2)) { visible = true }
+        }
+        .task(id: success) {
+            guard !success else { return }
+            let clock = ContinuousClock()
+            do {
+                while remaining > 0 {
+                    let start = clock.now
+                    let wasPaused = paused
+                    try await clock.sleep(for: .milliseconds(20))
+                    guard !Task.isCancelled else { return }
+                    if !wasPaused && !paused {
+                        let elapsed = start.duration(to: clock.now).components
+                        remaining = max(0, remaining - Double(elapsed.seconds) - Double(elapsed.attoseconds) / 1e18)
+                    }
+                }
+                exiting = true
+            } catch { }
+        }
+        .task(id: success) {
+            guard success else { return }
+            do {
+                try await Task.sleep(for: .milliseconds(280))
+                try await Task.sleep(for: .milliseconds(700))
+                guard !Task.isCancelled else { return }
+                exiting = true
+            } catch { }
+        }
+        .task(id: exiting) {
+            guard exiting else { return }
+            withAnimation(.easeOut(duration: 0.17)) { visible = false }
+            do {
+                try await Task.sleep(for: .milliseconds(170))
+                guard !Task.isCancelled else { return }
+                finish(presentationID)
+            } catch { }
+        }
     }
 }

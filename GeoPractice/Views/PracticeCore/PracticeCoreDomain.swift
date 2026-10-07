@@ -95,6 +95,12 @@ struct CoreGoal: Codable, Equatable {
     var updatedAt: Date?
     var ladderEnabled: Bool?
     var reset: CoreResetConfiguration?
+    // Current configuration view only. Stored non-applicable hands remain historical evidence.
+    func applicable(to mode: CoreHandMode) -> CoreGoal {
+        var value = self
+        value.hands = hands.filter { mode.hands.contains($0.key) }
+        return value
+    }
     func isValid(for mode: CoreHandMode) -> Bool {
         mode.hands.allSatisfy { hand in
             guard let value = hands[hand] else { return false }
@@ -167,6 +173,9 @@ struct CoreDivisionDefinition: Codable, Equatable {
     var nextCycleGoal: CoreGoal?
     var nextCycleAnalyzeTiming: CoreAnalyzeTiming?
     var nextCycleAdjustedStartHands: Set<PracticeHand>?
+    var applicableLadderStates: [PracticeHand: CoreLadderState] {
+        (ladderStates ?? [:]).filter { handMode.hands.contains($0.key) }
+    }
     var hasValidGoal: Bool { goal?.isValid(for: handMode) == true }
     func label(mode: CoreDivisionMode) -> String {
         "第 \(first == last ? String(first) : "\(first)–\(last)") \(mode.unit)"

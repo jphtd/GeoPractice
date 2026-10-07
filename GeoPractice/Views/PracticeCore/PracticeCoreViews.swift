@@ -273,7 +273,8 @@ struct PracticeCoreRootView: View {
                         }.accessibilityIdentifier("piece.noDivision")
                     } else {
                         ForEach(divisions) { division in
-                            CoreActionCard(title: division.coreDefinition?.label(mode: structure.mode) ?? division.name) {
+                            CoreActionCard(title: division.coreDefinition?.label(mode: structure.mode) ?? division.name,
+                                           subtitle: division.coreDefinition.map { "适用手型 · \($0.handMode.label)" }) {
                                 guard let definition = division.coreDefinition, definition.fits(structure) else {
                                     boundaryMessage = CoreIntegrationError.missingMetadata.localizedDescription
                                     return

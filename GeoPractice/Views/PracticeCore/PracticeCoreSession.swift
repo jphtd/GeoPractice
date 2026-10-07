@@ -115,7 +115,7 @@ final class CoreSessionRuntime: ObservableObject {
                 prepared.definition.goal?.hands[hand]?.ladder?.retainsLockedOrigin = true
             }
         }
-        let effectiveGoal = prepared.definition.goal ?? goal
+        let effectiveGoal = (prepared.definition.goal ?? goal).applicable(to: definition.handMode)
         for hand in definition.handMode.hands where effectiveGoal.ladderEnabled == true {
             guard let config = effectiveGoal.hands[hand]?.ladder else { continue }
             let old = prepared.definition.ladderStates?[hand]
@@ -163,7 +163,7 @@ final class CoreSessionRuntime: ObservableObject {
         throws -> (definition: CoreDivisionDefinition, cycle: Date, needsStart: [PracticeHand]) {
         guard var definition = division.coreDefinition, var goal = definition.goal else { throw CoreIntegrationError.invalidGoal }
         let today = calendar.startOfDay(for: date)
-        let oldCycle = definition.executionCycleStart ?? definition.ladderStates?.values.map(\.cycleStart).min()
+        let oldCycle = definition.executionCycleStart ?? definition.applicableLadderStates.values.map(\.cycleStart).min()
         var reset = goal.reset ?? CoreResetConfiguration()
         var anchor = min(calendar.startOfDay(for: reset.anchor ?? oldCycle ?? today), today)
         var cycle = oldCycle ?? anchor

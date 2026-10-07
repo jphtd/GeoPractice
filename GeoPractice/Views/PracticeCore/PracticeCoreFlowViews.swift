@@ -327,7 +327,7 @@ struct CoreEditorView: View {
         subscription.isPro
 #endif
     }
-    private var hasLadderLock: Bool { ladderEnabled && (division?.coreDefinition?.ladderStates?.values.contains { $0.startLocked } == true) }
+    private var hasLadderLock: Bool { ladderEnabled && (division?.coreDefinition?.applicableLadderStates.values.contains { $0.startLocked } == true) }
     private var configurationChanged: Bool { goals != initialGoals || ladderEnabled != initialLadderEnabled }
     private var targetsChanged: Bool {
         goals.contains { hand, input in input.count != initialGoals[hand]?.count || input.speed != initialGoals[hand]?.speed || input.unit != initialGoals[hand]?.unit }
@@ -455,8 +455,8 @@ struct CoreEditorView: View {
 
             return
         }
-        guard let goal = division?.coreDefinition?.goal else { return }
-        let displayed = division?.coreDefinition?.nextCycleGoal ?? goal
+        guard let definition = division?.coreDefinition, let goal = definition.goal else { return }
+        let displayed = (definition.nextCycleGoal ?? goal).applicable(to: definition.handMode)
         goals = displayed.hands.mapValues { value in
             let unit = value.speed?.noteUnit ?? value.ladder?.noteUnit ?? .quarter
             let ladder = value.ladder?.converted(to: unit)

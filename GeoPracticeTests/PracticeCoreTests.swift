@@ -1391,3 +1391,86 @@ extension PracticeCoreTests {
         XCTAssertNil(piece.deletedAt); XCTAssertTrue(piece.isArchived)
     }
 }
+
+
+extension PracticeCoreTests {
+    func testHandSyncApplicableViewsExcludeDormantGoalAndLadderWithoutMutatingStorage() throws {
+        let (store, _, division, _, _, date) = try ladderSetup()
+        defer { withExtendedLifetime(store) {} }
+        var definition = try XCTUnwrap(division.coreDefinition)
+        definition.handMode = .both
+        let historical = CoreLadderState(cycleStart: date, cycleStartBPM: 40, currentBPM: 42,
+            repsCompleted: 1, noteUnit: .quarter, firstValidRecordAt: date)
+        definition.ladderStates = [.left: historical, .right: historical]
+        let storedGoal = try XCTUnwrap(definition.goal)
+        let currentGoal = storedGoal.applicable(to: .both)
+        XCTAssertEqual(Set(currentGoal.hands.keys), [.both])
+        XCTAssertTrue(currentGoal.isValid(for: .both))
+        XCTAssertTrue(definition.applicableLadderStates.isEmpty, "Historical locks must not lock current Hands Together")
+        XCTAssertEqual(Set(storedGoal.hands.keys), [.left, .right, .both])
+        XCTAssertEqual(definition.ladderStates?[.left], historical)
+        XCTAssertEqual(definition.ladderStates?[.right], historical)
+        XCTAssertThrowsError(try CoreContracts.copyLeftLadderToRight(in: storedGoal, mode: .both))
+    }
+
+    func testHandSyncDormantLadderDoesNotChooseCurrentCycleOrRequireStartConfirmation() throws {
+        let (store, _, division, _, _, date) = try ladderSetup(mode: .both)
+        defer { withExtendedLifetime(store) {} }
+        var definition = try XCTUnwrap(division.coreDefinition)
+        let historical = CoreLadderState(cycleStart: date.addingTimeInterval(-86400), cycleStartBPM: 40,
+            currentBPM: 42, repsCompleted: 1, noteUnit: .quarter, firstValidRecordAt: date.addingTimeInterval(-86400))
+        definition.ladderStates = [.left: historical, .right: historical]
+        definition.goal?.reset = CoreResetConfiguration(enabled: false)
+        division.coreDefinitionData = try JSONEncoder().encode(definition)
+        let prepared = try CoreSessionRuntime.prepare(division: division, at: date)
+        XCTAssertEqual(prepared.cycle, Calendar.current.startOfDay(for: date))
+        XCTAssertTrue(prepared.needsStart.isEmpty)
+        XCTAssertEqual(prepared.definition.ladderStates, definition.ladderStates)
+    }
+
+    func testHandSyncEditToTogetherPreservesHistoricalFactsAndOnlyExecutesTogetherLadder() throws {
+        let (store, piece, division, runtime, _, date) = try ladderSetup(reps: 2)
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date)
+        for hand in PracticeHand.allCases {
+            runtime.switchHand(hand, at: date)
+            record(runtime, 40, date: date)
+        }
+        runtime.finish(at: date.addingTimeInterval(1))
+        let historicalSession = try runtime.save(division: division, in: store.mainContext)
+        let originalSamples = historicalSession.completions
+        let originalContext = historicalSession.coreContextData
+        var definition = try XCTUnwrap(division.coreDefinition)
+        let historicalGoal = try XCTUnwrap(definition.goal)
+        let historicalStates = try XCTUnwrap(definition.ladderStates)
+        definition.handMode = .both
+        _ = try CoreContracts.saveEditedDivision(piece: piece, division: division, definition: definition,
+                                                 context: store.mainContext, activeSessionID: nil)
+        var currentGoal = historicalGoal.applicable(to: .both)
+        currentGoal.hands[.both]?.count = 7
+        _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: currentGoal,
+            context: store.mainContext, activeSessionID: nil, at: date.addingTimeInterval(2), isPro: true, timing: .current)
+        let saved = try XCTUnwrap(division.coreDefinition)
+        for hand in [PracticeHand.left, .right] {
+            XCTAssertEqual(saved.goal?.hands[hand], historicalGoal.hands[hand])
+            XCTAssertEqual(saved.ladderStates?[hand], historicalStates[hand])
+        }
+        try runtime.begin(piece: piece, division: division, at: date.addingTimeInterval(3))
+        XCTAssertEqual(runtime.session.currentHand, .both)
+        XCTAssertEqual(Set(try XCTUnwrap(runtime.context?.goal.hands).keys), [.both])
+        XCTAssertEqual(Set(try XCTUnwrap(runtime.execution).applicableLadderStates.keys), [.both])
+        runtime.switchHand(.left, at: date.addingTimeInterval(4))
+        XCTAssertEqual(runtime.session.currentHand, .both)
+        record(runtime, 40, date: date.addingTimeInterval(5))
+        XCTAssertEqual(runtime.session.completionSamples(for: .both).count, 1)
+        XCTAssertTrue(runtime.session.completionSamples(for: .left).isEmpty)
+        XCTAssertTrue(runtime.session.completionSamples(for: .right).isEmpty)
+        runtime.finish(at: date.addingTimeInterval(6))
+        _ = try runtime.save(division: division, in: store.mainContext)
+        for hand in [PracticeHand.left, .right] {
+            XCTAssertEqual(division.coreDefinition?.goal?.hands[hand], historicalGoal.hands[hand])
+            XCTAssertEqual(division.coreDefinition?.ladderStates?[hand], historicalStates[hand])
+        }
+        XCTAssertEqual(historicalSession.completions, originalSamples)
+        XCTAssertEqual(historicalSession.coreContextData, originalContext)
+    }
+}

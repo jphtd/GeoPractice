@@ -83,7 +83,8 @@ struct CoreFixture {
             event.coreDefinitionData = try JSONEncoder().encode(definition)
             let qa = CoreSessionRuntime(defaults: UserDefaults(suiteName: "Node4Fixture.\(UUID())")!, restore: false)
             let date = Date.now.addingTimeInterval(-60)
-            try qa.begin(piece: piece, division: event, at: date)
+            try qa.begin(piece: piece, division: event, at: date, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            qa.synchronizePlayback(isPlaying: true, at: date)
             var preset = MetronomePreset.standard; preset.bpm = 35
             qa.record(preset: preset, at: date.addingTimeInterval(1))
             qa.finish(at: date.addingTimeInterval(2))
@@ -124,17 +125,27 @@ struct CoreFixture {
                 goal: goal, ladderStates: [.both: state]))
             let qaDefaults = UserDefaults(suiteName: "CoreLadderQA.\(UUID())")!
             let runtime = CoreSessionRuntime(defaults: qaDefaults, restore: false)
-            try runtime.begin(piece: piece, division: event, at: date)
+            try runtime.begin(piece: piece, division: event, at: date, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            runtime.synchronizePlayback(isPlaying: true, at: date)
             var preset = MetronomePreset.standard; preset.bpm = 103
             runtime.record(preset: preset, at: date.addingTimeInterval(1))
             runtime.finish(at: date.addingTimeInterval(2))
             _ = try runtime.save(division: event, in: context)
         }
+        if name == "global-ladder" {
+            let config = CoreLadderConfiguration(startBPM: 80, stepBPM: 7, repsPerLevel: 2)
+            let goal = CoreGoal(hands: [
+                .left: CoreHandGoal(count: 5, speed: CoreTargetSpeed(bpm: 100), ladder: config),
+                .right: CoreHandGoal(count: 5, ladder: config, ladderParticipation: false),
+                .both: CoreHandGoal(count: 5)
+            ], ladderEnabled: true)
+            event.coreDefinitionData = try JSONEncoder().encode(CoreDivisionDefinition(first: 3, last: 3, handMode: .all, goal: goal))
+        }
         try context.save()
         switch name {
-        case "piece": return CoreFixture(path: [.piece(piece.id)])
+        case "piece", "global-ladder": return CoreFixture(path: [.piece(piece.id)])
         case "no-goal", "valid-goal", "long", "only-left", "only-right", "only-together", "ladder-history", "ladder-execution", "ladder-open", "ladder-short", "ladder-cycle", "node4-exit":
-            return CoreFixture(path: [.piece(piece.id), .division(piece: piece.id, division: event.id)])
+            return CoreFixture(path: [.piece(piece.id)])
         case "recovery":
             return CoreFixture(recovery: CoreRecovery(sessionID: UUID(), divisionID: event.id, pieceName: piece.name, divisionName: event.name))
         default: return CoreFixture()

@@ -2,14 +2,8 @@ import SwiftData
 import SwiftUI
 import UIKit
 
-/// Temporary native screens for the E2E path; not FROZEN visual acceptance.
-struct CoreTestLabel: View {
-    var body: some View {
-        Text("端到端测试版 · 临时界面").font(.caption).foregroundStyle(.secondary)
-    }
-}
-
 struct CoreEditorView: View {
+    @EnvironmentObject private var settings: CorePracticeSettings
     @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var subscription: SubscriptionStore
@@ -33,7 +27,8 @@ struct CoreEditorView: View {
     @State private var didPopulate = false
     @State private var initialGoals: [PracticeHand: CoreGoalInput] = [:]
     @State private var advanced = false
-    @State private var ladderEnabled = false
+    private var ladderEnabled: Bool { settings.activation(isPro: subscription.isPro).enabled }
+    @State private var confirmedHands: Set<PracticeHand> = []
     @State private var initialLadderEnabled = false
     @State private var reset = CoreResetConfiguration()
     @State private var initialReset = CoreResetConfiguration()
@@ -41,7 +36,6 @@ struct CoreEditorView: View {
     @State private var analyzeTiming: CoreAnalyzeTiming?
     @State private var adjustedStartHands: Set<PracticeHand> = []
     @State private var startConflict: PracticeHand?
-    @State private var previewPro = false
     @State private var error: String?
 
     private var piece: PracticeSong? {
@@ -54,12 +48,6 @@ struct CoreEditorView: View {
         case .editDivision(let value, _):
             id = value
 
-        case .editGoal(let value, _):
-            id = value
-
-        case .pieceSettings(let value):
-            id = value
-
         default:
             id = nil
         }
@@ -68,7 +56,7 @@ struct CoreEditorView: View {
     }
     private var division: PracticeEvent? {
         switch route {
-        case .editGoal(_, let id), .editDivision(_, let id):
+        case .editDivision(_, let id):
             return events.first { $0.id == id }
 
         default:
@@ -79,9 +67,7 @@ struct CoreEditorView: View {
         switch route {
         case .addPiece: "添加曲目"
         case .createDivision: "创建练习划分"
-        case .editDivision: "编辑练习划分"
-        case .editGoal: division?.coreDefinition?.hasValidGoal == true ? "编辑 Goal" : "设置 Goal"
-        case .pieceSettings: "曲目设置"
+        case .editDivision: "编辑"
         default: "全部曲目"
         }
     }
@@ -91,7 +77,7 @@ struct CoreEditorView: View {
                 if isEditable {
                     Section { CorePageHeader(title: title, back: cancel) }
                         .listRowBackground(Color.clear)
-                } else { Section { CoreTestLabel() } }
+                }
                 switch route {
                 case .addPiece:
                     Section("曲目") {
@@ -102,7 +88,8 @@ struct CoreEditorView: View {
                         TextField("总数（可选）", text: $total).keyboardType(.numberPad)
                     }
                 case .createDivision, .editDivision:
-                    Section("《\(piece?.name ?? "")》 · \(piece?.coreStructure?.label ?? "")") {
+                    Section("练习划分") {
+                        Text("《\(piece?.name ?? "")》 · \(piece?.coreStructure?.label ?? "")").coreType(.caption)
                         Text(piece?.coreStructure?.mode == .sections ? "段落范围" : "小节范围")
                             .coreType(.titleSmall)
 
@@ -120,8 +107,6 @@ struct CoreEditorView: View {
                                 .accessibilityIdentifier("core.division.last")
                         }
 
-                        Text("范围不能与现有划分重叠，可以保留未划分区域。")
-                            .coreType(.caption)
                     }
 
                     Section("适用手型") {
@@ -143,15 +128,15 @@ struct CoreEditorView: View {
                     }
 
                     if case .createDivision = route {
-                        Section("Goal（可选）") {
+                        Section("目标（可选）") {
                             if setupGoal {
-                                CoreButton(title: "暂不设置 Goal", kind: .tertiary) {
+                                CoreButton(title: "暂不设置目标", kind: .tertiary) {
                                     setupGoal = false
                                 }
                             } else {
-                                Text("暂不设置 Goal").coreType(.body)
+                                Text("暂不设置目标").coreType(.body)
 
-                                CoreButton(title: "同时设置 Goal", kind: .secondary) {
+                                CoreButton(title: "同时设置目标", kind: .secondary) {
                                     setupGoal = true
                                 }
                                 .accessibilityIdentifier("core.division.enableGoal")
@@ -162,60 +147,20 @@ struct CoreEditorView: View {
                             goalFields(for: handMode)
                         }
                     }
-                case .editGoal:
-                    if let mode = division?.coreDefinition?.handMode {
-                        Section {
-                            Text("《\(piece?.name ?? "")》 · \(division?.name ?? "")").coreType(.body)
-                            Text("适用手型 · \(mode.label)").coreType(.caption)
-                        }
-                        goalFields(for: mode)
-                    }
-                case .pieceSettings:
-                    if let piece {
-                        Section("《\(piece.name)》") {
-                          if let structure = piece.coreStructure {
-                            Text(structure.label)
-                            NavigationLink("创建练习划分") {
-                                CoreEditorView(route: .createDivision(piece: piece.id, mode: structure.mode),
-                                    songs: songs, events: events, activeSessionID: activeSessionID, onSaved: onSaved)
-                            }
-                            Text("本测试版本保留曲目结构，不提供结构重划或历史迁移。").font(.caption)
-                          }
-                            if piece.isArchived {
-                                Text("已归档 · 练习历史保留")
-
-                                Section("归档") {
-                                    Button {
-                                        onRoute(.unarchivePiece(piece.id))
-                                    } label: {
-                                        Label("取消归档", systemImage: "archivebox")
-                                    }
-                                }
-                            } else {
-                                Section("归档") {
-                                    Button {
-                                        onRoute(.archivePiece(piece.id))
-                                    } label: {
-                                        Label("归档曲目", systemImage: "archivebox")
-                                    }
-                                }
-                            }
-                            Section("删除") {
-                            Button("删除曲目", role: .destructive) {
-                                onRoute(.deletePiece(piece.id))
-                            }
-                        }
-                    }
+                    if case .editDivision = route {
+                        Section("目标") { EmptyView() }
+                        goalFields(for: handMode)
                     }
                 default:
                     ForEach(songs.filter { $0.deletedAt == nil }) { song in
                         Button(song.name) { onSaved(.piece(song.id)); dismiss() }
                     }
-                    if subscription.isPro {
-                        Section {
-                            NavigationLink("Piece Recently Deleted") {
-                                CoreRecentlyDeletedView()
-                            }
+                    Section("管理") {
+                        NavigationLink("已归档曲目") {
+                            CoreArchiveView(activeSessionID: activeSessionID, onRoute: onRoute)
+                        }
+                        if subscription.isPro {
+                            NavigationLink("最近删除的曲目") { CoreRecentlyDeletedView() }
                         }
                     }
                 }
@@ -233,7 +178,7 @@ struct CoreEditorView: View {
             }
             .toolbar(isEditable ? .hidden : .visible, for: .navigationBar)
             .interactiveDismissDisabled(hasUnsavedChanges)
-            .alert(isCreating ? "放弃创建练习划分？" : "放弃未保存的 Goal 修改？", isPresented: $discardConfirmation) {
+            .alert(isCreating ? "放弃创建练习划分？" : "放弃未保存的修改？", isPresented: $discardConfirmation) {
                 Button("继续编辑", role: .cancel) {}
                 Button("放弃", role: .destructive) { dismiss() }
             }
@@ -244,7 +189,7 @@ struct CoreEditorView: View {
                 }
                 Button("不调整", role: .cancel) { startConflict = nil }
             } message: {
-                Text("调整后建议为 max(20, Target − 10)。建议不会自动保存，请继续输入并确认真实 Start；不调整则不能保存此下周期有限 Ladder。")
+                Text("调整后建议为 max(20, 目标速度 − 10)。建议不会自动保存，请继续输入并确认真实起始速度；不调整则不能保存此下周期有限速度阶梯。")
             }
             .onAppear { populate() }
             .onChange(of: error) { _, message in
@@ -254,7 +199,7 @@ struct CoreEditorView: View {
     }
     private var isEditable: Bool {
         switch route {
-        case .createDivision, .editDivision, .editGoal:
+        case .createDivision, .editDivision:
             return true
         default:
             return false
@@ -271,11 +216,8 @@ struct CoreEditorView: View {
            let definition = division?.coreDefinition {
             return first != String(definition.first) ||
                 last != String(definition.last) ||
-                handMode != definition.handMode
-        }
-
-        if case .editGoal = route {
-            return goals != initialGoals || ladderEnabled != initialLadderEnabled || reset != initialReset
+                handMode != definition.handMode ||
+                configurationChanged || reset != initialReset || !confirmedHands.isEmpty
         }
 
         return false
@@ -289,82 +231,14 @@ struct CoreEditorView: View {
                 if value.speed != goals[hand]?.speed || value.unit != goals[hand]?.unit { adjustedStartHands.remove(hand) }
                 goals[hand] = value
             }),
-                             showRequiredError: didAttemptSave, unitLabel: ladderEnabled && (goals[hand]?.participates == true) && (goals[hand]?.speed.isEmpty != false) ? "Ladder 音符单位" : "目标音符单位", ladderIsValid: ladderEnabled && (goals[hand]?.participates == true) && (goals[hand]?.validLadder == true), onUnitChange: { unit in changeUnit(unit, for: hand) })
-        }
-        Section {
-            Text("每个适用手型至少拥有目标次数、练习目标速度或完整合法开放式 Ladder。速度使用所选音符单位，独立于实际节拍器速度。")
-                .coreType(.caption).foregroundStyle(CorePalette.secondary)
-            DisclosureGroup("高级 Goal", isExpanded: $advanced) {
-                advancedFields(for: mode)
+                             showRequiredError: didAttemptSave, unitLabel: ladderEnabled && (goals[hand]?.hasLadderInput == true) && (goals[hand]?.speed.isEmpty != false) ? "速度阶梯音符单位" : "目标音符单位", ladderIsValid: ladderEnabled && (goals[hand]?.hasLadderInput == true) && (goals[hand]?.validLadder == true), onUnitChange: { unit in changeUnit(unit, for: hand) }) {
+                if ladderEnabled { ladderFields(for: hand) }
             }
         }
-        if case .editGoal = route, configurationChanged || hasLadderLock {
-            Section("配置生效时间") {
-                Picker("生效周期", selection: $editTiming) {
-                    Text("请选择").tag(CoreGoalEditTiming?.none)
-                    Text("本周期生效").tag(CoreGoalEditTiming?.some(.current))
-                    Text("下周期生效").tag(CoreGoalEditTiming?.some(.next))
-                }.accessibilityIdentifier("core.goal.timing")
-                if editTiming == .next && targetsChanged {
-                    Picker("Analyze 标准", selection: $analyzeTiming) {
-                        Text("请选择").tag(CoreAnalyzeTiming?.none)
-                        Text("立即按新目标重新计算").tag(CoreAnalyzeTiming?.some(.immediately))
-                        Text("跟随新目标到下周期一起切换").tag(CoreAnalyzeTiming?.some(.nextCycle))
-                    }
-                }
-                if editTiming == .next && !targetsChanged, let analyzeTiming {
-                    Text(analyzeTiming == .immediately ? "已保存 Analyze 选择：立即按新目标重新计算。" : "已保存 Analyze 选择：跟随新目标到下周期一起切换。").coreType(.caption)
-                }
-                Text(editTiming == .next ? "本周期保留当前配置；新配置保存为下周期待生效值。" : "已发生的 Session / Record 保留。")
-                    .coreType(.caption)
-            }
-        }
-    }
-    private var canConfigurePro: Bool {
-#if DEBUG
-        subscription.isPro || (CoreFixture.requested != nil && previewPro)
-#else
-        subscription.isPro
-#endif
-    }
-    private var hasLadderLock: Bool { ladderEnabled && (division?.coreDefinition?.applicableLadderStates.values.contains { $0.startLocked } == true) }
-    private var configurationChanged: Bool { goals != initialGoals || ladderEnabled != initialLadderEnabled }
-    private var targetsChanged: Bool {
-        goals.contains { hand, input in input.count != initialGoals[hand]?.count || input.speed != initialGoals[hand]?.speed || input.unit != initialGoals[hand]?.unit }
-    }
-    private func changeUnit(_ unit: CoreNoteUnit, for hand: PracticeHand) {
-        var input = goals[hand] ?? CoreGoalInput()
-        let ratio = input.unit.quarterMultiplier / unit.quarterMultiplier
-        for key in [\CoreGoalInput.start, \CoreGoalInput.step] {
-            if let number = Int(input[keyPath: key]) { input[keyPath: key] = String(Int((Double(number) * ratio).rounded())) }
-        }
-        input.unit = unit; goals[hand] = input
-        adjustedStartHands.remove(hand)
-    }
-    @ViewBuilder private func advancedFields(for mode: CoreHandMode) -> some View {
-#if DEBUG
-        if CoreFixture.requested != nil && !subscription.isPro {
-            Toggle("Debug · Pro 配置预览（内存数据）", isOn: $previewPro).accessibilityIdentifier("core.goal.previewPro")
-        }
-#endif
-        if canConfigurePro {
-            Toggle("Speed Ladder", isOn: Binding(get: { ladderEnabled }, set: { enabled in
-                ladderEnabled = enabled
-                if enabled && !initialLadderEnabled {
-                    for hand in mode.hands {
-                        var input = goals[hand] ?? CoreGoalInput(); input.participates = true
-                        input.start = ""; goals[hand] = input
-                    }
-                }
-            })).accessibilityIdentifier("core.ladder.enabled")
-            if ladderEnabled {
-                ForEach(mode.hands) { hand in
-                    ladderFields(for: hand)
-                }
-                if mode.hands.contains(.left) && mode.hands.contains(.right) && goals[.right]?.participates == true {
-                    Button("复制左手 Ladder 设置到右手") {
+        if ladderEnabled && mode.hands.contains(.left) && mode.hands.contains(.right) {
+                    Button("复制左手速度阶梯设置到右手") {
                         guard let left = goals[.left], let start = Int(left.start), let step = Int(left.step), let reps = Int(left.reps) else {
-                            error = "请先填写左手 Start、Step、Reps。"; return
+                            error = "请先填写左手起始速度、每档 +、每档次数。"; return
                         }
                         var right = goals[.right] ?? CoreGoalInput()
                         let leftGoal = CoreHandGoal(speed: Int(left.speed).map { CoreTargetSpeed(bpm: $0, noteUnit: left.unit) },
@@ -377,55 +251,108 @@ struct CoreEditorView: View {
                             goals[.right] = right
                         } catch { self.error = error.localizedDescription }
                     }.accessibilityIdentifier("core.ladder.copyLeftRight")
+        }
+        Section {
+            DisclosureGroup("高级设置", isExpanded: $advanced) {
+                advancedFields(for: mode)
+            }
+        }
+        if case .editDivision = route, division?.coreDefinition?.goal != nil, configurationChanged || hasLadderLock {
+            Section("配置生效时间") {
+                Picker("生效周期", selection: $editTiming) {
+                    Text("请选择").tag(CoreGoalEditTiming?.none)
+                    Text("本周期生效").tag(CoreGoalEditTiming?.some(.current))
+                    Text("下周期生效").tag(CoreGoalEditTiming?.some(.next))
+                }.accessibilityIdentifier("core.goal.timing")
+                if editTiming == .next && targetsChanged {
+                    Picker("分析标准", selection: $analyzeTiming) {
+                        Text("请选择").tag(CoreAnalyzeTiming?.none)
+                        Text("立即按新目标重新计算").tag(CoreAnalyzeTiming?.some(.immediately))
+                        Text("跟随新目标到下周期一起切换").tag(CoreAnalyzeTiming?.some(.nextCycle))
+                    }
+                }
+                if editTiming == .next && !targetsChanged, let analyzeTiming {
+                    Text(analyzeTiming == .immediately ? "已保存分析选择：立即按新目标重新计算。" : "已保存分析选择：跟随新目标到下周期一起切换。").coreType(.caption)
                 }
             }
-        } else { Text("Speed Ladder · Pro 专业版").coreType(.caption) }
-        Toggle("Reset", isOn: $reset.enabled).accessibilityIdentifier("core.reset.enabled")
+        }
+    }
+    private var canConfigurePro: Bool { subscription.isPro }
+    private var hasLadderLock: Bool { ladderEnabled && handMode.hands.contains { division?.coreDefinition?.ladderStates?[$0]?.startLocked == true } }
+    private var configurationChanged: Bool { handMode.hands.contains { goals[$0] != initialGoals[$0] } }
+    private var targetsChanged: Bool {
+        handMode.hands.contains { hand in
+            let input = goals[hand] ?? CoreGoalInput()
+            return input.count != (initialGoals[hand]?.count ?? "") || input.speed != (initialGoals[hand]?.speed ?? "") || input.unit != (initialGoals[hand]?.unit ?? .quarter)
+        }
+    }
+    private func changeUnit(_ unit: CoreNoteUnit, for hand: PracticeHand) {
+        var input = goals[hand] ?? CoreGoalInput()
+        let ratio = input.unit.quarterMultiplier / unit.quarterMultiplier
+        for key in [\CoreGoalInput.start, \CoreGoalInput.step] {
+            if let number = Int(input[keyPath: key]) { input[keyPath: key] = String(Int((Double(number) * ratio).rounded())) }
+        }
+        input.unit = unit; goals[hand] = input
+        adjustedStartHands.remove(hand)
+    }
+    @ViewBuilder private func advancedFields(for mode: CoreHandMode) -> some View {
+        Toggle("周期重置", isOn: $reset.enabled).accessibilityIdentifier("core.reset.enabled")
         if reset.enabled {
             Picker("固定周期天数", selection: $reset.days) {
                 ForEach(canConfigurePro ? CoreResetConfiguration.proDays : [1], id: \.self) { Text("\($0) 天").tag($0) }
             }.accessibilityIdentifier("core.reset.days")
             if division?.coreDefinition?.goal != nil && reset.days != initialReset.days {
-                Text("不立即 Reset；当天继续旧周期，下一自然日 00:00 按新周期开始并建立锚点。").coreType(.caption)
+                Text("不立即周期重置；当天继续旧周期，下一自然日 00:00 按新周期开始并建立锚点。").coreType(.caption)
             }
-        } else { Text("Reset 未启用，不按日期自动重置。").coreType(.caption) }
+        } else { Text("周期重置未启用，不按日期自动重置。").coreType(.caption) }
     }
     @ViewBuilder private func ladderFields(for hand: PracticeHand) -> some View {
         let input = goals[hand] ?? CoreGoalInput()
-        Toggle("\(hand.title)参与 Ladder", isOn: Binding(get: { input.participates }, set: {
-            var value = goals[hand] ?? CoreGoalInput(); value.participates = $0; goals[hand] = value
-        })).accessibilityIdentifier("core.ladder.\(hand.rawValue).participates")
-        if input.participates {
-            Text(input.speed.isEmpty ? "开放式 Ladder · 无 Target BPM" : "有限 Ladder · Target 使用上方练习目标 BPM")
+        Group {
+            if division?.coreDefinition?.goal?.hands[hand]?.needsLadderConfirmation == true {
+                Text("\(hand.title) · 速度阶梯配置待确认").coreType(.label)
+                Text("配置已保存，尚未恢复阶梯执行资格。").coreType(.caption)
+                if confirmedHands.contains(hand) {
+                    Text("已请求确认 · 保存后生效").coreType(.caption)
+                        .accessibilityIdentifier("core.ladder.\(hand.rawValue).requested")
+                } else {
+                    Button("确认使用当前阶梯配置") { confirmedHands.insert(hand) }
+                        .frame(minHeight: 44).disabled(!input.validLadder)
+                        .accessibilityLabel("\(hand.title)，确认使用当前阶梯配置")
+                        .accessibilityIdentifier("core.ladder.\(hand.rawValue).confirm")
+                    if !input.validLadder { Text("请先填写合法完整的阶梯参数。").coreType(.caption) }
+                }
+            }
+            Text(input.speed.isEmpty ? "开放式速度阶梯 · 无目标速度" : "有限速度阶梯 · 目标速度使用上方练习目标 BPM")
                 .coreType(.caption)
             if !input.speed.isEmpty {
-                Button("改为开放式 · 清除 Target BPM") { goals[hand]?.speed = "" }
+                Button("改为开放式 · 清除目标速度") { goals[hand]?.speed = "" }
                     .accessibilityIdentifier("core.ladder.\(hand.rawValue).openEnded")
-            } else { Text("需要有限 Ladder 时，请在上方填写 Target BPM。").coreType(.caption) }
+            }
             let state = division?.coreDefinition?.ladderStates?[hand]
             let locked = state?.startLocked == true && editTiming != .next && initialLadderEnabled && initialGoals[hand]?.participates == true
             if let state {
                 Text("当前周期：\(state.cycleStart.formatted(date: .abbreviated, time: .omitted)) · 当前档 \(state.currentBPM) BPM · \(state.repsCompleted)/\(division?.coreDefinition?.goal?.hands[hand]?.ladder?.repsPerLevel ?? 0) · \(state.noteUnit.title)").coreType(.caption)
-                if state.startLocked { Text("本周期 Start 已锁定；下周期 Start 可配置。实际练习 BPM 仍可自由调整。").coreType(.caption) }
+                if state.startLocked { Text("本周期起始速度已锁定；下周期起始速度可配置。实际练习 BPM 仍可自由调整。").coreType(.caption) }
                 if let suggestion = state.suggestedStart(in: input.unit) {
                     let adjusted = adjustedStartHands.contains(hand)
                     let target = Int(input.speed)
                     let shown = adjusted ? max(20, (target ?? suggestion) - 10) : suggestion
-                    Text("Suggested Start · \(shown) BPM（仅建议，请确认实际 Start）").coreType(.caption)
+                    Text("建议起始速度 · \(shown) BPM（仅建议，请确认实际起始速度）").coreType(.caption)
                     if editTiming == .next, let target, suggestion > target, !adjusted {
-                        Button("处理建议起点与 Target 冲突") { startConflict = hand }
+                        Button("处理建议起点与目标速度冲突") { startConflict = hand }
                     }
                 }
             } else if let division, let stable = CoreAnalysis.stable(CoreAnalysis.planned(savedAttempts, division: division.id), hand: hand) {
-                Text("Suggested Start · \(Int((stable / input.unit.quarterMultiplier).rounded())) BPM（Stable BPM 换算，仅建议，请自行确认 Start）").coreType(.caption)
-            } else { Text("没有有效历史速度时不生成建议，请自行确认 Start。").coreType(.caption) }
-            if let start = Int(input.start), let target = Int(input.speed), start >= target && !locked {
-                Text("\(hand.title)：有限 Ladder 需要 Start < Target；最后一档允许短步进。").coreType(.caption).foregroundStyle(.red)
+                Text("建议起始速度 · \(Int((stable / input.unit.quarterMultiplier).rounded())) BPM（稳定速度换算，仅建议，请自行确认起始速度）").coreType(.caption)
             }
-            ladderNumber("Start · 起始 BPM", hand: hand, key: \.start, range: 20...300).disabled(locked)
-            ladderNumber("Step · 增加 BPM", hand: hand, key: \.step, range: 1...20)
-            ladderNumber("Reps · 每档次数", hand: hand, key: \.reps, range: 1...Int.max)
-            Text("Ladder 音符单位 · \(input.unit.title)；有限 Ladder 继承目标音符单位，开放式可在上方选择。").coreType(.caption)
+            if let start = Int(input.start), let target = Int(input.speed), start >= target && !locked {
+                Text("\(hand.title)：有限速度阶梯需要起始速度 < 目标速度；最后一档允许短步进。").coreType(.caption).foregroundStyle(.red)
+            }
+            ladderNumber("起始速度（BPM）", hand: hand, key: \.start, range: 20...300).disabled(locked)
+            ladderNumber("每档 +（BPM）", hand: hand, key: \.step, range: 1...20)
+            ladderNumber("每档次数", hand: hand, key: \.reps, range: 1...Int.max)
+            Text("音符单位 · \(input.unit.title)").coreType(.caption)
         }
     }
     private func ladderNumber(_ label: String, hand: PracticeHand, key: WritableKeyPath<CoreGoalInput, String>, range: ClosedRange<Int>) -> some View {
@@ -438,8 +365,8 @@ struct CoreEditorView: View {
                 })).multilineTextAlignment(.trailing).keyboardType(.numberPad)
                     .accessibilityIdentifier("core.ladder.\(hand.rawValue).\(key == \.start ? "start" : key == \.step ? "step" : "reps")")
             }
-            if (didAttemptSave || !value.isEmpty) && !range.contains(Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) {
-                Text(key == \.reps ? "必填正整数，不设 Product 上限。" : "必填整数 \(range.lowerBound)–\(range.upperBound)。")
+            if input.hasLadderInput && (didAttemptSave || !value.isEmpty) && !range.contains(Int(value.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0) {
+                Text(key == \.reps ? "必填正整数，不设次数上限。" : "必填整数 \(range.lowerBound)–\(range.upperBound)。")
                     .coreType(.caption).foregroundStyle(.red)
             }
         }
@@ -453,10 +380,9 @@ struct CoreEditorView: View {
             last = String(definition.last)
             handMode = definition.handMode
 
-            return
         }
         guard let definition = division?.coreDefinition, let goal = definition.goal else { return }
-        let displayed = (definition.nextCycleGoal ?? goal).applicable(to: definition.handMode)
+        let displayed = definition.nextCycleGoal ?? goal
         goals = displayed.hands.mapValues { value in
             let unit = value.speed?.noteUnit ?? value.ladder?.noteUnit ?? .quarter
             let ladder = value.ladder?.converted(to: unit)
@@ -465,8 +391,7 @@ struct CoreEditorView: View {
                           participates: ladder != nil, start: ladder.map { String($0.startBPM) } ?? "",
                           step: ladder.map { String($0.stepBPM) } ?? "", reps: ladder.map { String($0.repsPerLevel) } ?? "")
         }
-        ladderEnabled = displayed.ladderEnabled == true
-        initialLadderEnabled = ladderEnabled
+        initialLadderEnabled = displayed.ladderEnabled == true
         reset = displayed.reset ?? CoreResetConfiguration()
         if let pending = reset.pendingDays { reset.days = pending }
         initialReset = reset
@@ -481,11 +406,11 @@ struct CoreEditorView: View {
             let input = goals[hand] ?? CoreGoalInput()
             let bpm = try optionalPositive(input.speed, label: "\(hand.title)目标速度")
             var ladder: CoreLadderConfiguration?
-            if ladderEnabled && input.participates {
-                guard let start = try optionalPositive(input.start, label: "\(hand.title) Start"),
-                      let step = try optionalPositive(input.step, label: "\(hand.title) Step"),
-                      let reps = try optionalPositive(input.reps, label: "\(hand.title) Reps") else {
-                    throw CoreFlowError.invalidInput("\(hand.title)：Start、Step、Reps 均为必填。")
+            if ladderEnabled && input.hasLadderInput {
+                guard let start = try optionalPositive(input.start, label: "\(hand.title) 起始速度"),
+                      let step = try optionalPositive(input.step, label: "\(hand.title) 每档 +"),
+                      let reps = try optionalPositive(input.reps, label: "\(hand.title) 每档次数") else {
+                    throw CoreFlowError.invalidInput("\(hand.title)：起始速度、每档 +、每档次数均为必填。")
                 }
                 ladder = CoreLadderConfiguration(startBPM: start, stepBPM: step, repsPerLevel: reps, noteUnit: input.unit)
                 if editTiming != .next, initialLadderEnabled, let state = division?.coreDefinition?.ladderStates?[hand],
@@ -496,10 +421,10 @@ struct CoreEditorView: View {
             values[hand] = CoreHandGoal(count: try optionalPositive(input.count, label: "\(hand.title)目标次数"),
                 speed: bpm.map { CoreTargetSpeed(bpm: $0, noteUnit: input.unit) }, ladder: ladder)
         }
-        let goal = CoreGoal(hands: values, ladderEnabled: ladderEnabled, reset: reset)
+        let goal = CoreGoal(hands: values, ladderEnabled: ladderEnabled || division?.coreDefinition?.goal?.ladderEnabled == true, reset: reset)
         for hand in mode.hands {
             guard let value = values[hand], CoreGoalValidation.isValid(value, ladderEnabled: ladderEnabled) else {
-                throw CoreFlowError.invalidInput("\(hand.title)：请检查 Goal 与参与的 Ladder 必填字段。")
+                throw CoreFlowError.invalidInput("\(hand.title)：请检查目标与参与的速度阶梯必填字段。")
             }
         }
         guard goal.isValid(for: mode) else { throw CoreIntegrationError.invalidGoal }
@@ -514,8 +439,8 @@ struct CoreEditorView: View {
     private func save() {
         didAttemptSave = true
         if editTiming == .next && ladderEnabled {
-            for hand in division?.coreDefinition?.handMode.hands ?? [] {
-                guard let input = goals[hand], input.participates, let target = Int(input.speed),
+            for hand in handMode.hands {
+                guard let input = goals[hand], input.hasLadderInput, let target = Int(input.speed),
                       let suggestion = division?.coreDefinition?.ladderStates?[hand]?.suggestedStart(in: input.unit) else { continue }
                 if suggestion > target && !adjustedStartHands.contains(hand) { startConflict = hand; return }
             }
@@ -535,36 +460,20 @@ struct CoreEditorView: View {
                 let page = try CoreContracts.saveCreatedDivision(piece: piece,
                     definition: CoreDivisionDefinition(first: first, last: last, handMode: handMode,
                         goal: setupGoal ? try basicGoal(for: handMode) : nil),
-                    context: modelContext, activeSessionID: activeSessionID, isPro: canConfigurePro)
+                    context: modelContext, activeSessionID: activeSessionID, isPro: canConfigurePro, activation: settings.activation(isPro: subscription.isPro))
                 onSaved(page)
             case .editDivision:
-                guard let piece,
-                      let division,
-                      var definition = division.coreDefinition,
+                guard let piece, let division,
                       let first = try optionalPositive(first, label: "起始位置"),
                       let last = try optionalPositive(last, label: "结束位置") else {
                     throw CoreFlowError.invalidInput("请填写起始和结束位置。")
                 }
-
-                definition.first = first
-                definition.last = last
-                definition.handMode = handMode
-
-                onSaved(
-                    try CoreContracts.saveEditedDivision(
-                        piece: piece,
-                        division: division,
-                        definition: definition,
-                        context: modelContext,
-                        activeSessionID: activeSessionID
-                    )
-                )
-            case .editGoal:
-                guard let division, let definition = division.coreDefinition, let piece else { throw CoreIntegrationError.missingMetadata }
-                let goal = try basicGoal(for: definition.handMode)
-                onSaved(try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
+                let goalChanged = configurationChanged || reset != initialReset || !confirmedHands.isEmpty
+                onSaved(try CoreContracts.saveDivisionAndGoal(piece: piece, division: division,
+                    first: first, last: last, handMode: handMode,
+                    editedGoal: goalChanged ? try basicGoal(for: handMode) : nil,
                     context: modelContext, activeSessionID: activeSessionID, isPro: canConfigurePro,
-                    timing: editTiming, analyzeTiming: analyzeTiming, adjustedStartHands: adjustedStartHands))
+                    timing: editTiming, analyzeTiming: analyzeTiming, adjustedStartHands: adjustedStartHands, activation: settings.activation(isPro: subscription.isPro), confirmedHands: confirmedHands))
             default: return
             }
             dismiss()
@@ -577,6 +486,7 @@ private struct CoreGoalInput: Equatable {
     var speed = ""
     var unit = CoreNoteUnit.quarter
     var participates = true
+    var hasLadderInput: Bool { !start.isEmpty || !step.isEmpty || !reps.isEmpty }
     var start = ""
     var step = ""
     var reps = ""
@@ -586,13 +496,14 @@ private struct CoreGoalInput: Equatable {
         return CoreLadderConfiguration(startBPM: start, stepBPM: step, repsPerLevel: reps, noteUnit: unit).isValid(target: target)
     }
 }
-private struct CoreGoalInputRow: View {
+private struct CoreGoalInputRow<LadderContent: View>: View {
     let hand: PracticeHand
     @Binding var input: CoreGoalInput
     var showRequiredError = false
     var unitLabel = "目标音符单位"
     var ladderIsValid = false
     var onUnitChange: (CoreNoteUnit) -> Void = { _ in }
+    @ViewBuilder var ladderContent: () -> LadderContent
     var body: some View {
         Section(hand.title) {
             LabeledContent("目标次数") {
@@ -613,8 +524,9 @@ private struct CoreGoalInputRow: View {
                 ForEach(CoreNoteUnit.allCases, id: \.self) { Text($0.title).tag($0) }
             }
             if showRequiredError && input.count.isEmpty && input.speed.isEmpty && !ladderIsValid {
-                Text("请填写目标次数、练习目标速度或完整开放式 Ladder。").coreType(.caption).foregroundStyle(.red)
+                Text("请填写目标次数、练习目标速度或完整开放式速度阶梯。").coreType(.caption).foregroundStyle(.red)
             }
+            ladderContent()
         }
     }
 }
@@ -629,7 +541,15 @@ struct CoreSessionView: View {
     let openGeoBeat: () -> Void
     let finish: () -> Void
     var onRoute: (CoreRoute) -> Void = { _ in }
+    var detach: () -> Void = {}
+    @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var contextRevealed = false
+    @State private var revealRequest = UUID()
+    private var showDetails: Bool { !runtime.isFocusEnabled || contextRevealed }
+    private var sessionCanvas: Color { CorePalette.canvas }
     @State private var continueAfterTargets = false
+    @State private var playbackError: String?
     private func allTargetCountsReached(in context: CoreSessionContext) -> Bool {
         context.handMode.hands.allSatisfy { hand in
             guard let targetCount = context.goal.hands[hand]?.count else {
@@ -649,71 +569,53 @@ struct CoreSessionView: View {
         }
     }
     var body: some View {
+        Group {
+            if runtime.isFocusEnabled, let context = runtime.context {
+                focusLayout(context)
+            } else {
+                ordinaryLayout
+            }
+        }
+        .background(sessionCanvas)
+        .toolbar(.hidden, for: .navigationBar)
+        .task(id: revealRequest) {
+            guard contextRevealed else { return }
+            try? await Task.sleep(for: .seconds(5))
+            guard !Task.isCancelled, !UIAccessibility.isVoiceOverRunning else { return }
+            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.20)) { contextRevealed = false }
+        }
+        .onChange(of: voiceOverEnabled) { _, _ in
+            if contextRevealed { revealRequest = UUID() }
+        }
+    }
+
+    private var ordinaryLayout: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 20) {
-                Text(isGeoBeat ? "GeoBeat" : "当前计划练习").font(.largeTitle.bold())
-                CoreTestLabel()
+                if runtime.context == nil { Text("GeoBeat").font(.largeTitle.bold()) }
                 if let context = runtime.context {
-                    Menu("练习操作") {
-                        Menu("切换曲目") {
-                            ForEach(songs.filter { $0.deletedAt == nil && !$0.isArchived && $0.id != context.pieceID }) { piece in
-                                Menu(piece.name) {
-                                    ForEach(events.filter { $0.songID == piece.id && $0.coreDefinition?.hasValidGoal == true }) { division in
-                                        Button(division.name) { onRoute(.startPractice(piece: piece.id, division: division.id)) }
-                                    }
-                                }
-                            }
-                        }
-                        Menu("切换练习划分") {
-                            ForEach(events.filter { $0.songID == context.pieceID && $0.id != context.divisionID && $0.coreDefinition?.hasValidGoal == true }) { division in
-                                Button(division.name) { onRoute(.startPractice(piece: context.pieceID, division: division.id)) }
-                            }
-                        }
-                        Button("归档当前曲目") { onRoute(.archivePiece(context.pieceID)) }
-                        Button("删除当前曲目", role: .destructive) { onRoute(.deletePiece(context.pieceID)) }
-                        Button("编辑划分范围 / 适用手型") { onRoute(.editDivision(piece: context.pieceID, division: context.divisionID)) }
-                    }.accessibilityIdentifier("core.session.actions")
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("正在记录到当前 Session").font(.headline)
-                        Text("《\(context.pieceName)》 · \(context.divisionName)")
-                        Text("状态：\(runtime.session.isRunning ? "练习中" : "已暂停") · 本次 \(runtime.count) 次")
-                        TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                            let seconds = PracticeHand.allCases.reduce(Int64(0)) { $0 + runtime.session.stats(for: $1, at: timeline.date).durationMilliseconds } / 1000
-                            Text("有效计时 \(seconds / 60):\(String(format: "%02lld", seconds % 60))").monospacedDigit()
-                        }
-                    }.padding().frame(maxWidth: .infinity, alignment: .leading).background(.quaternary, in: RoundedRectangle(cornerRadius: 12))
-                    if context.handMode.allowsHandSwitching {
-                        Picker("当前手型", selection: Binding(get: { runtime.session.currentHand }, set: {
-                            runtime.switchHand($0)
-                            engine.apply(runtime.preset)
-                        })) {
-                            ForEach(context.handMode.hands) { Text($0.title).tag($0) }
-                        }.pickerStyle(.segmented).accessibilityIdentifier("core.session.handSwitcher")
-                        .accessibilityRepresentation {
-                            HStack {
-                                ForEach(context.handMode.hands) { hand in
-                                    Button(hand.title) {
-                                        runtime.switchHand(hand)
-                                        engine.apply(runtime.preset)
-                                    }
-                                        .accessibilityAddTraits(runtime.session.currentHand == hand ? .isSelected : [])
-                                        .accessibilityIdentifier("core.session.hand.\(hand.rawValue)")
-                                }
-                            }
-                        }
-                    } else {
-                        Text("当前手型 · \(runtime.session.currentHand.title)").coreType(.body)
-                            .accessibilityIdentifier("core.session.currentHand")
+                    if showDetails {
+                    HStack(alignment: .center, spacing: 12) {
+                        sessionActions(context).frame(minHeight: 44)
+                        Spacer(minLength: 12)
+                        Button(runtime.hasStartedPlayback ? "结束练习" : "返回", action: finish)
+                            .buttonStyle(.plain).foregroundStyle(CorePalette.accent)
+                            .frame(minWidth: 44, minHeight: 44)
+                            .accessibilityIdentifier(runtime.hasStartedPlayback ? "core.session.finish" : "core.session.back")
                     }
-                    if let goal = context.goal.hands[runtime.session.currentHand] {
+                    Text("《\(context.pieceName)》 · \(context.divisionName)").coreType(.body)
+                        .accessibilityIdentifier("core.focus.context")
+                    }
+                    handControl(context)
+                    if showDetails, let goal = context.goal.hands[runtime.currentHand] {
                         let actualCount =
                             CoreAnalysis.count(
                                 CoreAnalysis.planned(attempts, division: context.divisionID),
-                                hand: runtime.session.currentHand,
+                                hand: runtime.currentHand,
                                 cycleStart: context.cycleStart
                             )
                             + runtime.session.completionSamples(
-                                for: runtime.session.currentHand
+                                for: runtime.currentHand
                             ).count
 
                         VStack(alignment: .leading, spacing: 4) {
@@ -739,72 +641,67 @@ struct CoreSessionView: View {
                         if let target = goal.speed { Text("目标：\(target.noteUnit.title) = \(target.bpm) BPM").foregroundStyle(.secondary) }
                     }
                 } else {
-                    Text("独立 GeoBeat · 未关联计划 Session").font(.headline)
-                    Text("当前使用节拍器不会改变任何划分的 Goal 或 Stable BPM。").font(.callout).foregroundStyle(.secondary)
+                    Text("独立 GeoBeat · 未关联计划练习").font(.headline)
                 }
-                if isGeoBeat {
-                    PrototypePulseStage(
-                        preset: engine.preset,
-                        pulse: engine.lastPulse,
-                        isPlaying: engine.isPlaying
-                    )
-                    .frame(height: 240)
-                    .contentShape(Rectangle())
-                    .onTapGesture {
-                        if engine.isPlaying {
-                            engine.pause()
-                            runtime.pause()
-                        } else {
-                            engine.start()
-                            if engine.isPlaying {
-                                runtime.resume()
-                            }
-                        }
-                    }
-                    .accessibilityLabel(engine.isPlaying ? "节拍器正在运行" : "节拍器已暂停")
-                    .accessibilityHint("轻点切换运行状态")
+                if isGeoBeat || runtime.context != nil {
+                    beatControl
+
                 }
-                CoreTempoControls(engine: engine)
-                if let context = runtime.context, context.goal.ladderEnabled == true,
-                   let config = context.goal.hands[runtime.session.currentHand]?.ladder,
-                   let state = runtime.execution?.ladderStates?[runtime.session.currentHand] {
+                CoreTempoControls(engine: engine, compact: runtime.isFocusEnabled && !contextRevealed)
+                if showDetails, let context = runtime.context, context.goal.ladderEnabled == true,
+                   let config = context.goal.hands[runtime.currentHand]?.ladder,
+                   let state = runtime.execution?.ladderStates?[runtime.currentHand] {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("当前档 \(state.currentBPM) BPM（\(state.noteUnit.title)） · \(state.repsCompleted) / \(config.repsPerLevel)")
                             .accessibilityIdentifier("core.session.ladder")
-                        Text(state.startLocked ? "本周期起始 BPM 已锁定；实际速度仍可自由调整。" : "第一条有效阶梯记录前，本周期起始 BPM 可编辑。")
+                        Text(state.startLocked ? "本周期起始速度已锁定" : "本周期起始速度未锁定")
                             .accessibilityIdentifier("core.session.startLock")
-                        if let target = context.goal.hands[runtime.session.currentHand]?.speed {
+                        if let target = context.goal.hands[runtime.currentHand]?.speed {
                             Text("阶梯目标 \(target.bpm) BPM")
                             if state.currentBPM > target.bpm {
                                 Text("当前档高于新目标，停止自动升速；已有进度不回退。")
                             } else if state.currentBPM == target.bpm {
-                                Text("已达到目标档；保持目标速度完成剩余次数。Session 不会自动结束。")
+                                Text("已达到目标速度")
                             }
                         } else if state.currentBPM == 300 {
-                            Text("已到执行上限 300 BPM，可继续记录；这不是目标达成。")
+                            Text("已到执行上限 300 BPM")
                         } else { Text("开放式阶梯 · 无目标速度") }
                     }.font(.caption).foregroundStyle(.secondary)
                 }
-                if let context = runtime.context, context.goal.ladderEnabled != true,
-                   let stable = CoreAnalysis.stable(CoreAnalysis.planned(attempts, division: context.divisionID), hand: runtime.session.currentHand) {
+                if showDetails, let context = runtime.context, context.goal.ladderEnabled != true,
+                   let stable = CoreAnalysis.stable(CoreAnalysis.planned(attempts, division: context.divisionID), hand: runtime.currentHand) {
                     let suggested = stable / engine.preset.referenceNote.durationInQuarterNotes
                     Text("建议起始速度：\(suggested.formatted(.number.precision(.fractionLength(0...1)))) BPM（\(engine.preset.referenceNote.title)）。可自行修改。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if let message = engine.errorMessage { Text(message).foregroundStyle(.red) }
-                if !isGeoBeat {
-                    CoreButton(title: "进入 GeoBeat 练习", action: openGeoBeat).accessibilityIdentifier("core.session.openGeoBeat")
-                    CoreButton(title: runtime.session.isRunning ? "暂停计时" : "继续计时", kind: .secondary) {
-                        if runtime.session.isRunning { runtime.pause(); engine.pause() } else { runtime.resume() }
+                if let message = playbackError ?? engine.errorMessage { Text(message).foregroundStyle(.red) }
+                if showDetails, runtime.context != nil {
+                    TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                        let seconds = PracticeHand.allCases.reduce(Int64(0)) { $0 + runtime.session.stats(for: $1, at: timeline.date).durationMilliseconds } / 1000
+                        Text("有效时间 \(seconds / 60):\(String(format: "%02lld", seconds % 60))")
+                            .monospacedDigit().coreType(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("core.session.duration")
                     }
                 }
-                
+                if runtime.isFocusEnabled {
+                    Color.clear.frame(height: 56).contentShape(Rectangle())
+                        .onTapGesture { revealContext() }
+                        .accessibilityLabel("显示练习信息")
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityAction { revealContext() }
+                        .accessibilityIdentifier("core.focus.reveal")
+                }
             }.padding().frame(maxWidth: 720).frame(maxWidth: .infinity)
+                .background {
+                    if runtime.isFocusEnabled {
+                        sessionCanvas.contentShape(Rectangle()).onTapGesture { revealContext() }
+                    }
+                }
         }
-        .background(CorePalette.canvas)
+        .background(sessionCanvas)
         .safeAreaInset(edge: .bottom) {
-            if isGeoBeat, let context = runtime.context {
-                if allTargetCountsReached(in: context) && !continueAfterTargets {
+            if let context = runtime.context {
+                if runtime.hasStartedPlayback && allTargetCountsReached(in: context) && !continueAfterTargets {
                     HStack(spacing: 12) {
                         CoreButton(title: "继续练习") {
                             continueAfterTargets = true
@@ -814,40 +711,228 @@ struct CoreSessionView: View {
                     }
                     .padding(.horizontal)
                     .padding(.vertical, 8)
-                    .background(CorePalette.canvas)
+                    .background(sessionCanvas)
 
                 } else {
-                    CoreButton(title: "完成一次 · \(runtime.session.currentHand.title)") {
+                    CoreButton(title: runtime.hasStartedPlayback ? "完成一次 · \(runtime.currentHand.title)" : "开始播放后可记录") {
                         runtime.record(preset: engine.effectivePlaybackPreset)
                         engine.apply(runtime.preset)
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     }
-                    .disabled(!runtime.session.isRunning)
+                    .disabled(!runtime.session.isRunning || !engine.isPlaying)
                     .accessibilityIdentifier("core.session.record")
                     .padding(.horizontal)
                     .padding(.vertical, 8)
-                    .background(CorePalette.canvas)
+                    .background(sessionCanvas)
                 }
             }
         }
         .padding(.bottom, 56)
-        .toolbar {
-            ToolbarItem(placement: .topBarTrailing) {
-                if runtime.context != nil {
-                    Button("结束练习", action: finish)
-                        .accessibilityIdentifier("core.session.finish")
+
+    }
+    private func sessionActions(_ context: CoreSessionContext) -> some View {
+                    Menu("练习操作") {
+                        Button("独立使用 GeoBeat", action: detach)
+                            .accessibilityIdentifier("core.session.detach")
+                        Menu("切换曲目") {
+                            ForEach(songs.filter { $0.deletedAt == nil && !$0.isArchived && $0.id != context.pieceID }) { piece in
+                                Menu(piece.name) {
+                                    ForEach(events.filter { $0.songID == piece.id && $0.coreDefinition?.hasValidGoal == true }) { division in
+                                        Button(division.name) { onRoute(.startPractice(piece: piece.id, division: division.id)) }
+                                    }
+                                }
+                            }
+                        }
+                        Menu("切换练习划分") {
+                            ForEach(events.filter { $0.songID == context.pieceID && $0.id != context.divisionID && $0.coreDefinition?.hasValidGoal == true }) { division in
+                                Button(division.name) { onRoute(.startPractice(piece: context.pieceID, division: division.id)) }
+                            }
+                        }
+                        Button("归档当前曲目") { onRoute(.archivePiece(context.pieceID)) }
+                        Button("删除当前曲目", role: .destructive) { onRoute(.deletePiece(context.pieceID)) }
+                        Button("编辑划分范围 / 适用手型") { onRoute(.editDivision(piece: context.pieceID, division: context.divisionID)) }
+                    }.accessibilityIdentifier("core.session.actions")
+    }
+
+    private var beatControl: some View {
+                    PrototypePulseStage(
+                        preset: engine.preset,
+                        pulse: engine.lastPulse,
+                        isPlaying: engine.isPlaying
+                    )
+                    .frame(height: 240)
+                    .contentShape(Rectangle())
+                    .onTapGesture { togglePlayback() }
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityAction { togglePlayback() }
+                    .accessibilityIdentifier("core.session.beat")
+                    .accessibilityLabel(engine.isPlaying ? "节拍器正在运行" : "节拍器已暂停")
+                    .accessibilityHint("轻点切换运行状态")
+    }
+
+    @ViewBuilder private func handControl(_ context: CoreSessionContext) -> some View {
+                    if context.handMode.allowsHandSwitching {
+                        Picker("当前手型", selection: Binding(get: { runtime.currentHand }, set: {
+                            runtime.switchHand($0)
+                            engine.apply(runtime.preset)
+                        })) {
+                            ForEach(context.handMode.hands) { Text($0.title).tag($0) }
+                        }.pickerStyle(.segmented).accessibilityIdentifier("core.session.handSwitcher")
+                        .accessibilityRepresentation {
+                            HStack {
+                                ForEach(context.handMode.hands) { hand in
+                                    Button(hand.title) {
+                                        runtime.switchHand(hand)
+                                        engine.apply(runtime.preset)
+                                    }
+                                        .accessibilityAddTraits(runtime.currentHand == hand ? .isSelected : [])
+                                        .accessibilityIdentifier("core.session.hand.\(hand.rawValue)")
+                                }
+                            }
+                        }
+                    } else {
+                        Text("当前手型 · \(runtime.currentHand.title)").coreType(.body)
+                            .accessibilityIdentifier("core.session.currentHand")
+                    }
+
+    }
+
+    private func focusLayout(_ context: CoreSessionContext) -> some View {
+        GeometryReader { geometry in
+            ScrollView {
+                VStack(spacing: 12) {
+                    VStack(spacing: 6) {
+                        HStack(alignment: .center, spacing: 8) {
+                            if !runtime.hasStartedPlayback { provisionalBack }
+                            Text(context.pieceName).font(.headline)
+                                .multilineTextAlignment(.center).frame(maxWidth: .infinity)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if !runtime.hasStartedPlayback {
+                                provisionalBack.hidden().accessibilityHidden(true)
+                            }
+                        }
+                        let actual = CoreAnalysis.count(CoreAnalysis.planned(attempts, division: context.divisionID), hand: runtime.currentHand, cycleStart: context.cycleStart)
+                            + runtime.session.completionSamples(for: runtime.currentHand).count
+                        let target = context.goal.hands[runtime.currentHand]?.count
+                        Text(target.map { "\(actual) / \($0)" } ?? "\(actual)")
+                            .monospacedDigit().font(.title2)
+                            .accessibilityLabel("\(runtime.currentHand.title)，已练习 \(actual) 次" + (target.map { "，目标 \($0) 次" } ?? ""))
+                            .accessibilityIdentifier("core.focus.count")
+                    }.frame(maxWidth: .infinity, alignment: .center)
+                    Spacer(minLength: 0)
+                    beatControl
+                    Spacer(minLength: 0)
+                    if contextRevealed {
+                        VStack(spacing: 4) {
+                            Text(context.divisionName)
+                            TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                                Text("有效时间 \(runtime.practiceDurationMilliseconds(at: timeline.date) / 1000) 秒")
+                            }
+                            sessionActions(context)
+                            if let target = context.goal.hands[runtime.currentHand]?.speed {
+                                Text("目标：\(target.noteUnit.title) = \(target.bpm) BPM")
+                            }
+                            if let state = runtime.execution?.ladderStates?[runtime.currentHand],
+                               let ladder = context.goal.hands[runtime.currentHand]?.ladder {
+                                Text("当前档 \(state.currentBPM) BPM · \(state.repsCompleted) / \(ladder.repsPerLevel)")
+                            }
+                        }.font(.caption).foregroundStyle(.secondary)
+                            .multilineTextAlignment(.center)
+                            .frame(maxWidth: .infinity, alignment: .center)
+                            .accessibilityIdentifier("core.focus.context")
+                    }
+                    if let message = playbackError ?? engine.errorMessage { Text(message).foregroundStyle(.red) }
+                }
+                .padding(.horizontal).padding(.vertical, 12)
+                .frame(maxWidth: 720)
+                .frame(minHeight: geometry.size.height)
+                .frame(maxWidth: .infinity)
+                .background {
+                    sessionCanvas.contentShape(Rectangle()).onTapGesture { revealContext() }
+                        .accessibilityLabel("显示练习信息").accessibilityAddTraits(.isButton)
+                        .accessibilityAction { revealContext() }.accessibilityIdentifier("core.focus.reveal")
                 }
             }
         }
-    }    }
+        .safeAreaInset(edge: .bottom, spacing: 0) {
+            VStack(spacing: 12) {
+                handControl(context).frame(minHeight: 44)
+                CoreTempoControls(engine: engine, compact: true)
+                if runtime.hasStartedPlayback && allTargetCountsReached(in: context) && !continueAfterTargets {
+                    HStack {
+                        CoreButton(title: "继续练习") { continueAfterTargets = true }
+                        CoreButton(title: "结束练习", action: finish)
+                    }
+                } else {
+                    CoreButton(title: runtime.hasStartedPlayback ? "完成一次" : "开始播放后可记录") {
+                        runtime.record(preset: engine.effectivePlaybackPreset)
+                        engine.apply(runtime.preset)
+                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                    }.disabled(!runtime.session.isRunning || !engine.isPlaying)
+                        .accessibilityIdentifier("core.session.record")
+                    if runtime.hasStartedPlayback {
+                        Button("结束练习", action: finish).frame(minHeight: 44)
+                            .accessibilityIdentifier("core.session.finish")
+                    }
+                }
+            }.padding(.horizontal).padding(.bottom, 12)
+                .frame(maxWidth: 720).frame(maxWidth: .infinity).background(sessionCanvas)
+        }
+    }
+
+    private var provisionalBack: some View {
+        Button("返回", action: finish)
+            .buttonStyle(.plain).foregroundStyle(CorePalette.accent)
+            .frame(minWidth: 44, minHeight: 44)
+            .fixedSize(horizontal: true, vertical: false)
+            .accessibilityIdentifier("core.session.back")
+    }
+
+    private func revealContext() {
+        guard runtime.isFocusEnabled else { return }
+        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.20)) { contextRevealed = true }
+        revealRequest = UUID()
+    }
+    private func togglePlayback() {
+        if engine.isPlaying {
+            engine.pause()
+            runtime.synchronizePlayback(isPlaying: false)
+        } else {
+            do {
+                try runtime.startPlayback {
+                    engine.start()
+                    return engine.isPlaying
+                }
+                playbackError = nil
+            } catch { playbackError = error.localizedDescription }
+        }
+    }
+}
 
 private struct CoreTempoControls: View {
     @ObservedObject var engine: MetronomeEngine
+    var compact = false
+    @State private var dragStartBPM: Int?
     @State private var enteredBPM = ""
     @State private var inputError: String?
     @FocusState private var bpmFocused: Bool
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
+        VStack(alignment: compact ? .center : .leading, spacing: compact ? 8 : 16) {
+            if compact {
+                Text("\(engine.preset.bpm) BPM").font(.title.monospacedDigit()).frame(maxWidth: .infinity, minHeight: 44)
+                    .contentShape(Rectangle())
+                    .gesture(DragGesture(minimumDistance: 4).onChanged { value in
+                        let start = dragStartBPM ?? engine.preset.bpm
+                        dragStartBPM = start
+                        engine.setBPM(min(300, max(20, start + Int((value.translation.width - value.translation.height) / 4))))
+                    }.onEnded { _ in dragStartBPM = nil })
+                    .accessibilityLabel("实际速度")
+                    .accessibilityValue("\(engine.preset.bpm) BPM")
+                    .accessibilityHint("滑动调整速度")
+                    .accessibilityAdjustableAction { direction in
+                        engine.setBPM(min(300, max(20, engine.preset.bpm + (direction == .increment ? 1 : -1))))
+                    }.accessibilityIdentifier("core.tempo.bpm")
+            } else {
             Stepper("实际速度：\(engine.preset.bpm) BPM", value: Binding(get: { engine.preset.bpm }, set: { engine.setBPM($0) }), in: 20...300)
                 .accessibilityIdentifier("core.tempo.bpm")
             HStack {
@@ -861,12 +946,14 @@ private struct CoreTempoControls: View {
                 }.accessibilityIdentifier("core.tempo.apply")
             }
             if let inputError { Text(inputError).font(.caption).foregroundStyle(.red) }
+            }
             Picker("实际音符单位", selection: Binding(get: { engine.preset.referenceNote }, set: {
                 var value = engine.preset; value.referenceNote = $0; engine.apply(value)
             })) {
                 ForEach(TempoReferenceNote.allCases) { Text($0.title).tag($0) }
             }
-            Stepper("每小节 \(engine.preset.beats) 拍", value: Binding(get: { engine.preset.beats }, set: { engine.setBeats($0) }), in: 1...9)
+            .frame(maxWidth: compact ? .infinity : nil, minHeight: compact ? 44 : nil, alignment: .center)
+            if !compact { Stepper("每小节 \(engine.preset.beats) 拍", value: Binding(get: { engine.preset.beats }, set: { engine.setBeats($0) }), in: 1...9) }
         }
     }
 }
@@ -878,19 +965,18 @@ struct CoreAnalyzeView: View {
     let scope: CoreAnalyzeContext
     var body: some View {
         List {
-            Section { CoreTestLabel(); Text("只使用已确认保存的计划练习。速度按手型分别计算，未练过的手型显示暂无数据。") }
             ForEach(filteredEvents) { event in
                 if let definition = event.coreDefinition {
                     Section("《\(songs.first { $0.id == event.songID }?.name ?? "曲目")》 · \(event.name)") {
                         CoreDivisionAnalysis(definition: definition, attempts: CoreAnalysis.planned(attempts, division: event.id))
                         if let latest = CoreAnalysis.planned(attempts, division: event.id).first {
-                            NavigationLink("查看最近一次 Session 结果") { CoreSavedSessionView(attempt: latest) }
+                            NavigationLink("查看最近一次练习结果") { CoreSavedSessionView(attempt: latest) }
                         }
                     }
                 }
             }
-            if filteredEvents.isEmpty { Text("还没有练习划分。添加曲目并完成一次计划练习后查看结果。") }
-        }.navigationTitle("Analyze").navigationBarTitleDisplayMode(.inline)
+            if filteredEvents.isEmpty { Text("暂无练习数据") }
+        }.navigationTitle("分析").navigationBarTitleDisplayMode(.inline)
     }
     private var filteredEvents: [PracticeEvent] {
         events.filter { event in
@@ -905,8 +991,8 @@ struct CoreAnalyzeView: View {
 }
 
 struct CoreDivisionAnalysis: View {
-    @EnvironmentObject private var subscription: SubscriptionStore
     @State private var previewPro = false
+    @EnvironmentObject private var subscription: SubscriptionStore
     let definition: CoreDivisionDefinition
     let attempts: [PracticeAttempt]
     var comparison: [PracticeHand: Double] = [:]
@@ -916,7 +1002,7 @@ struct CoreDivisionAnalysis: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(hand.title).font(.headline)
                 let stable = CoreAnalysis.stable(attempts, hand: hand)
-                Text("Stable BPM：\(stable.map(format) ?? "暂无数据")（四分音符等值）")
+                Text("稳定速度：\(stable.map(format) ?? "暂无数据")（四分音符等值）")
                 if let previous = comparison[hand], let stable {
                     Text("保存前 \(format(previous)) → 保存后 \(format(stable))").font(.caption)
                 }
@@ -937,7 +1023,7 @@ struct CoreDivisionAnalysis: View {
                         Text("当前只有次数目标，暂时无法计算熟练度；设置练习目标速度后可计算熟练度与弱项。").font(.caption)
                     }
                     if subscription.isPro || previewPro {
-                        Text("Goal Gap").font(.subheadline.bold())
+                        Text("目标差距").font(.subheadline.bold())
                         if let targetCount = target.count { Text("次数差距：\(max(0, targetCount - count)) 次") }
                         if let speed = target.speed {
                             if let stable { Text("速度差距：\(format(max(0, Double(speed.bpm) - stable / speed.noteUnit.quarterMultiplier))) BPM（\(speed.noteUnit.title)）") }
@@ -952,13 +1038,13 @@ struct CoreDivisionAnalysis: View {
             Text(mastery <= 0.8 ? "基础弱项提醒：距当前目标熟练度仍有至少 20% 差距。" : "当前划分未触发基础弱项提醒。")
         } else { Text("划分 Mastery：尚未建立").foregroundStyle(.secondary) }
         if !subscription.isPro {
-            Text("详细 Goal Gap 为 Pro 分析。Free 可查看当前 Stable BPM、次数进度及基础熟练度。").font(.caption).foregroundStyle(.secondary)
+            Text("详细目标差距为 Pro 分析。Free 可查看当前稳定速度、次数进度及基础熟练度。").font(.caption).foregroundStyle(.secondary)
 #if DEBUG
-            Toggle("测试预览 Pro Goal Gap", isOn: $previewPro)
+            Toggle("测试预览 Pro 目标差距", isOn: $previewPro)
             if previewPro { Text("仅此 Debug 界面的验收预览；不代表购买或解锁 Pro。").font(.caption).foregroundStyle(.secondary) }
 #endif
         }
-        Text("已保存 Session：\(attempts.count)").font(.caption)
+        Text("已保存练习：\(attempts.count)").font(.caption)
     }
     private func format(_ value: Double) -> String { value.formatted(.number.precision(.fractionLength(0...1))) }
 }
@@ -982,11 +1068,10 @@ struct CoreResultView: View {
         NavigationStack {
             List {
                 Section {
-                    CoreTestLabel()
                     Text("《\(destination.context.pieceName)》 · \(destination.context.divisionName)")
-                    Text("Session 所属周期：\(destination.context.cycleLabel)").font(.callout)
+                    Text("练习所属周期：\(destination.context.cycleLabel)").font(.callout)
                     Text("跨午夜也归属于开始时的每日周期。当前周期进度在下方另行显示。").font(.caption).foregroundStyle(.secondary)
-                    Text(saved == nil ? "请核对本次数据，再确认保存。" : "Session 已保存，已更新对应划分的分析。")
+                    Text(saved == nil ? "请核对本次数据，再确认保存。" : "练习已保存，已更新对应划分的分析。")
                 }
                 let samples = saved?.completions ?? runtime.session.reviewSummary?.completions ?? []
                 Section("本次有效时长") {
@@ -999,7 +1084,7 @@ struct CoreResultView: View {
                     ForEach(samples) { sample in
                         Text("\(sample.hand.title) · \(sample.preset.referenceNote.title) = \(sample.preset.bpm) BPM · \(sample.completedAt.formatted(date: .abbreviated, time: .standard))")
                     }
-                    if samples.isEmpty { Text("没有完成记录；退出不会保存空 Session。") }
+                    if samples.isEmpty { Text("没有完成记录；退出不会保存空练习。") }
                 }
                 if let saved, let definition = events.first(where: { $0.id == saved.eventID })?.coreDefinition {
                     Section("本次所属周期累计") {
@@ -1008,15 +1093,15 @@ struct CoreResultView: View {
                             Text("\(hand.title)：\(count) 次（\(destination.context.cycleLabel)）")
                         }
                     }
-                    Section("保存结果 / Analyze") {
+                    Section("保存结果 / 分析") {
                         CoreDivisionAnalysis(definition: definition, attempts: CoreAnalysis.planned(attempts, division: saved.eventID), comparison: before)
                     }
-                    Button("返回练习划分") { returnToDivision() }.accessibilityIdentifier("core.result.return")
+                    Button("返回曲目") { returnToDivision() }.accessibilityIdentifier("core.result.return")
                 } else {
                     if !samples.isEmpty {
                         Button("确认保存", action: save).accessibilityIdentifier("core.result.save")
                     } else {
-                        Button("结束并返回（不保存空 Session）") {
+                        Button("结束并返回（不保存空练习）") {
                             do { try runtime.discardEmpty(); returnToDivision() } catch { self.error = error.localizedDescription }
                         }
                     }
@@ -1035,7 +1120,7 @@ struct CoreResultView: View {
         } catch { self.error = error.localizedDescription }
     }
     private func returnToDivision() {
-        onReturn(.division(piece: destination.context.pieceID, division: destination.context.divisionID)); dismiss()
+        onReturn(.piece(destination.context.pieceID)); dismiss()
     }
 }
 
@@ -1045,11 +1130,10 @@ private struct CoreSavedSessionView: View {
     var body: some View {
         List {
             Section {
-                CoreTestLabel()
                 Text("计划练习 · 已确认保存")
                 if let context = attempt.coreContext {
                     Text("《\(context.pieceName)》 · \(context.divisionName)")
-                    Text("Session 所属周期：\(context.cycleLabel)")
+                    Text("练习所属周期：\(context.cycleLabel)")
                 }
                 Text("结束时间：\(attempt.finishedAt.formatted(date: .abbreviated, time: .standard))")
             }
@@ -1064,7 +1148,7 @@ private struct CoreSavedSessionView: View {
                     Text("\(sample.hand.title) · \(sample.preset.referenceNote.title) = \(sample.preset.bpm) BPM · \(sample.completedAt.formatted(date: .abbreviated, time: .standard))")
                 }
             }
-        }.navigationTitle("已保存 Session").navigationBarTitleDisplayMode(.inline)
+        }.navigationTitle("已保存练习").navigationBarTitleDisplayMode(.inline)
     }
 }
 
@@ -1078,14 +1162,14 @@ struct CoreCycleStartView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Text("确认新周期起始 BPM").font(.headline)
+                Text("确认起始速度").font(.headline)
                 ForEach(hands) { hand in
                     Section(hand.title) {
                         if let config = definition.goal?.hands[hand]?.ladder,
                            let suggestion = definition.ladderStates?[hand]?.suggestedStart(in: config.noteUnit) {
                             Text("建议 \(suggestion) BPM；请自行确认真实起始速度。")
                         }
-                        LabeledContent("Start · 起始 BPM") {
+                        LabeledContent("起始速度（BPM）") {
                             TextField("必填", text: Binding(get: { inputs[hand] ?? "" }, set: { inputs[hand] = $0 }))
                                 .keyboardType(.numberPad).accessibilityIdentifier("core.cycle.\(hand.rawValue).start")
                         }
@@ -1184,7 +1268,7 @@ struct CoreRecentlyDeletedView: View {
                 }
             }
         }
-        .navigationTitle("Piece Recently Deleted")
+        .navigationTitle("最近删除的曲目")
         .navigationBarTitleDisplayMode(.inline)
         .onAppear { if !subscription.isPro { dismiss() } }
         .onChange(of: subscription.isPro) { _, isPro in if !isPro { dismiss() } }
@@ -1202,36 +1286,82 @@ struct CoreRecentlyDeletedView: View {
         }
     }
 }
+// Shared lightweight actions; no Piece Settings destination.
+struct CorePieceActions: View {
+    let piece: PracticeSong
+    let onRoute: (CoreRoute) -> Void
+    var body: some View {
+        Button(piece.isArchived ? "取消归档" : "归档") {
+            onRoute(piece.isArchived ? .unarchivePiece(piece.id) : .archivePiece(piece.id))
+        }
+        Button("删除", role: .destructive) { onRoute(.deletePiece(piece.id)) }
+    }
+}
+
 struct CoreArchiveView: View {
     @Query(sort: [SortDescriptor(\PracticeSong.sortIndex), SortDescriptor(\PracticeSong.createdAt)]) private var songs: [PracticeSong]
-    @Environment(\.dismiss) private var dismiss
+    @Query private var events: [PracticeEvent]
+    @Environment(\.modelContext) private var modelContext
+    @EnvironmentObject private var subscription: SubscriptionStore
     let activeSessionID: UUID?
     let onRoute: (CoreRoute) -> Void
+    @State private var confirmation: CoreRoute?
+    @State private var error: String?
+    @State private var undoID: UUID?
+    @State private var undoPresentationID = UUID()
     private var archivedPieces: [PracticeSong] { songs.filter { $0.isArchived && $0.deletedAt == nil } }
     var body: some View {
-        NavigationStack {
-            Form {
-                if archivedPieces.isEmpty {
-                    ContentUnavailableView("暂无归档曲目", systemImage: "archivebox",
-                        description: Text("归档的曲目会显示在这里，练习历史仍然保留。"))
-                } else {
-                    Section {
-                        ForEach(archivedPieces) { piece in
-                            Button { onRoute(.pieceSettings(piece.id)) } label: {
-                                VStack(alignment: .leading) {
-                                    Text(piece.name)
-                                    Text("已归档 · 管理曲目").font(.caption).foregroundStyle(.secondary)
-                                }
-                            }
-                        }
-                    }
-                    Section {
-                        Button("删除全部已归档曲目", role: .destructive) { onRoute(.deleteAllArchivedPieces) }
+        Form {
+            if archivedPieces.isEmpty {
+                ContentUnavailableView("暂无归档曲目", systemImage: "archivebox")
+            } else {
+                Section {
+                    ForEach(archivedPieces) { piece in
+                        Menu { CorePieceActions(piece: piece, onRoute: act) } label: {
+                            Text(piece.name).frame(maxWidth: .infinity, alignment: .leading)
+                        }.accessibilityIdentifier("core.archive.actions.\(piece.id)")
                     }
                 }
-            }.navigationTitle("已归档曲目")
-                .navigationBarTitleDisplayMode(.inline)
-            .toolbar { ToolbarItem(placement: .cancellationAction) { Button("关闭") { dismiss() } } }       }
+                Section {
+                    Button("删除全部已归档曲目", role: .destructive) { act(.deleteAllArchivedPieces) }
+                }
+            }
+        }
+        .navigationTitle("已归档曲目").navigationBarTitleDisplayMode(.inline)
+        .sheet(isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } })) {
+            if let confirmation {
+                CoreExitHandoffView(route: confirmation, songs: songs, events: events,
+                    activeSessionID: activeSessionID, onCompleted: {
+                        if case .deletePiece(let id) = confirmation, subscription.isPro {
+                            undoPresentationID = UUID(); undoID = id
+                        }
+                        self.confirmation = nil
+                    }, onCancel: { self.confirmation = nil })
+            }
+        }
+        .safeAreaInset(edge: .bottom) {
+            if let undoID {
+                CoreQuickUndoView(restore: {
+                    guard let piece = songs.first(where: { $0.id == undoID }) else { return false }
+                    do {
+                        try CoreContracts.restoreRecentlyDeletedPiece(piece: piece, context: modelContext, isPro: subscription.isPro)
+                        return true
+                    } catch { self.error = error.localizedDescription; return false }
+                }, finish: { id in
+                    if id == undoPresentationID { self.undoID = nil }
+                }, presentationID: undoPresentationID).id(undoPresentationID)
+            }
+        }
+        .alert("无法完成操作", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            Button("好") { error = nil }
+        } message: { Text(error ?? "") }
+    }
+    private func act(_ route: CoreRoute) {
+        if activeSessionID != nil { onRoute(route); return }
+        if case .unarchivePiece(let id) = route, let piece = songs.first(where: { $0.id == id }) {
+            do { try CoreContracts.unarchivePiece(piece: piece, context: modelContext) }
+            catch { self.error = error.localizedDescription }
+        } else { confirmation = route }
     }
 }
 
@@ -1319,7 +1449,6 @@ struct CoreExitHandoffView: View {
         NavigationStack {
             Form {
                 Section {
-                    CoreTestLabel()
                     Text(title).font(.headline).accessibilityIdentifier(identifier)
                     Text(songs.first { $0.id == pieceID }?.name ?? "")
                 }
@@ -1335,7 +1464,7 @@ struct CoreExitHandoffView: View {
                     Section {
                         switch subscription.effectiveAccessState {
                         case .checking: Text("正在确认订阅状态…")
-                        case .entitled: Text("所有已归档曲目将进入 Piece Recently Deleted，保留 7 天；期间可以恢复为已归档状态，到期后永久删除。")
+                        case .entitled: Text("所有已归档曲目将进入最近删除的曲目，保留 7 天；期间可以恢复为已归档状态，到期后永久删除。")
                         case .notEntitled: Text("所有已归档曲目将被永久删除。此操作无法撤销。")
                         }
                     }
@@ -1356,7 +1485,7 @@ struct CoreExitHandoffView: View {
                                 .foregroundStyle(.secondary)
 
                         case .entitled:
-                            Text("这首曲目将进入 Piece Recently Deleted，并保留 7 天。保留期内可以恢复；到期后将永久删除。")
+                            Text("这首曲目将进入最近删除的曲目，并保留 7 天。保留期内可以恢复；到期后将永久删除。")
                                 .foregroundStyle(.secondary)
 
                         case .notEntitled:
@@ -1399,3 +1528,29 @@ struct CoreExitHandoffView: View {
     }
 }
 
+
+struct CoreGlobalSettingsView: View {
+    @EnvironmentObject private var settings: CorePracticeSettings
+    @EnvironmentObject private var subscription: SubscriptionStore
+    @Environment(\.dismiss) private var dismiss
+    let activeSession: Bool
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("Pro 功能") {
+                    if subscription.isPro {
+                        Toggle("专注模式", isOn: Binding(get: { settings.focusEnabled }, set: {
+                            settings.setFocusEnabled($0, isPro: subscription.isPro)
+                        })).accessibilityIdentifier("core.settings.focus")
+                        Toggle("速度阶梯", isOn: Binding(get: { settings.ladderEnabled }, set: {
+                            settings.setLadderEnabled($0, isPro: subscription.isPro)
+                        })).accessibilityIdentifier("core.settings.globalLadder")
+                        if activeSession { Text("下一次练习生效").font(.caption) }
+                    }
+                    NavigationLink("Rovia Pro 权益") { PrototypeProView() }
+                }
+            }.navigationTitle("设置").navigationBarTitleDisplayMode(.inline)
+                .toolbar { ToolbarItem(placement: .cancellationAction) { Button("返回") { dismiss() } } }
+        }
+    }
+}

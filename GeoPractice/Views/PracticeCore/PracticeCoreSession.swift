@@ -14,6 +14,9 @@ struct CoreSessionContext: Codable, Equatable {
     var cycleStart: Date
     var timeZoneID: String
     var source = "planned"
+    // Additive facts: absent on legacy data, never inferred or backfilled.
+    var focusEnabled: Bool?
+    var focusDurationMilliseconds: Int64?
     var cycleLabel: String {
         let formatter = DateFormatter()
         formatter.locale = .autoupdatingCurrent
@@ -40,7 +43,7 @@ enum CoreFlowError: LocalizedError {
         switch self {
         case .invalidInput(let message): message
         case .damagedDraft: "未完成练习资料无法读取。资料已保留，请联系开发者处理后再开始新练习。"
-        case .noRecording: "本次没有完成记录，不保存空 Session。"
+        case .noRecording: "本次没有完成记录，不保存空练习。"
         }
     }
 }
@@ -55,6 +58,9 @@ final class CoreSessionRuntime: ObservableObject {
     @Published var needsRecovery = false
     @Published private(set) var failure: String?
     @Published private(set) var execution: CoreDivisionDefinition?
+    @Published private(set) var hasStartedPlayback = false
+    @Published private var provisionalHand: PracticeHand = .both
+    private var provisionalSource: (piece: PracticeSong, division: PracticeEvent, calendar: Calendar, starts: [PracticeHand: Int], activation: CoreLadderActivation, focusEnabled: Bool)?
     private let defaults: UserDefaults
     private struct Draft: Codable {
         var session: PracticeSession
@@ -62,8 +68,10 @@ final class CoreSessionRuntime: ObservableObject {
         var preset: MetronomePreset
         var savedAt: Date
         var execution: CoreDivisionDefinition?
+        var hasStartedPlayback: Bool?
     }
-    var activeID: UUID? { context == nil ? nil : session.sessionID }
+    var activeID: UUID? { hasStartedPlayback && context != nil ? session.sessionID : nil }
+    var currentHand: PracticeHand { hasStartedPlayback ? session.currentHand : provisionalHand }
     var count: Int { PracticeHand.allCases.reduce(0) { $0 + session.completionSamples(for: $1).count } }
 
     init(defaults: UserDefaults = .standard, restore: Bool = true) {
@@ -78,6 +86,7 @@ final class CoreSessionRuntime: ObservableObject {
             context = draft.context
             preset = draft.preset
             execution = draft.execution
+            hasStartedPlayback = draft.hasStartedPlayback ?? true
             if count == 0 { clear(); return } // SES-04: never retain an empty formal session after exit.
             // Exclude process downtime, keeping identity and real samples.
             session.pause(at: draft.savedAt)
@@ -86,18 +95,19 @@ final class CoreSessionRuntime: ObservableObject {
     }
 
     func begin(piece: PracticeSong, division: PracticeEvent, initialHand: PracticeHand? = nil, at date: Date = .now,
-               calendar: Calendar = .current, confirmedStarts: [PracticeHand: Int] = [:]) throws {
+               calendar: Calendar = .current, confirmedStarts: [PracticeHand: Int] = [:],
+               activation: CoreLadderActivation = CoreLadderActivation(), focusEnabled: Bool = false) throws {
         guard failure == nil else { throw CoreFlowError.damagedDraft }
-        guard context == nil else { throw CoreIntegrationError.activeSession }
+        guard activeID == nil else { throw CoreIntegrationError.activeSession }
         guard piece.deletedAt == nil, division.songID == piece.id, let definition = division.coreDefinition,
               let structure = piece.coreStructure, definition.fits(structure),
-              let goal = definition.goal, goal.isValid(for: definition.handMode) else { throw CoreIntegrationError.invalidGoal }
+              definition.goal != nil, definition.canStart(activation: activation) else { throw CoreIntegrationError.invalidGoal }
         // Resolve before any session, draft, or context mutation. Multi-hand never defaults.
         guard let hand = initialHand ?? definition.handMode.directInitialHand,
               definition.handMode.hands.contains(hand) else {
             throw CoreFlowError.invalidInput("请选择本次练习首先记录的手型。")
         }
-        var prepared = try Self.prepare(division: division, at: date, calendar: calendar)
+        var prepared = try Self.prepare(division: division, at: date, calendar: calendar, activation: activation)
         for hand in prepared.needsStart {
             guard let start = confirmedStarts[hand], let config = prepared.definition.goal?.hands[hand]?.ladder else {
                 throw CoreFlowError.invalidInput("请确认新周期每个手型的起始 BPM。")
@@ -106,8 +116,11 @@ final class CoreSessionRuntime: ObservableObject {
             let previous = old?.previousValidBPM.map {
                 Int((Double($0) * (old?.previousNoteUnit ?? config.noteUnit).quarterMultiplier / config.noteUnit.quarterMultiplier).rounded())
             } ?? 300
-            let ceiling = min(previous, prepared.definition.goal?.hands[hand]?.speed?.bpm ?? 300)
-            guard (20...max(20, ceiling)).contains(start) else {
+            let oldEpoch = old?.activationEpoch ?? definition.ladderConfigurationEpochs?[hand] ?? 0
+            let restarting = oldEpoch != activation.epoch || definition.ladderRestartRequired?.contains(hand) == true
+            let target = prepared.definition.goal?.hands[hand]?.speed?.bpm
+            let ceiling = restarting ? (target.map { $0 - 1 } ?? 300) : min(previous, target ?? 300)
+            guard ceiling >= 20, (20...max(20, ceiling)).contains(start) else {
                 throw CoreFlowError.invalidInput("\(hand.title)：起始 BPM 须在 20–\(ceiling) 之间。")
             }
             prepared.definition.goal?.hands[hand]?.ladder?.startBPM = start
@@ -115,12 +128,12 @@ final class CoreSessionRuntime: ObservableObject {
                 prepared.definition.goal?.hands[hand]?.ladder?.retainsLockedOrigin = true
             }
         }
-        let effectiveGoal = (prepared.definition.goal ?? goal).applicable(to: definition.handMode)
+        guard let effectiveGoal = prepared.definition.executionGoal(activation: activation) else { throw CoreIntegrationError.invalidGoal }
         for hand in definition.handMode.hands where effectiveGoal.ladderEnabled == true {
             guard let config = effectiveGoal.hands[hand]?.ladder else { continue }
             let old = prepared.definition.ladderStates?[hand]
             var state: CoreLadderState
-            if let old, old.cycleStart == prepared.cycle {
+            if let old, old.cycleStart == prepared.cycle, !prepared.needsStart.contains(hand) {
                 state = old
                 let ratio = old.noteUnit.quarterMultiplier / config.noteUnit.quarterMultiplier
                 let bpm = Int((Double(old.currentBPM) * ratio).rounded())
@@ -137,12 +150,14 @@ final class CoreSessionRuntime: ObservableObject {
                     previousValidBPM: old?.previousValidBPM, previousNoteUnit: old?.previousNoteUnit ?? old?.noteUnit)
             }
             if prepared.definition.ladderStates == nil { prepared.definition.ladderStates = [:] }
+            state.activationEpoch = activation.epoch
             prepared.definition.ladderStates?[hand] = state
+            prepared.definition.ladderRestartRequired?.remove(hand)
         }
         execution = prepared.definition
         context = CoreSessionContext(pieceID: piece.id, divisionID: division.id, pieceName: piece.name,
             divisionName: definition.label(mode: structure.mode), handMode: definition.handMode, goal: effectiveGoal,
-            cycleStart: prepared.cycle, timeZoneID: calendar.timeZone.identifier)
+            cycleStart: prepared.cycle, timeZoneID: calendar.timeZone.identifier, focusEnabled: focusEnabled)
         var initialPreset = division.preset
 
         if effectiveGoal.ladderEnabled == true,
@@ -154,13 +169,18 @@ final class CoreSessionRuntime: ObservableObject {
         }
 
         preset = initialPreset.normalized
-        session.begin(sourceEventID: division.id, initialHand: hand, at: date)
+        // A11-SES: preview configuration has no Session identity, clock or draft.
+        session.reset()
+        provisionalHand = hand
+        provisionalSource = (piece, division, calendar, confirmedStarts, activation, focusEnabled)
+        hasStartedPlayback = false
         needsRecovery = false
         persist(at: date)
     }
 
     // Resolve boundaries once at Session start. A running Session never changes its cycle.
-    static func prepare(division: PracticeEvent, at date: Date = .now, calendar: Calendar = .current)
+    static func prepare(division: PracticeEvent, at date: Date = .now, calendar: Calendar = .current,
+                        activation: CoreLadderActivation = CoreLadderActivation())
         throws -> (definition: CoreDivisionDefinition, cycle: Date, needsStart: [PracticeHand]) {
         guard var definition = division.coreDefinition, var goal = definition.goal else { throw CoreIntegrationError.invalidGoal }
         let today = calendar.startOfDay(for: date)
@@ -189,9 +209,24 @@ final class CoreSessionRuntime: ObservableObject {
         }
         goal.reset = reset
         definition.goal = goal; definition.executionCycleStart = cycle
-        let needsStart = changed && !hasPending && goal.ladderEnabled == true
-            ? definition.handMode.hands.filter { goal.hands[$0]?.ladder != nil } : []
+        let eligible = definition.executionGoal(activation: activation)
+        let needsStart = definition.handMode.hands.filter { hand in
+            guard activation.enabled, eligible?.hands[hand]?.ladder != nil else { return false }
+            let epoch = definition.ladderStates?[hand]?.activationEpoch ?? definition.ladderConfigurationEpochs?[hand] ?? 0
+            return (changed && !hasPending) || epoch != activation.epoch || definition.ladderRestartRequired?.contains(hand) == true
+        }
         return (definition, cycle, needsStart)
+    }
+
+    var isFocusEnabled: Bool { context?.focusEnabled == true }
+    func practiceDurationMilliseconds(at date: Date = .now) -> Int64 {
+        guard hasStartedPlayback else { return 0 }
+        return PracticeHand.allCases.reduce(0) { $0 + session.stats(for: $1, at: date).durationMilliseconds }
+    }
+    // Focus and Practice have identical eligible intervals for this captured On
+    // session. Reuse the authoritative paused/recovered clock, not a second timer.
+    func focusDurationMilliseconds(at date: Date = .now) -> Int64 {
+        isFocusEnabled ? practiceDurationMilliseconds(at: date) : 0
     }
 
     func updatePreset(_ value: MetronomePreset, at date: Date = .now) {
@@ -199,13 +234,45 @@ final class CoreSessionRuntime: ObservableObject {
         persist(at: date)
     }
     func pause(at date: Date = .now) { session.pause(at: date); persist(at: date) }
-    func resume(at date: Date = .now) { session.resume(at: date); needsRecovery = false; persist(at: date) }
+    func resume(at date: Date = .now) {
+        guard activeID != nil else { return }
+        session.resume(at: date); needsRecovery = false; persist(at: date)
+    }
+    // Revalidate the preview at Play (including a crossed cycle boundary), then
+    // commit only after the audio engine reports that startup succeeded.
+    @discardableResult
+    func startPlayback(at date: Date? = nil, using start: () -> Bool) throws -> Bool {
+        if !hasStartedPlayback, let source = provisionalSource {
+            let selectedPreset = preset
+            try begin(piece: source.piece, division: source.division, initialHand: currentHand,
+                      at: date ?? .now, calendar: source.calendar, confirmedStarts: source.starts, activation: source.activation, focusEnabled: source.focusEnabled)
+            preset = selectedPreset
+        }
+        let succeeded = start()
+        synchronizePlayback(isPlaying: succeeded, at: date ?? .now)
+        return succeeded
+    }
+    func synchronizePlayback(isPlaying: Bool, at date: Date = .now) {
+        if isPlaying, !hasStartedPlayback, let context {
+            session.begin(sourceEventID: context.divisionID, initialHand: provisionalHand, at: date)
+            hasStartedPlayback = true
+            provisionalSource = nil
+        }
+        if isPlaying { resume(at: date) } else { pause(at: date) }
+    }
+    func cancelBeforePlayback() throws -> UUID {
+        guard let context, !hasStartedPlayback, count == 0 else { throw CoreIntegrationError.activeSession }
+        let piece = context.pieceID
+        clear()
+        return piece
+    }
     func switchHand(_ hand: PracticeHand, at date: Date = .now) {
         guard context?.handMode.allowsHandSwitching == true,
               context?.handMode.hands.contains(hand) == true,
-              hand != session.currentHand else { return }
+              hand != currentHand else { return }
 
-        session.switchHand(to: hand, at: date)
+        if hasStartedPlayback { session.switchHand(to: hand, at: date) }
+        else { provisionalHand = hand }
 
         if context?.goal.ladderEnabled == true,
            context?.goal.hands[hand]?.ladder != nil,
@@ -221,7 +288,7 @@ final class CoreSessionRuntime: ObservableObject {
         persist(at: date)
     }
     func record(preset: MetronomePreset, at date: Date = .now) {
-        guard session.isRunning else { return }
+        guard activeID != nil, session.isRunning else { return }
         self.preset = preset.normalized
         session.recordCompletion(for: session.currentHand, preset: preset, at: date)
         if let goal = context?.goal, goal.ladderEnabled == true,
@@ -254,7 +321,7 @@ final class CoreSessionRuntime: ObservableObject {
         persist(at: date)
     }
     func requestExit(_ request: CoreExitRequest) throws {
-        guard context != nil else { throw CoreIntegrationError.wrongDestination }
+        guard activeID != nil else { throw CoreIntegrationError.wrongDestination }
         guard exitRequest == nil else { return }
         exitRequest = request
     }
@@ -299,12 +366,13 @@ final class CoreSessionRuntime: ObservableObject {
     }
     func continuePractice(at date: Date = .now) {
         session.continueAfterReview(at: date)
+        session.pause(at: date)
         persist(at: date)
     }
     func persist(at date: Date = .now) {
-        guard let context else { return }
+        guard let context, hasStartedPlayback else { return }
         do {
-            defaults.set(try JSONEncoder().encode(Draft(session: session, context: context, preset: preset, savedAt: date, execution: execution)), forKey: Self.draftKey)
+            defaults.set(try JSONEncoder().encode(Draft(session: session, context: context, preset: preset, savedAt: date, execution: execution, hasStartedPlayback: hasStartedPlayback)), forKey: Self.draftKey)
         } catch { failure = error.localizedDescription }
     }
     @discardableResult
@@ -312,12 +380,16 @@ final class CoreSessionRuntime: ObservableObject {
         guard let context, context.divisionID == division.id, context.pieceID == division.songID,
               let summary = session.reviewSummary else { throw CoreIntegrationError.wrongDestination }
         guard !summary.completions.isEmpty else { throw CoreFlowError.noRecording }
+        var savedContext = context
+        if context.focusEnabled != nil {
+            savedContext.focusDurationMilliseconds = context.focusEnabled == true ? summary.totalDurationMilliseconds : 0
+        }
         let oldDefinition = division.coreDefinitionData
         if let execution { division.coreDefinitionData = try JSONEncoder().encode(execution) }
         let result: PracticeAttemptCommitResult
         do {
             result = try division.commit(summary: summary, in: modelContext,
-                                         coreContextData: JSONEncoder().encode(context), saving: saving ?? { try modelContext.save() })
+                                         coreContextData: JSONEncoder().encode(savedContext), saving: saving ?? { try modelContext.save() })
         } catch {
             division.coreDefinitionData = oldDefinition
             throw error
@@ -331,7 +403,8 @@ final class CoreSessionRuntime: ObservableObject {
     }
     private func clear() {
         defaults.removeObject(forKey: Self.draftKey)
-        session.reset(); context = nil; execution = nil; needsRecovery = false; exitRequest = nil
+        session.reset(); hasStartedPlayback = false; context = nil; execution = nil; needsRecovery = false; exitRequest = nil
+        provisionalSource = nil
     }
 }
 

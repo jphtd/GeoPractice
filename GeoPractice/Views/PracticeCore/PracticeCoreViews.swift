@@ -5,6 +5,7 @@ import SwiftUI
 struct PracticeCoreRootView: View {
     @Query(sort: [SortDescriptor(\PracticeSong.sortIndex), SortDescriptor(\PracticeSong.createdAt)]) private var songs: [PracticeSong]
     @Query private var events: [PracticeEvent]
+    @StateObject private var settings: CorePracticeSettings
     @StateObject private var navigation = CoreNavigation()
     @State private var boundaryMessage: String?
     @State private var recovery: CoreRecovery?
@@ -14,7 +15,11 @@ struct PracticeCoreRootView: View {
     @StateObject private var runtime: CoreSessionRuntime
     @StateObject private var engine = MetronomeEngine()
     @State private var selectedTab = "Practice"
+    @State private var independentGeoBeat = false
+    @StateObject private var independentRuntime = CoreSessionRuntime(defaults: UserDefaults(suiteName: "CoreIndependent.\(UUID())")!, restore: false)
+    @State private var savedFocusSummary: (piece: UUID, practice: Int64, focus: Int64)?
     @State private var sheetRoute: CoreRoute?
+    @State private var queuedRoute: CoreRoute?
     @State private var recentlyDeletedUndoID: UUID?
     @State private var undoPresentationID = UUID()
     @State private var deleteFromArchive = false
@@ -33,22 +38,27 @@ struct PracticeCoreRootView: View {
         self.fixture = fixture
         let defaults = fixture == nil ? UserDefaults.standard : UserDefaults(suiteName: "CoreFixture.\(UUID())")!
         _runtime = StateObject(wrappedValue: CoreSessionRuntime(defaults: defaults, restore: fixture == nil))
+        _settings = StateObject(wrappedValue: CorePracticeSettings(defaults: defaults))
     }
 
     private var currentPieces: [PracticeSong] {
         songs.filter { !$0.isArchived && $0.deletedAt == nil }
+    }
+    private var focusSurfaceVisible: Bool {
+        runtime.isFocusEnabled && !runtime.needsRecovery &&
+            (selectedTab == "Practice" || (selectedTab == "GeoBeat" && !independentGeoBeat))
     }
     var body: some View {
         Group {
             if selectedTab == "GeoBeat" {
                 NavigationStack {
                     CoreSessionView(
-                        runtime: runtime,
+                        runtime: independentGeoBeat ? independentRuntime : runtime,
                         engine: engine,
                         isGeoBeat: true,
                         openGeoBeat: {},
                         finish: finishSession,
-                        onRoute: request
+                        onRoute: request, detach: detachGeoBeat
                     )
                 }
             } else if selectedTab == "Analyze" {
@@ -57,28 +67,42 @@ struct PracticeCoreRootView: View {
                 practiceStack
             }
         }
+        .environmentObject(settings)
         .tint(CorePalette.accent)
         .safeAreaInset(edge: .bottom, spacing: 0) {
+            if !focusSurfaceVisible {
             VStack(spacing: 8) {
                 if sheetRoute == nil { quickUndo }
                 CoreBottomNavigation(
                     activeSessionID: runtime.activeID ?? recovery?.sessionID,
                     selectedTab: selectedTab,
-                    onPractice: { selectedTab = "Practice" },
+                    onPractice: { reconnectPractice() },
                     onRoute: request
                 )
             }
+            }
         }
         .safeAreaInset(edge: .top, spacing: 0) {
-            if fixture != nil { Text("Debug 场景 · 数据不持久保存。真实流程测试请关闭启动参数。")
+            if fixture != nil && !focusSurfaceVisible { Text("Debug 场景 · 数据不持久保存。真实流程测试请关闭启动参数。")
                 .font(.caption).padding(8).frame(maxWidth: .infinity).background(.yellow.opacity(0.15)) }
         }
-        .sheet(isPresented: Binding(get: { sheetRoute != nil }, set: { if !$0 { sheetRoute = nil; navigation.cancel() } })) {
+        .sheet(isPresented: Binding(get: { sheetRoute != nil }, set: { if !$0 { sheetRoute = nil; navigation.cancel() } }), onDismiss: {
+            if let route = queuedRoute { queuedRoute = nil; request(route) }
+        }) {
             if let sheetRoute {
                 switch sheetRoute {
+                case .settings:
+                    CoreGlobalSettingsView(activeSession: runtime.activeID != nil)
+                        .environmentObject(settings)
+
                 case .archivedPieces:
-                    CoreArchiveView(activeSessionID: runtime.activeID ?? recovery?.sessionID, onRoute: request)
-                        .safeAreaInset(edge: .bottom) { quickUndo }
+                    NavigationStack {
+                        CoreArchiveView(activeSessionID: runtime.activeID ?? recovery?.sessionID, onRoute: request)
+                            .toolbar { ToolbarItem(placement: .cancellationAction) {
+                                Button("关闭") { self.sheetRoute = nil; navigation.cancel() }
+                            } }
+                    }
+                    .safeAreaInset(edge: .bottom) { quickUndo }
                 case .archivePiece, .deletePiece, .deleteAllArchivedPieces:
                     CoreExitHandoffView(
                         route: sheetRoute,
@@ -101,8 +125,8 @@ struct PracticeCoreRootView: View {
                         },
                         onCancel: {
                             switch sheetRoute {
-                            case .archivePiece(let id), .deletePiece(let id):
-                                self.sheetRoute = .pieceSettings(id)
+                            case .archivePiece, .deletePiece:
+                                self.sheetRoute = nil
 
                             case .deleteAllArchivedPieces:
                                 self.sheetRoute = .archivedPieces
@@ -115,6 +139,7 @@ struct PracticeCoreRootView: View {
                     CoreEditorView(route: sheetRoute, songs: songs, events: events,
                         activeSessionID: runtime.activeID ?? recovery?.sessionID, onSaved: returnFromEditor,
                                    onRoute: request)
+                        .environmentObject(settings)
                 }
             }
         }
@@ -165,9 +190,13 @@ struct PracticeCoreRootView: View {
         } message: { Text(boundaryMessage ?? "") }
         .onAppear { expireDeletedPieces(); loadInitialContext() }
         .onReceive(checkpoint) { _ in runtime.persist(); expireDeletedPieces() }
-        .onChange(of: engine.preset) { _, value in runtime.updatePreset(value) }
-        .onChange(of: engine.isPlaying) { previous, current in
-            if previous && !current { runtime.pause() }
+        .onChange(of: engine.preset) { _, value in
+            if !independentGeoBeat { runtime.updatePreset(value) }
+        }
+        .onChange(of: engine.isPlaying) { _, current in
+            // Commit uses the completed startup result, never a transient
+            // isPlaying publication while the audio engine is still starting.
+            if !current { runtime.pause() }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { engine.pause(); runtime.pause() }
@@ -186,7 +215,7 @@ struct PracticeCoreRootView: View {
             Group {
                 if runtime.context != nil && !runtime.needsRecovery {
                     CoreSessionView(runtime: runtime, engine: engine, isGeoBeat: false,
-                        openGeoBeat: { selectedTab = "GeoBeat" }, finish: finishSession, onRoute: request)
+                        openGeoBeat: { selectedTab = "GeoBeat" }, finish: finishSession, onRoute: request, detach: detachGeoBeat)
                 } else { CoreScreen { home } }
             }
             .navigationDestination(for: CorePage.self) { page in
@@ -198,9 +227,12 @@ struct PracticeCoreRootView: View {
                 case .division(let pieceID, let divisionID):
                     if let piece = songs.first(where: { $0.id == pieceID && $0.deletedAt == nil }),
                        let structure = piece.coreStructure,
-                       let division = events.first(where: { $0.id == divisionID && $0.songID == pieceID }),
-                       let definition = division.coreDefinition {
-                        divisionDetail(piece, division: division, definition: definition, structure: structure)
+                       let division = events.first(where: { $0.id == divisionID && $0.songID == pieceID }) {
+                        CoreScreen {
+                            CorePageHeader(title: "练习划分", back: back)
+                            Text(piece.name).coreType(.titleMedium)
+                            divisionCard(piece, division: division, structure: structure)
+                        }
                     }
                 case .recentlyDeleted:
                     if subscription.isPro { CoreRecentlyDeletedView() }
@@ -211,7 +243,10 @@ struct PracticeCoreRootView: View {
 
     @ViewBuilder private var home: some View {
         let state = CoreHomeState.resolve(pieceCount: currentPieces.count, recovery: currentRecovery)
-        CorePageHeader(title: "Practice", trailing: currentRecovery == nil ? "plus" : nil, trailingLabel: "添加曲目") { request(.addPiece) }
+        HStack(spacing: 8) {
+            CorePageHeader(title: "Practice", trailing: currentRecovery == nil ? "plus" : nil, trailingLabel: "添加曲目") { request(.addPiece) }
+            CoreIconButton(symbol: "gearshape", label: "设置") { request(.settings) }
+        }
         Group {
             switch state {
             case .normal:
@@ -223,7 +258,7 @@ struct PracticeCoreRootView: View {
                     CoreButton(title: "查看全部曲目", kind: .tertiary) { request(.allPieces) }.padding(.top, 12)
                 }.accessibilityIdentifier("practice.normal")
             case .empty:
-                CoreEmptyState(title: "还没有曲目", copy: "添加你的第一首曲目，开始建立练习计划。", button: "添加曲目") {
+                CoreEmptyState(title: "还没有曲目", copy: "", button: "添加曲目") {
                     request(.addPiece)
                 }.padding(.top, 24).accessibilityIdentifier("practice.empty")
                 if !songs.isEmpty {
@@ -233,24 +268,18 @@ struct PracticeCoreRootView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("练习已暂停").coreType(.caption).padding(.horizontal, 12).padding(.vertical, 4)
                         .background(CorePalette.subtle, in: Capsule())
-                    Text("继续练习").coreType(.titleMedium)
                     VStack(alignment: .leading, spacing: 8) {
                         Text(session.pieceName).coreType(.titleSmall)
                         Text(session.divisionName).coreType(.body).foregroundStyle(CorePalette.secondary)
                     }
-                    Text("恢复后继续当前练习").coreType(.body).foregroundStyle(CorePalette.secondary)
                     CoreButton(title: "继续练习") { request(.resumeSession(session.sessionID)) }
                     if canDeferLegacyRecovery {
                         CoreButton(title: "暂不恢复", kind: .secondary, action: deferLegacyRecovery)
                             .accessibilityIdentifier("practice.deferRecovery")
-                        Text("旧草稿仍会保留。暂不恢复后，可返回首页添加曲目。").coreType(.caption).foregroundStyle(CorePalette.secondary)
                     }
                 }.coreCard().accessibilityIdentifier("practice.recovery")
             }
         }.padding(.top, 24)
-        if currentRecovery == nil {
-            CoreButton(title: "已归档曲目", kind: .tertiary) { request(.archivedPieces) }
-        }
     }
 
     private func pieceDetail(_ piece: PracticeSong, structure: CorePieceStructure) -> some View {
@@ -258,29 +287,34 @@ struct PracticeCoreRootView: View {
             ($0.coreDefinition?.first ?? Int.max) < ($1.coreDefinition?.first ?? Int.max)
         }
         return CoreScreen {
-            CorePageHeader(title: "曲目详情", back: back, trailing: "gearshape", trailingLabel: "曲目设置") { request(.pieceSettings(piece.id)) }
+            HStack(spacing: 0) {
+                CorePageHeader(title: "曲目详情", back: back)
+                Menu {
+                    CorePieceActions(piece: piece, onRoute: request)
+                } label: {
+                    Image(systemName: "ellipsis").frame(width: 44, height: 44)
+                }.accessibilityLabel("曲目操作").accessibilityIdentifier("core.piece.actions")
+            }
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(piece.name).coreType(.titleLarge).accessibilityAddTraits(.isHeader)
                     Text(structure.label).coreType(.body).foregroundStyle(CorePalette.secondary)
                 }
+                if let saved = savedFocusSummary, saved.piece == piece.id {
+                    Text("本次练习 \(saved.practice / 1000) 秒 · 专注 \(saved.focus / 1000) 秒")
+                        .coreType(.caption).foregroundStyle(CorePalette.secondary)
+                        .accessibilityIdentifier("core.focus.savedSummary")
+                }
                 CoreNavigationRow { request(.analyze(.piece(piece.id))) }.padding(.top, 24)
                 VStack(alignment: .leading, spacing: 12) {
                     section("练习划分")
                     if divisions.isEmpty {
-                        CoreEmptyState(title: "还没有练习划分", copy: "创建练习划分时可同时设置 Goal，也可以稍后设置。", button: "创建练习划分") {
+                        CoreEmptyState(title: "还没有练习划分", copy: "", button: "创建练习划分") {
                             request(.createDivision(piece: piece.id, mode: structure.mode))
                         }.accessibilityIdentifier("piece.noDivision")
                     } else {
                         ForEach(divisions) { division in
-                            CoreActionCard(title: division.coreDefinition?.label(mode: structure.mode) ?? division.name,
-                                           subtitle: division.coreDefinition.map { "适用手型 · \($0.handMode.label)" }) {
-                                guard let definition = division.coreDefinition, definition.fits(structure) else {
-                                    boundaryMessage = CoreIntegrationError.missingMetadata.localizedDescription
-                                    return
-                                }
-                                navigation.path.append(.division(piece: piece.id, division: division.id))
-                            }
+                            divisionCard(piece, division: division, structure: structure)
                         }
                         CoreButton(title: "创建练习划分", kind: .secondary) {
                             request(.createDivision(piece: piece.id, mode: structure.mode))
@@ -291,49 +325,57 @@ struct PracticeCoreRootView: View {
         }
     }
 
-    private func divisionDetail(_ piece: PracticeSong, division: PracticeEvent,
-                                definition: CoreDivisionDefinition, structure: CorePieceStructure) -> some View {
-        CoreScreen {
-            CorePageHeader(title: "练习划分详情", back: back)
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("《\(piece.name)》").coreType(.body).foregroundStyle(CorePalette.secondary)
-                    Text(definition.label(mode: structure.mode)).coreType(.titleLarge).accessibilityAddTraits(.isHeader)
-                    Text("适用手型 · \(definition.handMode.label)").coreType(.body).foregroundStyle(CorePalette.secondary)
-                }
-                CoreNavigationRow(title: "编辑练习划分") {
-                    request(.editDivision(piece: piece.id, division: division.id))
-                }
-                .padding(.top, 24)
-                VStack(alignment: .leading, spacing: 12) {
-                    section("Goal")
-                    if definition.hasValidGoal {
-                        CoreActionCard(title: "Goal", subtitle: "已设置") { request(.editGoal(piece: piece.id, division: division.id)) }
-                            .accessibilityLabel("Goal，已设置，编辑 Goal")
-                            .accessibilityIdentifier("division.validGoal")
+    @ViewBuilder private func divisionCard(_ piece: PracticeSong, division: PracticeEvent,
+                                          structure: CorePieceStructure) -> some View {
+        if let definition = division.coreDefinition, definition.fits(structure) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    if navigation.path.last == .division(piece: piece.id, division: division.id) {
+                        Text(definition.label(mode: structure.mode)).coreType(.titleSmall).accessibilityAddTraits(.isHeader)
                     } else {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("还没有设置 Goal").coreType(.titleSmall)
-                            Text("建立有效 Goal 后即可开始计划练习。").coreType(.body).foregroundStyle(CorePalette.secondary)
-                            CoreButton(title: "设置 Goal") { request(.editGoal(piece: piece.id, division: division.id)) }
-                        }.coreCard().accessibilityIdentifier("division.noValidGoal")
+                        Button { navigation.path.append(.division(piece: piece.id, division: division.id)) } label: {
+                            Text(definition.label(mode: structure.mode)).coreType(.titleSmall)
+                        }.accessibilityIdentifier("division.detail.\(division.id)")
                     }
-                }.padding(.top, 24)
-                VStack(alignment: .leading, spacing: 12) {
-                    section("练习")
-                    if definition.hasValidGoal {
-                        CoreButton(title: "开始计划练习") {
-                            do {
-                                request(try CoreContracts.startRoute(piece: piece.id, division: division.id, definition: definition,
-                                                                     activeSessionID: runtime.activeID ?? recovery?.sessionID))
-                            } catch { boundaryMessage = error.localizedDescription }
-                        }
+                    Spacer()
+                    Menu {
+                        Button("编辑") { request(.editDivision(piece: piece.id, division: division.id)) }
+                        Button("自由练习") { request(.freePractice) }
+                        Button("划分分析") { request(.analyze(.division(piece: piece.id, division: division.id))) }
+                    } label: {
+                        Image(systemName: "ellipsis").frame(width: 44, height: 44).contentShape(Rectangle())
+                    }.accessibilityLabel("\(definition.label(mode: structure.mode))，更多操作")
+                        .accessibilityIdentifier("division.actions.\(division.id)")
+                }
+                Text("适用手型 · \(definition.handMode.label)").coreType(.caption).foregroundStyle(CorePalette.secondary)
+                if definition.hasValidGoal, let goal = definition.goal {
+                    ForEach(definition.handMode.hands) { hand in
+                        Text(compactGoal(goal, hand: hand)).coreType(.body).foregroundStyle(CorePalette.secondary)
                     }
-                    CoreButton(title: "自由练习", kind: .secondary) { request(.freePractice) }
-                }.padding(.top, 32)
-                CoreNavigationRow { request(.analyze(.division(piece: piece.id, division: division.id))) }.padding(.top, 32)
-            }.padding(.top, 20)
+                    CoreButton(title: "开始练习") { request(.startPractice(piece: piece.id, division: division.id)) }
+                        .accessibilityIdentifier("division.start.\(division.id)")
+                } else {
+                    Text("未设置目标").coreType(.body).foregroundStyle(CorePalette.secondary)
+                    CoreButton(title: "设置目标") { request(.editDivision(piece: piece.id, division: division.id)) }
+                        .accessibilityIdentifier("division.setGoal.\(division.id)")
+                }
+            }.coreCard()
+        } else {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(division.name).coreType(.titleSmall)
+                Text(CoreIntegrationError.missingMetadata.localizedDescription).coreType(.caption)
+            }.coreCard()
         }
+    }
+    private func compactGoal(_ goal: CoreGoal, hand: PracticeHand) -> String {
+        guard let value = goal.hands[hand] else { return hand.title }
+        var facts = [hand.title]
+        if let count = value.count { facts.append("\(count) 次") }
+        if let speed = value.speed { facts.append("\(speed.noteUnit.title) = \(speed.bpm) BPM") }
+        if goal.ladderEnabled == true, value.ladder != nil {
+            facts.append(value.speed == nil ? "开放式速度阶梯" : "速度阶梯")
+        }
+        return facts.joined(separator: " · ")
     }
 
     private func section(_ title: String) -> some View {
@@ -371,30 +413,37 @@ struct PracticeCoreRootView: View {
     private func returnFromEditor(_ page: CorePage) {
         sheetRoute = nil
         selectedTab = "Practice"
-
-        switch page {
-        case .piece:
-            navigation.path = [page]
-
-        case .division(let piece, _):
-            navigation.path = [.piece(piece), page]
-
-        case .recentlyDeleted:
-            navigation.path = [.recentlyDeleted]
-        }
-
-        navigation.cancel()
+        navigation.editorSaved(page)
         recovery = nil
+    }
+    private func detachGeoBeat() {
+        engine.pause(); runtime.pause()
+        independentGeoBeat = true; selectedTab = "GeoBeat"
+    }
+    private func reconnectPractice() {
+        if independentGeoBeat { engine.pause(); engine.apply(runtime.preset) }
+        independentGeoBeat = false; selectedTab = "Practice"
     }
     private func finishSession() {
         exitError = nil
-        do { try runtime.requestExit(.ordinary) }
+        do {
+            if !runtime.hasStartedPlayback {
+                let piece = try runtime.cancelBeforePlayback()
+                engine.stop()
+                selectedTab = "Practice"; navigation.returnedBeforePlayback(piece: piece)
+            } else { try runtime.requestExit(.ordinary) }
+        }
         catch { boundaryMessage = error.localizedDescription }
     }
     private func resolveExit(_ choice: CoreExitChoice) {
-        guard let id = runtime.context?.divisionID, let division = events.first(where: { $0.id == id }) else { return }
+        guard let id = runtime.context?.divisionID, let pieceID = runtime.context?.pieceID,
+              let division = events.first(where: { $0.id == id }) else { return }
         do {
-            exitDestination = try runtime.resolveExit(choice, division: division, in: modelContext)
+            let date = Date.now
+            let summary = runtime.isFocusEnabled && runtime.count > 0 && choice == .save
+                ? (piece: pieceID, practice: runtime.practiceDurationMilliseconds(at: date), focus: runtime.focusDurationMilliseconds(at: date)) : nil
+            exitDestination = try runtime.resolveExit(choice, division: division, in: modelContext, at: date)
+            if choice != .cancel { savedFocusSummary = summary; independentGeoBeat = false }
             exitError = nil
             if choice != .cancel { engine.stop() }
             else { navigation.cancel() }
@@ -412,6 +461,12 @@ struct PracticeCoreRootView: View {
         }
     }
     private func request(_ route: CoreRoute) {
+        // Dismiss the presenting sheet before a guard or another destination can appear.
+        if sheetRoute != nil {
+            queuedRoute = route
+            sheetRoute = nil
+            return
+        }
         if case .deletePiece(let id) = route {
             deleteFromArchive = songs.first(where: { $0.id == id })?.isArchived == true
         }
@@ -424,20 +479,27 @@ struct PracticeCoreRootView: View {
                 case .startPractice(let piece, let division):
                     guard let target = events.first(where: { $0.id == division && $0.songID == piece }),
                           target.coreDefinition?.hasValidGoal == true else { throw CoreIntegrationError.invalidGoal }
-                    guarded = division != context.divisionID || piece != context.pieceID
+                    guarded = runtime.activeID == nil || division != context.divisionID || piece != context.pieceID
                 case .archivePiece(let piece), .deletePiece(let piece): guarded = piece == context.pieceID
                 case .deleteAllArchivedPieces:
                     guarded = songs.contains { $0.id == context.pieceID && $0.isArchived && $0.deletedAt == nil }
                 case .editDivision: guarded = true
+                case .freePractice: guarded = runtime.activeID == nil
                 default: guarded = false
                 }
                 if guarded {
-                    exitError = nil
-                    try runtime.requestExit(.transition(route))
-                    return
+                    if runtime.activeID == nil {
+                        _ = try runtime.cancelBeforePlayback()
+                    } else {
+                        exitError = nil
+                        try runtime.requestExit(.transition(route))
+                        return
+                    }
                 }
             }
             switch route {
+            case .settings:
+                sheetRoute = route
             case .geoBeat:
                 selectedTab = "GeoBeat"
             case .freePractice:
@@ -451,7 +513,9 @@ struct PracticeCoreRootView: View {
                 guard let division = events.first(where: { $0.id == divisionID && $0.songID == pieceID }),
                       let definition = division.coreDefinition else { throw CoreIntegrationError.wrongDestination }
                 guard runtime.activeID == nil else { throw CoreIntegrationError.activeSession }
-                guard definition.hasValidGoal else { throw CoreIntegrationError.invalidGoal }
+                guard definition.canStart(activation: settings.activation(isPro: subscription.isPro)) else {
+                    throw CoreFlowError.invalidInput("开启速度阶梯并确认配置，或补充目标次数/目标速度。")
+                }
                 if definition.handMode.allowsHandSwitching { initialHandRoute = route }
                 else { try startPractice(piece: pieceID, division: divisionID) }
             case .resumeSession(let id):
@@ -462,7 +526,7 @@ struct PracticeCoreRootView: View {
                 navigation.path = []
                 selectedTab = "Practice"
                 if runtime.session.reviewSummary != nil { runtime.continuePractice() }
-                else { runtime.resume() }
+                else { runtime.pause() }
             case .unarchivePiece(let pieceID):
                 guard let piece = songs.first(where: {
                     $0.id == pieceID && $0.deletedAt == nil
@@ -506,16 +570,15 @@ struct PracticeCoreRootView: View {
               let division = events.first(where: { $0.id == divisionID && $0.songID == pieceID }) else {
             throw CoreIntegrationError.wrongDestination
         }
-        let prepared = try CoreSessionRuntime.prepare(division: division)
+        let prepared = try CoreSessionRuntime.prepare(division: division, activation: settings.activation(isPro: subscription.isPro))
         if confirmedStarts == nil && !prepared.needsStart.isEmpty {
             cycleStartRequest = (pieceID, divisionID, initialHand, prepared.definition, prepared.needsStart)
             return
         }
-        try runtime.begin(piece: piece, division: division, initialHand: initialHand, confirmedStarts: confirmedStarts ?? [:])
         engine.stop()
+        try runtime.begin(piece: piece, division: division, initialHand: initialHand, confirmedStarts: confirmedStarts ?? [:], activation: settings.activation(isPro: subscription.isPro), focusEnabled: settings.focusActivation(isPro: subscription.isPro))
         engine.apply(runtime.preset)
-        navigation.path = []
-        navigation.cancel()
+        navigation.enteredPractice(piece: pieceID, division: divisionID)
         selectedTab = "Practice"
     }
     private func loadInitialContext() {
@@ -554,7 +617,7 @@ private struct CoreScreen<Content: View>: View {
 }
 
 // One presentation owns its countdown and success task; removal cancels both.
-private struct CoreQuickUndoView: View {
+struct CoreQuickUndoView: View {
     let restore: () -> Bool
     let finish: (UUID) -> Void
     let presentationID: UUID

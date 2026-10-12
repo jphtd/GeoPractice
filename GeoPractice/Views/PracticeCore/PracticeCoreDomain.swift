@@ -70,10 +70,52 @@ struct CoreTargetSpeed: Codable, Equatable {
     var quarterEquivalent: Double { Double(bpm) * noteUnit.quarterMultiplier }
 }
 
+// Global preference is separate from Goal configuration and from a Session snapshot.
+struct CoreLadderActivation: Equatable {
+    var enabled: Bool
+    var epoch: Int
+    init(enabled: Bool = false, isPro: Bool = false, epoch: Int = 0) {
+        self.enabled = enabled && isPro; self.epoch = epoch
+    }
+}
+
+@MainActor final class CorePracticeSettings: ObservableObject {
+    private let defaults: UserDefaults
+    @Published private(set) var focusEnabled: Bool
+    @Published private(set) var ladderEnabled: Bool
+    @Published private(set) var ladderEpoch: Int
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        focusEnabled = defaults.object(forKey: "rovia.focus.enabled") as? Bool ?? true
+        ladderEnabled = defaults.bool(forKey: "rovia.globalLadder.enabled")
+        ladderEpoch = defaults.integer(forKey: "rovia.globalLadder.epoch")
+    }
+    func setFocusEnabled(_ value: Bool, isPro: Bool) {
+        guard isPro else { return }
+        focusEnabled = value
+        defaults.set(value, forKey: "rovia.focus.enabled")
+    }
+    func focusActivation(isPro: Bool) -> Bool { isPro && focusEnabled }
+    func setLadderEnabled(_ value: Bool, isPro: Bool) {
+        guard isPro, value != ladderEnabled else { return }
+        if value { ladderEpoch += 1 }
+        ladderEnabled = value
+        defaults.set(ladderEpoch, forKey: "rovia.globalLadder.epoch")
+        defaults.set(value, forKey: "rovia.globalLadder.enabled")
+    }
+    func activation(isPro: Bool) -> CoreLadderActivation {
+        CoreLadderActivation(enabled: ladderEnabled, isPro: isPro, epoch: ladderEpoch)
+    }
+}
+
 struct CoreHandGoal: Codable, Equatable {
     var count: Int?
     var speed: CoreTargetSpeed?
     var ladder: CoreLadderConfiguration?
+    // Explicit legacy evidence only. Missing configuration/keys do not imply opt-out.
+    var ladderParticipation: Bool?
+    var ladderConfigurationConfirmed: Bool?
+    var needsLadderConfirmation: Bool { ladderParticipation == false && ladderConfigurationConfirmed != true }
     var isValid: Bool { CoreGoalValidation.isValid(self) }
 }
 
@@ -141,6 +183,7 @@ struct CoreLadderState: Codable, Equatable {
     var firstValidRecordAt: Date?
     var previousValidBPM: Int?
     var previousNoteUnit: CoreNoteUnit?
+    var activationEpoch: Int?
     var startLocked: Bool { firstValidRecordAt != nil }
     func suggestedStart(in unit: CoreNoteUnit) -> Int? {
         guard let previousValidBPM else { return nil }
@@ -173,6 +216,23 @@ struct CoreDivisionDefinition: Codable, Equatable {
     var nextCycleGoal: CoreGoal?
     var nextCycleAnalyzeTiming: CoreAnalyzeTiming?
     var nextCycleAdjustedStartHands: Set<PracticeHand>?
+    var ladderConfigurationEpochs: [PracticeHand: Int]?
+    var ladderRestartRequired: Set<PracticeHand>?
+    func executionGoal(activation: CoreLadderActivation) -> CoreGoal? {
+        guard var value = goal?.applicable(to: handMode) else { return nil }
+        value.ladderEnabled = activation.enabled
+        for hand in handMode.hands {
+            guard let configuration = value.hands[hand] else { continue }
+            if !activation.enabled || configuration.needsLadderConfirmation ||
+                configuration.ladder?.isValid(target: configuration.speed) != true {
+                value.hands[hand]?.ladder = nil
+            }
+        }
+        return value
+    }
+    func canStart(activation: CoreLadderActivation) -> Bool {
+        executionGoal(activation: activation)?.isValid(for: handMode) == true
+    }
     var applicableLadderStates: [PracticeHand: CoreLadderState] {
         (ladderStates ?? [:]).filter { handMode.hands.contains($0.key) }
     }
@@ -210,10 +270,8 @@ enum CoreAnalyzeContext: Hashable {
 
 // Typed outgoing contracts; a request alone NEVER starts a session or changes data.
 enum CoreRoute: Equatable {
-    case addPiece, allPieces, archivedPieces, deleteAllArchivedPieces
-    case pieceSettings(UUID)
+    case addPiece, allPieces, archivedPieces, deleteAllArchivedPieces, settings
     case createDivision(piece: UUID, mode: CoreDivisionMode)
-    case editGoal(piece: UUID, division: UUID)
     case editDivision(piece: UUID, division: UUID)
     case archivePiece(UUID), unarchivePiece(UUID), deletePiece(UUID)
     case startPractice(piece: UUID, division: UUID)
@@ -261,7 +319,7 @@ enum CoreIntegrationError: LocalizedError {
         case .invalidRange: "练习划分范围不符合当前曲目结构。"
         case .overlappingRange: "练习划分不能与现有划分重叠。"
         case .activeSession: "请先结束并确认保存当前练习。"
-        case .invalidGoal: "请检查每个适用手型的 Goal 配置。"
+        case .invalidGoal: "请检查每个适用手型的目标配置。"
         case .wrongDestination: "返回的对象与当前操作不一致。"
         }
     }
@@ -461,17 +519,21 @@ enum CoreContracts {
                          context: ModelContext, activeSessionID: UUID?, at date: Date = .now,
                          isPro: Bool = false, timing: CoreGoalEditTiming? = nil,
                          analyzeTiming: CoreAnalyzeTiming? = nil, adjustedStartHands: Set<PracticeHand> = [],
-                         calendar: Calendar = .current) throws -> CorePage {
+                         calendar: Calendar = .current, saveChanges: Bool = true, globalActivation: Bool = false) throws -> CorePage {
         guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }
         guard division.songID == piece, var definition = division.coreDefinition else { throw CoreIntegrationError.wrongDestination }
         var value = goal
+        for hand in definition.handMode.hands {
+            value.hands[hand]?.ladderParticipation = definition.goal?.hands[hand]?.ladderParticipation
+            value.hands[hand]?.ladderConfigurationConfirmed = definition.goal?.hands[hand]?.ladderConfigurationConfirmed
+        }
         for (hand, historical) in definition.goal?.hands ?? [:] where !definition.handMode.hands.contains(hand) {
             value.hands[hand] = historical
         }
         value.reset = value.reset ?? definition.goal?.reset ?? CoreResetConfiguration(anchor: calendar.startOfDay(for: date))
         try validateGoalAccess(value, previous: definition.goal, isPro: isPro)
         let previous = definition.goal
-        let structureChanged = previous.map { $0.hands != value.hands || ($0.ladderEnabled == true) != (value.ladderEnabled == true) } ?? false
+        let structureChanged = previous.map { $0.hands != value.hands || (!globalActivation && ($0.ladderEnabled == true) != (value.ladderEnabled == true)) } ?? false
         if structureChanged && previous != nil && timing == nil {
             throw CoreFlowError.invalidInput("请选择本周期生效或下周期生效。")
         }
@@ -479,7 +541,7 @@ enum CoreContracts {
             previous?.hands[$0]?.count != value.hands[$0]?.count || previous?.hands[$0]?.speed != value.hands[$0]?.speed
         }
         if timing == .next && targetsChanged && analyzeTiming == nil {
-            throw CoreFlowError.invalidInput("请选择 Analyze 标准立即切换或跟随下周期切换。")
+            throw CoreFlowError.invalidInput("请选择分析标准立即切换或跟随下周期切换。")
         }
         for hand in definition.handMode.hands where value.ladderEnabled == true {
             guard var ladder = value.hands[hand]?.ladder else { continue }
@@ -502,7 +564,7 @@ enum CoreContracts {
                 }
                 if let target, let suggested = state.suggestedStart(in: ladder.noteUnit), suggested > target,
                    !adjustedStartHands.contains(hand) {
-                    throw CoreFlowError.invalidInput("\(hand.title)：请先决定是否调整建议起始速度，并确认真实 Start。")
+                    throw CoreFlowError.invalidInput("\(hand.title)：请先决定是否调整建议起始速度，并确认真实起始速度。")
                 }
             }
             // Inactive per-hand facts remain untouched; edits never manufacture records.
@@ -544,7 +606,7 @@ enum CoreContracts {
         } else {
             // Re-enabling begins a new user-confirmed origin, without backfilling Off records.
             for hand in definition.handMode.hands where value.ladderEnabled == true {
-                if let config = value.hands[hand]?.ladder,
+                if !globalActivation, let config = value.hands[hand]?.ladder,
                    previous?.ladderEnabled != true || previous?.hands[hand]?.ladder == nil {
                     let old = definition.ladderStates?[hand]
                     definition.ladderStates?[hand] = CoreLadderState(
@@ -561,16 +623,17 @@ enum CoreContracts {
         }
         division.coreDefinitionData = try JSONEncoder().encode(definition)
         division.updatedAt = date
-        do { try context.save() } catch { context.rollback(); throw error }
-        return .division(piece: piece, division: division.id)
+        if saveChanges { do { try context.save() } catch { context.rollback(); throw error } }
+        return .piece(piece)
     }
 
     static func copyLeftLadderToRight(in goal: CoreGoal, mode: CoreHandMode) throws -> CoreGoal {
         guard mode.hands.contains(.left), mode.hands.contains(.right), goal.ladderEnabled == true,
-              let left = goal.hands[.left], let ladder = left.ladder, goal.hands[.right]?.ladder != nil else {
-            throw CoreFlowError.invalidInput("复制要求左右手均适用且右手参与 Ladder。")
+              let left = goal.hands[.left], let ladder = left.ladder, ladder.isValid(target: left.speed) else {
+            throw CoreFlowError.invalidInput("复制要求左右手均适用，且左手阶梯配置合法。")
         }
         var result = goal
+        if result.hands[.right] == nil { result.hands[.right] = CoreHandGoal() }
         result.hands[.right]?.ladder = ladder
         result.hands[.right]?.speed = left.speed
         return result
@@ -580,10 +643,10 @@ enum CoreContracts {
         guard !isPro else { return }
         let advancedChanged = (goal.ladderEnabled == true) != (previous?.ladderEnabled == true)
             || goal.hands.contains { $0.value.ladder != previous?.hands[$0.key]?.ladder }
-        guard !advancedChanged else { throw CoreFlowError.invalidInput("Speed Ladder 配置需要 Pro。") }
+        guard !advancedChanged else { throw CoreFlowError.invalidInput("速度阶梯配置需要 Pro。") }
         if let reset = goal.reset, reset.enabled, reset.days != 1,
            reset != previous?.reset {
-            throw CoreFlowError.invalidInput("Free Reset 仅支持 1 天。")
+            throw CoreFlowError.invalidInput("Free 周期重置仅支持 1 天。")
         }
     }
 
@@ -597,7 +660,7 @@ enum CoreContracts {
 
     // Explicit, atomic Division + optional Basic Goal commit; UI 04 returns Piece Detail.
     static func saveCreatedDivision(piece: PracticeSong, definition: CoreDivisionDefinition,
-                                    context: ModelContext, activeSessionID: UUID?, isPro: Bool = false) throws -> CorePage {
+                                    context: ModelContext, activeSessionID: UUID?, isPro: Bool = false, activation: CoreLadderActivation = CoreLadderActivation()) throws -> CorePage {
         guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }
         guard let structure = piece.coreStructure else { throw CoreIntegrationError.missingMetadata }
         let pieceID = piece.id
@@ -614,6 +677,11 @@ enum CoreContracts {
             goal.updatedAt = .now
             value.goal = goal
         }
+        if activation.enabled {
+            value.ladderConfigurationEpochs = Dictionary(uniqueKeysWithValues: value.handMode.hands.compactMap { hand in
+                value.goal?.hands[hand]?.ladder == nil ? nil : (hand, activation.epoch)
+            })
+        }
         let event = PracticeEvent(songID: piece.id, name: value.label(mode: structure.mode))
         event.coreDefinitionData = try JSONEncoder().encode(value)
         context.insert(event)
@@ -626,7 +694,8 @@ enum CoreContracts {
         division: PracticeEvent,
         definition: CoreDivisionDefinition,
         context: ModelContext,
-        activeSessionID: UUID?
+        activeSessionID: UUID?,
+        saveChanges: Bool = true
     ) throws -> CorePage {
         guard activeSessionID == nil else {
             throw CoreIntegrationError.activeSession
@@ -663,13 +732,63 @@ enum CoreContracts {
         division.updatedAt = .now
 
         do {
-            try context.save()
+            if saveChanges { try context.save() }
         } catch {
             context.rollback()
             throw error
         }
 
-        return .division(piece: piece.id, division: division.id)
+        return .piece(piece.id)
+    }
+
+    // One transaction for the shared editor; existing Goal timing/lock rules remain authoritative.
+    static func saveDivisionAndGoal(piece: PracticeSong, division: PracticeEvent,
+        first: Int, last: Int, handMode: CoreHandMode, editedGoal: CoreGoal?,
+        context: ModelContext, activeSessionID: UUID?, isPro: Bool = false,
+        timing: CoreGoalEditTiming? = nil, analyzeTiming: CoreAnalyzeTiming? = nil,
+        adjustedStartHands: Set<PracticeHand> = [],
+        activation: CoreLadderActivation = CoreLadderActivation(),
+        confirmedHands: Set<PracticeHand> = [], saving: (() throws -> Void)? = nil) throws -> CorePage {
+        guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }
+        guard division.songID == piece.id, var definition = division.coreDefinition else {
+            throw CoreIntegrationError.wrongDestination
+        }
+        definition.first = first; definition.last = last; definition.handMode = handMode
+        do {
+            _ = try saveEditedDivision(piece: piece, division: division, definition: definition,
+                context: context, activeSessionID: nil, saveChanges: false)
+            if let editedGoal {
+                _ = try saveGoal(piece: piece.id, division: division, goal: editedGoal, context: context,
+                    activeSessionID: nil, isPro: isPro, timing: timing, analyzeTiming: analyzeTiming,
+                    adjustedStartHands: adjustedStartHands, saveChanges: false, globalActivation: true)
+            }
+            if !confirmedHands.isEmpty || (editedGoal != nil && activation.enabled) {
+                guard var updated = division.coreDefinition else { throw CoreIntegrationError.missingMetadata }
+                for hand in confirmedHands {
+                    guard isPro, activation.enabled, handMode.hands.contains(hand),
+                          let value = updated.goal?.hands[hand], value.needsLadderConfirmation,
+                          value.ladder?.isValid(target: value.speed) == true else {
+                        throw CoreFlowError.invalidInput("\(hand.title)：请检查待确认的速度阶梯配置。")
+                    }
+                    updated.goal?.hands[hand]?.ladderConfigurationConfirmed = true
+                    updated.nextCycleGoal?.hands[hand]?.ladderConfigurationConfirmed = true
+                    if updated.ladderRestartRequired == nil { updated.ladderRestartRequired = [] }
+                    updated.ladderRestartRequired?.insert(hand)
+                }
+                if activation.enabled, let editedGoal {
+                    for hand in handMode.hands where editedGoal.hands[hand]?.ladder != nil {
+                        if updated.ladderConfigurationEpochs == nil { updated.ladderConfigurationEpochs = [:] }
+                        // Never relabel an old execution rung as the new activation.
+                        if definition.goal?.hands[hand]?.ladder == nil {
+                            updated.ladderConfigurationEpochs?[hand] = activation.epoch
+                        }
+                    }
+                }
+                division.coreDefinitionData = try JSONEncoder().encode(updated)
+            }
+            try (saving ?? { try context.save() })()
+            return .piece(piece.id)
+        } catch { context.rollback(); throw error }
     }
 
     static func startRoute(piece: UUID, division: UUID, definition: CoreDivisionDefinition,
@@ -682,7 +801,7 @@ enum CoreContracts {
     static func goalSavedReturn(piece: UUID, division: PracticeEvent) throws -> CorePage {
         guard division.songID == piece else { throw CoreIntegrationError.wrongDestination }
         guard division.coreDefinition?.hasValidGoal == true else { throw CoreIntegrationError.invalidGoal }
-        return .division(piece: piece, division: division.id)
+        return .piece(piece)
     }
 }
 
@@ -692,9 +811,45 @@ enum CoreContracts {
 final class CoreNavigation: ObservableObject {
     @Published var path: [CorePage] = []
     @Published private(set) var pendingRoute: CoreRoute?
+    private(set) var editorSource: CorePage?
+    private(set) var practiceSource: CorePage?
 
-    func request(_ route: CoreRoute) { pendingRoute = route }
+    func request(_ route: CoreRoute) {
+        if case .editDivision(let piece, let division) = route, pendingRoute != route {
+            editorSource = sourcePage(piece: piece, division: division)
+        }
+        pendingRoute = route
+    }
     func cancel() { pendingRoute = nil }
+
+    private func sourcePage(piece: UUID, division: UUID) -> CorePage {
+        let detail = CorePage.division(piece: piece, division: division)
+        return path.last == detail ? detail : .piece(piece)
+    }
+
+    func enteredPractice(piece: UUID, division: UUID) {
+        practiceSource = sourcePage(piece: piece, division: division)
+        path = []
+        cancel()
+    }
+
+    func returnedBeforePlayback(piece: UUID) {
+        returnTo(practiceSource ?? .piece(piece))
+        practiceSource = nil
+        cancel()
+    }
+
+    func editorSaved(_ page: CorePage) {
+        if case .editDivision = pendingRoute, let editorSource { returnTo(editorSource) }
+        else { returnTo(page) }
+        editorSource = nil
+        cancel()
+    }
+
+    private func returnTo(_ page: CorePage) {
+        if case .division(let piece, _) = page { path = [.piece(piece), page] }
+        else { path = [page] }
+    }
 
     func createdDivisionSaved(piece: PracticeSong, division: PracticeEvent) throws {
         guard case .createDivision(let pieceID, let mode) = pendingRoute,
@@ -709,11 +864,10 @@ final class CoreNavigation: ObservableObject {
     }
 
     func goalSaved(piece: UUID, division: PracticeEvent) throws {
-        guard pendingRoute == .editGoal(piece: piece, division: division.id) else {
+        guard pendingRoute == .editDivision(piece: piece, division: division.id) else {
             throw CoreIntegrationError.wrongDestination
         }
         let destination = try CoreContracts.goalSavedReturn(piece: piece, division: division)
-        path = [.piece(piece), destination]
-        pendingRoute = nil
+        editorSaved(destination)
     }
 }

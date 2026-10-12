@@ -190,7 +190,7 @@ struct CoreEmptyState: View {
         VStack(spacing: 16) {
             Image(systemName: "music.note.list").font(.system(size: 32)).foregroundStyle(CorePalette.secondary).accessibilityHidden(true)
             Text(title).coreType(.titleMedium)
-            Text(copy).coreType(.body).foregroundStyle(CorePalette.secondary)
+            if !copy.isEmpty { Text(copy).coreType(.body).foregroundStyle(CorePalette.secondary) }
             CoreButton(title: button, action: action)
         }.multilineTextAlignment(.center).frame(maxWidth: 400).padding(.vertical, 32)
             .frame(maxWidth: .infinity)

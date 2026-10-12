@@ -71,7 +71,7 @@ final class PracticeCoreTests: XCTestCase {
         XCTAssertThrowsError(try CoreContracts.startRoute(piece: piece, division: division, definition: definition, activeSessionID: UUID()))
         let event = PracticeEvent(id: division, songID: piece, name: "A")
         event.coreDefinitionData = try JSONEncoder().encode(definition)
-        XCTAssertEqual(try CoreContracts.goalSavedReturn(piece: piece, division: event), .division(piece: piece, division: division))
+        XCTAssertEqual(try CoreContracts.goalSavedReturn(piece: piece, division: event), .piece(piece))
         XCTAssertThrowsError(try CoreContracts.goalSavedReturn(piece: UUID(), division: event))
         XCTAssertNotEqual(CoreRoute.analyze(.piece(piece)), .analyze(.division(piece: piece, division: division)))
     }
@@ -119,7 +119,8 @@ final class PracticeCoreTests: XCTestCase {
         let division = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeEvent>()).first { $0.songID == piece.id })
         _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: CoreGoal(hands: [.left: CoreHandGoal(count: 3)]), context: context, activeSessionID: nil, timing: .current)
         let runtime = CoreSessionRuntime(defaults: reopened)
-        try runtime.begin(piece: piece, division: division)
+        try runtime.begin(piece: piece, division: division, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true)
         runtime.record(preset: .standard)
         XCTAssertNotNil(CoreSessionRuntime(defaults: reopened).activeID, "Deferral must not suppress new valid recovery")
         XCTAssertEqual(reopened.data(forKey: CoreDependencies.legacyDraftKey), original)
@@ -178,14 +179,14 @@ final class PracticeCoreTests: XCTestCase {
         XCTAssertEqual(nav.path, [.piece(piece.id)])
         XCTAssertNil(nav.pendingRoute)
         XCTAssertFalse(try XCTUnwrap(event.coreDefinition).hasValidGoal)
-        nav.request(.editGoal(piece: piece.id, division: event.id))
+        nav.request(.editDivision(piece: piece.id, division: event.id))
         var definition = try XCTUnwrap(event.coreDefinition)
         definition.goal = CoreGoal(hands: [.right: CoreHandGoal(count: 10)])
         event.coreDefinitionData = try JSONEncoder().encode(definition)
         try container.mainContext.save()
         try nav.goalSaved(piece: piece.id, division: event)
         XCTAssertTrue(try XCTUnwrap(event.coreDefinition).hasValidGoal)
-        XCTAssertEqual(nav.path.count, 2) // no duplicate detail page
+        XCTAssertEqual(nav.path, [.piece(piece.id)]) // one workspace, no intermediate page
         XCTAssertNil(nav.pendingRoute)
         XCTAssertThrowsError(try nav.goalSaved(piece: piece.id, division: event))
         nav.request(.analyze(.division(piece: piece.id, division: event.id)))
@@ -293,12 +294,12 @@ final class PracticeCoreTests: XCTestCase {
                 }))
                 let page = try CoreContracts.saveGoal(piece: piece.id, division: event, goal: goal,
                                                       context: context, activeSessionID: nil, timing: .current)
-                XCTAssertEqual(page, .division(piece: piece.id, division: event.id))
+                XCTAssertEqual(page, .piece(piece.id))
                 XCTAssertEqual(event.coreDefinition?.handMode, mode)
                 XCTAssertEqual(event.coreDefinition?.goal?.hands, goal.hands)
-                let nav = CoreNavigation(); nav.request(.editGoal(piece: piece.id, division: event.id))
+                let nav = CoreNavigation(); nav.request(.editDivision(piece: piece.id, division: event.id))
                 try nav.goalSaved(piece: piece.id, division: event)
-                XCTAssertEqual(nav.path, [.piece(piece.id), page])
+                XCTAssertEqual(nav.path, [page])
             }
         }
     }
@@ -362,17 +363,37 @@ final class PracticeCoreTests: XCTestCase {
             XCTAssertEqual(try db.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
             var edited = goal; edited.hands[mode.hands[0]]?.ladder?.stepBPM = 4
             XCTAssertEqual(try CoreContracts.saveGoal(piece: piece.id, division: event, goal: edited, context: db.mainContext,
-                activeSessionID: nil, isPro: true, timing: .current), .division(piece: piece.id, division: event.id))
+                activeSessionID: nil, isPro: true, timing: .current), .piece(piece.id))
             XCTAssertEqual(event.coreDefinition?.goal?.hands, edited.hands)
         }
     }
     func testLadderFiniteFinalShortStepAndOpenEndedValidity() {
         let config = CoreLadderConfiguration(startBPM: 100, stepBPM: 3, repsPerLevel: 11)
         XCTAssertEqual(config.finiteLevels(target: CoreTargetSpeed(bpm: 108)), [100, 103, 106, 108])
+        XCTAssertEqual(config.finiteLevels(target: CoreTargetSpeed(bpm: 109)), [100, 103, 106, 109])
         XCTAssertTrue(ladderGoal(target: 108, start: 100).isValid(for: .both))
+        XCTAssertTrue(ladderGoal(target: 109, start: 100).isValid(for: .both))
+        XCTAssertTrue(config.isValid(target: nil))
         XCTAssertTrue(ladderGoal(reps: Int.max).isValid(for: .both))
         XCTAssertFalse(ladderGoal(.left).isValid(for: .all))
         XCTAssertEqual(CoreLadderConfiguration(startBPM: 118, stepBPM: 5, repsPerLevel: 1).finiteLevels(target: CoreTargetSpeed(bpm: 120)), [118, 120])
+        for step in 1...20 {
+            let bounded = CoreLadderConfiguration(startBPM: 20, stepBPM: step, repsPerLevel: 1)
+            for target in 21...300 {
+                let speed = CoreTargetSpeed(bpm: target)
+                XCTAssertTrue(bounded.isValid(target: speed))
+                let levels = bounded.finiteLevels(target: speed)
+                XCTAssertEqual(levels.first, 20); XCTAssertEqual(levels.last, target)
+                XCTAssertTrue(levels.allSatisfy { $0 <= target })
+                for (index, pair) in zip(levels, levels.dropFirst()).enumerated() {
+                    let interval = pair.1 - pair.0
+                    if index == levels.count - 2 { XCTAssertTrue((1...step).contains(interval)) }
+                    else { XCTAssertEqual(interval, step) }
+                }
+            }
+        }
+        XCTAssertFalse(CoreLadderConfiguration(startBPM: 100, stepBPM: 0, repsPerLevel: 1).isValid(target: CoreTargetSpeed(bpm: 108)))
+        XCTAssertFalse(config.isValid(target: CoreTargetSpeed(bpm: 108, noteUnit: .eighth)))
     }
     func testLadderInvalidRequiredFieldsBlockAtomicSave() throws {
         let db = try container(), context = db.mainContext
@@ -586,7 +607,8 @@ final class PracticeCoreE2ETests: XCTestCase {
         let store = try container(url: url), context = store.mainContext
         let (piece, event) = try makeDivision(context)
         let runtime = CoreSessionRuntime(defaults: defaults())
-        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start, calendar: calendar)
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start, calendar: calendar, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: start)
         let sessionID = runtime.activeID
         runtime.record(preset: preset(80), at: start.addingTimeInterval(10))
         runtime.record(preset: preset(160, .eighth), at: start.addingTimeInterval(20))
@@ -623,7 +645,8 @@ final class PracticeCoreE2ETests: XCTestCase {
         let (piece, event) = try makeDivision(context, handMode: .left)
         let defaults = defaults()
         let original = CoreSessionRuntime(defaults: defaults)
-        try original.begin(piece: piece, division: event, at: start)
+        try original.begin(piece: piece, division: event, at: start, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        original.synchronizePlayback(isPlaying: true, at: start)
         original.record(preset: preset(80), at: start.addingTimeInterval(10))
         let recovered = CoreSessionRuntime(defaults: defaults)
         XCTAssertEqual(recovered.activeID, original.activeID)
@@ -651,7 +674,8 @@ final class PracticeCoreE2ETests: XCTestCase {
         let (piece, event) = try makeDivision(context)
         let runtime = CoreSessionRuntime(defaults: defaults())
         let midnight = calendar.startOfDay(for: start).addingTimeInterval(86400)
-        try runtime.begin(piece: piece, division: event, initialHand: .left, at: midnight.addingTimeInterval(-10), calendar: calendar)
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: midnight.addingTimeInterval(-10), calendar: calendar, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: midnight.addingTimeInterval(-10))
         runtime.record(preset: preset(80), at: midnight.addingTimeInterval(20))
         runtime.record(preset: preset(100), at: midnight.addingTimeInterval(30))
         runtime.finish(at: midnight.addingTimeInterval(40))
@@ -663,7 +687,8 @@ final class PracticeCoreE2ETests: XCTestCase {
         let goal = try XCTUnwrap(event.coreDefinition?.goal)
         let prior = CoreAnalysis.mastery(history, hand: .left, goal: goal, now: midnight.addingTimeInterval(50), calendar: calendar)
         XCTAssertEqual(prior, CoreAnalysis.mastery(history, hand: .left, goal: goal, now: midnight.addingTimeInterval(86400), calendar: calendar))
-        try runtime.begin(piece: piece, division: event, initialHand: .left, at: midnight.addingTimeInterval(60), calendar: calendar)
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: midnight.addingTimeInterval(60), calendar: calendar, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: midnight.addingTimeInterval(60))
         runtime.switchHand(.right, at: midnight.addingTimeInterval(61))
         runtime.record(preset: preset(120), at: midnight.addingTimeInterval(62))
         runtime.finish(at: midnight.addingTimeInterval(63)); _ = try runtime.save(division: event, in: context)
@@ -681,13 +706,15 @@ final class PracticeCoreE2ETests: XCTestCase {
         let store = try container(), context = store.mainContext
         let (piece, event) = try makeDivision(context)
         let runtime = CoreSessionRuntime(defaults: defaults())
-        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start)
-        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, initialHand: .left))
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: start)
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, initialHand: .left, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true)))
         runtime.finish(at: start.addingTimeInterval(1))
         XCTAssertThrowsError(try runtime.save(division: event, in: context))
         try runtime.discardEmpty()
         XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
-        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start)
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: start)
         runtime.record(preset: preset(100), at: start.addingTimeInterval(1))
         runtime.finish(at: start.addingTimeInterval(2))
         let summary = try XCTUnwrap(runtime.session.reviewSummary)
@@ -716,7 +743,7 @@ final class PracticeCoreE2ETests: XCTestCase {
         let runtime = CoreSessionRuntime(defaults: defaults)
         XCTAssertNotNil(runtime.failure)
         let store = try container(); let (piece, event) = try makeDivision(store.mainContext)
-        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, initialHand: .left))
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, initialHand: .left, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true)))
         XCTAssertEqual(defaults.data(forKey: CoreSessionRuntime.draftKey), bytes)
     }
     func testEveryNoteUnitMedianKeepsOutliersAndEvenAverage() {
@@ -735,7 +762,8 @@ final class PracticeCoreE2ETests: XCTestCase {
         let runtime = CoreSessionRuntime(defaults: defaults())
         for index in 0..<2 {
             let date = start.addingTimeInterval(Double(index * 60))
-            try runtime.begin(piece: piece, division: event, initialHand: .left, at: date, calendar: calendar)
+            try runtime.begin(piece: piece, division: event, initialHand: .left, at: date, calendar: calendar, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            runtime.synchronizePlayback(isPlaying: true, at: date)
             runtime.record(preset: preset(80), at: date.addingTimeInterval(1))
             runtime.finish(at: date.addingTimeInterval(2))
             _ = try runtime.save(division: event, in: context)
@@ -767,7 +795,8 @@ final class PracticeCoreE2ETests: XCTestCase {
     func testNewEmptyDraftIsNotRestoredAsFormalSession() throws {
         let store = try container(); let (piece, event) = try makeDivision(store.mainContext)
         let defaults = defaults(), runtime = CoreSessionRuntime(defaults: defaults)
-        try runtime.begin(piece: piece, division: event, initialHand: .left)
+        try runtime.begin(piece: piece, division: event, initialHand: .left, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true)
         let restored = CoreSessionRuntime(defaults: defaults)
         XCTAssertNil(restored.activeID)
         XCTAssertNil(defaults.data(forKey: CoreSessionRuntime.draftKey))
@@ -796,7 +825,8 @@ final class PracticeCoreE2ETests: XCTestCase {
             let runtime = CoreSessionRuntime(defaults: defaults())
             XCTAssertFalse(mode.allowsHandSwitching)
             XCTAssertEqual(mode.directInitialHand, hand)
-            try runtime.begin(piece: piece, division: event, at: start)
+            try runtime.begin(piece: piece, division: event, at: start, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            runtime.synchronizePlayback(isPlaying: true, at: start)
             XCTAssertEqual(runtime.session.currentHand, hand)
             for candidate in PracticeHand.allCases { runtime.switchHand(candidate, at: start) }
             XCTAssertEqual(runtime.session.currentHand, hand)
@@ -810,7 +840,7 @@ final class PracticeCoreE2ETests: XCTestCase {
         let storage = defaults(), runtime = CoreSessionRuntime(defaults: storage)
         XCTAssertTrue(CoreHandMode.all.allowsHandSwitching)
         XCTAssertNil(CoreHandMode.all.directInitialHand)
-        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event))
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true)))
         runtime.record(preset: preset(100))
         XCTAssertNil(runtime.context)
         XCTAssertNil(runtime.activeID)
@@ -822,11 +852,12 @@ final class PracticeCoreE2ETests: XCTestCase {
         let store = try container(); let (piece, event) = try makeDivision(store.mainContext)
         let runtime = CoreSessionRuntime(defaults: defaults())
         for hand in PracticeHand.allCases {
-            try runtime.begin(piece: piece, division: event, initialHand: hand, at: start)
+            try runtime.begin(piece: piece, division: event, initialHand: hand, at: start, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            runtime.synchronizePlayback(isPlaying: true, at: start)
             XCTAssertEqual(runtime.session.currentHand, hand)
             runtime.switchHand(.both)
             try runtime.discardEmpty()
-            XCTAssertThrowsError(try runtime.begin(piece: piece, division: event))
+            XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true)))
             XCTAssertNil(runtime.activeID)
         }
     }
@@ -834,7 +865,7 @@ final class PracticeCoreE2ETests: XCTestCase {
     func testSingleHandRejectsInapplicableExplicitInitialSelectionWithoutMutation() throws {
         let store = try container(); let (piece, event) = try makeDivision(store.mainContext, handMode: .both)
         let storage = defaults(), runtime = CoreSessionRuntime(defaults: storage)
-        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, initialHand: .left))
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, initialHand: .left, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true)))
         XCTAssertNil(runtime.context)
         XCTAssertNil(storage.data(forKey: CoreSessionRuntime.draftKey))
     }
@@ -842,7 +873,8 @@ final class PracticeCoreE2ETests: XCTestCase {
     func testSwitchingKeepsIdentityPlaybackBPMCountsAndHistoricalAttribution() throws {
         let store = try container(); let (piece, event) = try makeDivision(store.mainContext)
         let runtime = CoreSessionRuntime(defaults: defaults())
-        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start)
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: start)
         let id = runtime.activeID
         runtime.updatePreset(preset(137), at: start)
         runtime.record(preset: runtime.preset, at: start.addingTimeInterval(1))
@@ -872,7 +904,8 @@ final class PracticeCoreE2ETests: XCTestCase {
         let store = try container(), context = store.mainContext
         let (piece, event) = try makeDivision(context)
         let runtime = CoreSessionRuntime(defaults: defaults())
-        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start)
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: start)
         runtime.record(preset: preset(80), at: start.addingTimeInterval(1))
         runtime.switchHand(.right, at: start.addingTimeInterval(2))
         runtime.record(preset: preset(90), at: start.addingTimeInterval(3))
@@ -885,7 +918,8 @@ final class PracticeCoreE2ETests: XCTestCase {
         event.coreDefinitionData = try JSONEncoder().encode(definition)
         try context.save()
         XCTAssertTrue(definition.hasValidGoal, "Left and Right are N/A, not missing goals")
-        try runtime.begin(piece: piece, division: event, at: start.addingTimeInterval(10))
+        try runtime.begin(piece: piece, division: event, at: start.addingTimeInterval(10), activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: start.addingTimeInterval(10))
         runtime.record(preset: preset(100), at: start.addingTimeInterval(11))
         runtime.finish(at: start.addingTimeInterval(12))
         _ = try runtime.save(division: event, in: context)
@@ -903,7 +937,8 @@ final class PracticeCoreE2ETests: XCTestCase {
     func testTogetherDraftRestoresItsHandAndRecords() throws {
         let store = try container(); let (piece, event) = try makeDivision(store.mainContext, handMode: .both)
         let storage = defaults(), runtime = CoreSessionRuntime(defaults: storage)
-        try runtime.begin(piece: piece, division: event, at: start)
+        try runtime.begin(piece: piece, division: event, at: start, activation: CoreLadderActivation(enabled: event.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: start)
         runtime.record(preset: preset(100), at: start.addingTimeInterval(1))
         let restored = CoreSessionRuntime(defaults: storage)
         XCTAssertEqual(restored.activeID, runtime.activeID)
@@ -938,7 +973,8 @@ extension PracticeCoreTests {
 
     func testNode3ControlledExecutionRealRecordsAndTargetHold() throws {
         let (store, piece, division, runtime, _, date) = try ladderSetup()
-        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date)
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         XCTAssertEqual(runtime.preset.bpm, 40) // A09: entry adopts the selected Hand's current rung.
         XCTAssertEqual(runtime.preset.referenceNote, .quarter)
         record(runtime, 40, date: date)
@@ -957,7 +993,8 @@ extension PracticeCoreTests {
         let attempt = try runtime.save(division: division, in: store.mainContext)
         XCTAssertEqual(attempt.completions.map { $0.preset.bpm }, [40, 42, 44, 44, 44])
         XCTAssertEqual(division.coreDefinition?.ladderStates?[.left]?.currentBPM, 44)
-        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date.addingTimeInterval(10))
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date.addingTimeInterval(10), activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date.addingTimeInterval(10))
         XCTAssertEqual(runtime.execution?.ladderStates?[.left]?.currentBPM, 44)
         XCTAssertEqual(runtime.preset.bpm, 44, "Entry resumes saved rung, not Start BPM")
     }
@@ -965,7 +1002,8 @@ extension PracticeCoreTests {
     func testNode3MismatchIsolationEquivalenceAndRecovery() throws {
         let (store, piece, division, runtime, defaults, date) = try ladderSetup(reps: 2)
         defer { withExtendedLifetime(store) {} }
-        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date)
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         record(runtime, 39, date: date)
         XCTAssertFalse(runtime.execution!.ladderStates![.left]!.startLocked)
         record(runtime, 80, unit: .eighth, date: date)
@@ -993,12 +1031,18 @@ extension PracticeCoreTests {
     }
 
     func testNode3ShortStepAndOpenEndedCeiling() throws {
-        for target in [Int?.some(108), nil] {
+        for target in [Int?.some(108), Int?.some(109), nil] {
             let (store, piece, division, runtime, _, date) = try ladderSetup(start: target == nil ? 298 : 100, step: 3, target: target, mode: .both)
-            try runtime.begin(piece: piece, division: division, at: date)
+            try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            runtime.synchronizePlayback(isPlaying: true, at: date)
             defer { withExtendedLifetime(store) {} }
-            let bpms = target == nil ? [298, 300, 300] : [100, 103, 106, 108]
-            for bpm in bpms { record(runtime, bpm, date: date) }
+            let bpms = target.map { [100, 103, 106, $0, $0] } ?? [298, 300, 300]
+            for bpm in bpms {
+                XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, bpm)
+                XCTAssertEqual(runtime.preset.bpm, bpm)
+                record(runtime, bpm, date: date)
+                XCTAssertLessThanOrEqual(try XCTUnwrap(runtime.execution?.ladderStates?[.both]?.currentBPM), target ?? 300)
+            }
             XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, target ?? 300)
             XCTAssertEqual(runtime.preset.bpm, target ?? 300)
             XCTAssertNil(runtime.session.reviewSummary, "Target / execution ceiling is not Session end")
@@ -1015,7 +1059,8 @@ extension PracticeCoreTests {
             var definition = division.coreDefinition!
             definition.goal?.ladderEnabled = false
             division.coreDefinitionData = try JSONEncoder().encode(definition)
-            try runtime.begin(piece: piece, division: division, at: date)
+            try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            runtime.synchronizePlayback(isPlaying: true, at: date)
             for bpm in [40, 241, 299, 300] { record(runtime, bpm, date: date) }
             XCTAssertNil(runtime.execution?.ladderStates)
             XCTAssertEqual(runtime.session.completionSamples(for: mode.hands[0]).map { $0.preset.bpm }, [40, 241, 299, 300])
@@ -1037,7 +1082,8 @@ extension PracticeCoreTests {
         pending.hands[.both]?.speed?.bpm = 38
         definition.nextCycleGoal = pending
         division.coreDefinitionData = try JSONEncoder().encode(definition)
-        try runtime.begin(piece: piece, division: division, at: date, calendar: calendar)
+        try runtime.begin(piece: piece, division: division, at: date, calendar: calendar, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         record(runtime, 40, date: date)
         let oldCycle = runtime.context!.cycleStart
         record(runtime, 42, date: date.addingTimeInterval(86_400))
@@ -1045,7 +1091,8 @@ extension PracticeCoreTests {
         XCTAssertEqual(runtime.context?.goal.hands[.both]?.speed?.bpm, 44)
         runtime.finish(at: date.addingTimeInterval(86_401))
         _ = try runtime.save(division: division, in: store.mainContext)
-        try runtime.begin(piece: piece, division: division, at: date.addingTimeInterval(86_402), calendar: calendar)
+        try runtime.begin(piece: piece, division: division, at: date.addingTimeInterval(86_402), calendar: calendar, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date.addingTimeInterval(86_402))
         XCTAssertEqual(runtime.context?.goal.hands[.both]?.speed?.bpm, 38)
         XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 30)
         XCTAssertFalse(runtime.execution!.ladderStates![.both]!.startLocked)
@@ -1054,16 +1101,18 @@ extension PracticeCoreTests {
 
     func testNode3NewCycleRequiresConfirmedStartAndPreservesHistory() throws {
         let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
-        try runtime.begin(piece: piece, division: division, at: date)
+        try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         record(runtime, 40, date: date)
         runtime.finish(at: date.addingTimeInterval(1))
         let attempt = try runtime.save(division: division, in: store.mainContext)
         let history = attempt.completions
         let next = date.addingTimeInterval(86_400)
-        XCTAssertThrowsError(try runtime.begin(piece: piece, division: division, at: next))
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: division, at: next, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true)))
         XCTAssertNil(runtime.context)
-        XCTAssertThrowsError(try runtime.begin(piece: piece, division: division, at: next, confirmedStarts: [.both: 41]))
-        try runtime.begin(piece: piece, division: division, at: next, confirmedStarts: [.both: 30])
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: division, at: next, confirmedStarts: [.both: 41], activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true)))
+        try runtime.begin(piece: piece, division: division, at: next, confirmedStarts: [.both: 30], activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: next)
         XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 30)
         XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.repsCompleted, 0)
         XCTAssertFalse(runtime.execution!.ladderStates![.both]!.startLocked)
@@ -1072,23 +1121,25 @@ extension PracticeCoreTests {
 
     func testNode3CadenceEditDoesNotResetToday() throws {
         let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
-        try runtime.begin(piece: piece, division: division, at: date)
+        try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         record(runtime, 40, date: date)
         runtime.finish(at: date.addingTimeInterval(1))
         _ = try runtime.save(division: division, in: store.mainContext)
         var goal = division.coreDefinition!.goal!; goal.reset?.days = 7
         _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal, context: store.mainContext,
             activeSessionID: nil, at: date.addingTimeInterval(2), isPro: true)
-        let today = try CoreSessionRuntime.prepare(division: division, at: date.addingTimeInterval(3))
+        let today = try CoreSessionRuntime.prepare(division: division, at: date.addingTimeInterval(3), activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
         XCTAssertTrue(today.needsStart.isEmpty)
         XCTAssertEqual(today.definition.ladderStates?[.both]?.currentBPM, 42)
-        let tomorrow = try CoreSessionRuntime.prepare(division: division, at: date.addingTimeInterval(86_400))
+        let tomorrow = try CoreSessionRuntime.prepare(division: division, at: date.addingTimeInterval(86_400), activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
         XCTAssertEqual(tomorrow.definition.goal?.reset?.days, 7)
         XCTAssertEqual(tomorrow.needsStart, [.both])
     }
     func testNode3CurrentEditsPreserveProgressAndStartLock() throws {
         let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
-        try runtime.begin(piece: piece, division: division, at: date)
+        try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         record(runtime, 40, date: date)
         runtime.finish(at: date.addingTimeInterval(1))
         let saved = try runtime.save(division: division, in: store.mainContext)
@@ -1101,7 +1152,8 @@ extension PracticeCoreTests {
         goal.hands[.both]?.speed?.bpm = 39
         _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
             context: store.mainContext, activeSessionID: nil, at: date, isPro: true, timing: .current)
-        try runtime.begin(piece: piece, division: division, at: date)
+        try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         record(runtime, 42, date: date)
         XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 42)
         XCTAssertEqual(saved.completions, facts)
@@ -1109,21 +1161,24 @@ extension PracticeCoreTests {
 
     func testNode3ReenableUsesNewConfirmedOriginWithoutBackfill() throws {
         let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
-        try runtime.begin(piece: piece, division: division, at: date)
+        try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         record(runtime, 40, date: date)
         runtime.finish(at: date.addingTimeInterval(1))
         _ = try runtime.save(division: division, in: store.mainContext)
         var goal = division.coreDefinition!.goal!; goal.ladderEnabled = false
         _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
             context: store.mainContext, activeSessionID: nil, at: date, isPro: true, timing: .current)
-        try runtime.begin(piece: piece, division: division, at: date)
+        try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         record(runtime, 42, date: date)
         runtime.finish(at: date.addingTimeInterval(1))
         _ = try runtime.save(division: division, in: store.mainContext)
         goal.ladderEnabled = true; goal.hands[.both]?.ladder?.startBPM = 30
         _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
             context: store.mainContext, activeSessionID: nil, at: date, isPro: true, timing: .current)
-        try runtime.begin(piece: piece, division: division, at: date)
+        try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 30)
         XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.repsCompleted, 0)
         XCTAssertFalse(runtime.execution!.ladderStates![.both]!.startLocked)
@@ -1133,7 +1188,8 @@ extension PracticeCoreTests {
     func testNode3UnitMigrationResetsOnlyRoundedRungProgress() throws {
         for unit in [CoreNoteUnit.eighth, .dottedQuarter] {
             let (store, piece, division, runtime, _, date) = try ladderSetup(start: 41, target: 80, reps: 2, mode: .both)
-            try runtime.begin(piece: piece, division: division, at: date)
+            try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            runtime.synchronizePlayback(isPlaying: true, at: date)
             record(runtime, 41, date: date)
             runtime.finish(at: date.addingTimeInterval(1))
             _ = try runtime.save(division: division, in: store.mainContext)
@@ -1143,7 +1199,8 @@ extension PracticeCoreTests {
             goal.hands[.both]?.speed = CoreTargetSpeed(bpm: Int((80 / unit.quarterMultiplier).rounded()), noteUnit: unit)
             _ = try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
                 context: store.mainContext, activeSessionID: nil, at: date, isPro: true, timing: .current)
-            try runtime.begin(piece: piece, division: division, at: date)
+            try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            runtime.synchronizePlayback(isPlaying: true, at: date)
             XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.repsCompleted, unit == .eighth ? 1 : 0)
             XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.previousValidBPM, 41)
         }
@@ -1156,13 +1213,15 @@ extension PracticeCoreTests {
     func testNode4OrdinarySaveDiscardCancelAndFormalLadderRollback() throws {
         for choice in [CoreExitChoice.save, .discard, .cancel] {
             let (store, piece, division, runtime, defaults, date) = try ladderSetup(mode: .both)
-            try runtime.begin(piece: piece, division: division, at: date)
+            try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            runtime.synchronizePlayback(isPlaying: true, at: date)
             record(runtime, 35, date: date)
             runtime.finish(at: date.addingTimeInterval(1))
             let prior = try runtime.save(division: division, in: store.mainContext)
             let baseline = division.coreDefinitionData
             let priorRecords = prior.completions
-            try runtime.begin(piece: piece, division: division, at: date.addingTimeInterval(2))
+            try runtime.begin(piece: piece, division: division, at: date.addingTimeInterval(2), activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            runtime.synchronizePlayback(isPlaying: true, at: date.addingTimeInterval(2))
             record(runtime, 40, date: date.addingTimeInterval(3))
             record(runtime, 42, date: date.addingTimeInterval(4))
             XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 44)
@@ -1188,7 +1247,8 @@ extension PracticeCoreTests {
                 XCTAssertEqual(division.bothCount, choice == .save ? 3 : 1)
                 XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), choice == .save ? 2 : 1)
                 if choice == .discard { XCTAssertEqual(division.coreDefinitionData, baseline) }
-                try runtime.begin(piece: piece, division: division, at: date.addingTimeInterval(6))
+                try runtime.begin(piece: piece, division: division, at: date.addingTimeInterval(6), activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+                runtime.synchronizePlayback(isPlaying: true, at: date.addingTimeInterval(6))
                 XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, choice == .save ? 44 : 40)
                 XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.repsCompleted, 0)
             }
@@ -1206,7 +1266,8 @@ extension PracticeCoreTests {
                 case 2: route = .archivePiece(piece.id)
                 default: route = .deletePiece(piece.id)
                 }
-                try runtime.begin(piece: piece, division: division, at: date)
+                try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+                runtime.synchronizePlayback(isPlaying: true, at: date)
                 record(runtime, 40, date: date)
                 try runtime.requestExit(.transition(route))
                 let result = try runtime.resolveExit(choice, division: division, in: store.mainContext, at: date)
@@ -1222,7 +1283,8 @@ extension PracticeCoreTests {
     func testNode4Hand05RejectsDiscardAndAllowsSaveOrCancel() throws {
         let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
         let route = CoreRoute.editDivision(piece: piece.id, division: division.id)
-        try runtime.begin(piece: piece, division: division, at: date)
+        try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         record(runtime, 40, date: date)
         try runtime.requestExit(.transition(route))
         XCTAssertTrue(runtime.exitRequest!.saveOnly)
@@ -1238,7 +1300,8 @@ extension PracticeCoreTests {
 
     func testNode4EmptySaveCreatesNoFakeHistoryOrRecovery() throws {
         let (store, piece, division, runtime, defaults, date) = try ladderSetup(mode: .both)
-        try runtime.begin(piece: piece, division: division, at: date)
+        try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         try runtime.requestExit(.ordinary)
         XCTAssertEqual(try runtime.resolveExit(.save, division: division, in: store.mainContext, at: date), .piece(piece.id))
         XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
@@ -1248,7 +1311,8 @@ extension PracticeCoreTests {
 
     func testNode4FailedExitKeepsGuardAndProvisionalState() throws {
         let (store, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
-        try runtime.begin(piece: piece, division: division, at: date)
+        try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         record(runtime, 40, date: date)
         let original = runtime.execution
         try runtime.requestExit(.ordinary)
@@ -1263,7 +1327,8 @@ extension PracticeCoreTests {
     func testNode4TransactionFailureRetainsActiveSessionAndAllowsRetry() throws {
         let (store, piece, division, runtime, defaults, date) = try ladderSetup(mode: .both)
         let before = division.coreDefinitionData
-        try runtime.begin(piece: piece, division: division, at: date)
+        try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         record(runtime, 40, date: date)
         let id = runtime.activeID
         try runtime.requestExit(.ordinary)
@@ -1290,7 +1355,8 @@ extension PracticeCoreTests {
         for archived in [false, true] {
             let (db, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
             piece.isArchived = archived; piece.endDate = .distantFuture
-            try runtime.begin(piece: piece, division: division, at: date)
+            try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            runtime.synchronizePlayback(isPlaying: true, at: date)
             record(runtime, 40, date: date); runtime.finish(at: date.addingTimeInterval(1))
             _ = try runtime.save(division: division, in: db.mainContext)
             let originalDefinition = division.coreDefinitionData
@@ -1302,7 +1368,7 @@ extension PracticeCoreTests {
             // Repeated deletion cannot extend retention.
             try CoreContracts.movePieceToRecentlyDeleted(piece: piece, context: db.mainContext, activeSessionID: nil, isPro: true, at: date.addingTimeInterval(50))
             XCTAssertEqual(piece.deletedAt, date)
-            XCTAssertThrowsError(try runtime.begin(piece: piece, division: division, at: date))
+            XCTAssertThrowsError(try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true)))
             let library = try PracticeLibraryStore(modelContext: db.mainContext)
             XCTAssertTrue(library.songs.isEmpty); XCTAssertTrue(library.records.isEmpty)
             XCTAssertThrowsError(try CoreContracts.restoreRecentlyDeletedPiece(piece: piece, context: db.mainContext, isPro: false, at: date))
@@ -1317,7 +1383,8 @@ extension PracticeCoreTests {
     func testPieceDeletionExpirationAndFreeDeleteRemoveGraph() throws {
         for expires in [false, true] {
             let (db, piece, division, runtime, _, date) = try ladderSetup(mode: .both)
-            try runtime.begin(piece: piece, division: division, at: date)
+            try runtime.begin(piece: piece, division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            runtime.synchronizePlayback(isPlaying: true, at: date)
             record(runtime, 40, date: date); runtime.finish(at: date.addingTimeInterval(1))
             _ = try runtime.save(division: division, in: db.mainContext)
             if expires {
@@ -1427,7 +1494,7 @@ extension PracticeCoreTests {
         definition.ladderStates = [.left: historical, .right: historical]
         definition.goal?.reset = CoreResetConfiguration(enabled: false)
         division.coreDefinitionData = try JSONEncoder().encode(definition)
-        let prepared = try CoreSessionRuntime.prepare(division: division, at: date)
+        let prepared = try CoreSessionRuntime.prepare(division: division, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
         XCTAssertEqual(prepared.cycle, Calendar.current.startOfDay(for: date))
         XCTAssertTrue(prepared.needsStart.isEmpty)
         XCTAssertEqual(prepared.definition.ladderStates, definition.ladderStates)
@@ -1435,7 +1502,8 @@ extension PracticeCoreTests {
 
     func testHandSyncEditToTogetherPreservesHistoricalFactsAndOnlyExecutesTogetherLadder() throws {
         let (store, piece, division, runtime, _, date) = try ladderSetup(reps: 2)
-        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date)
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         for hand in PracticeHand.allCases {
             runtime.switchHand(hand, at: date)
             record(runtime, 40, date: date)
@@ -1459,7 +1527,8 @@ extension PracticeCoreTests {
             XCTAssertEqual(saved.goal?.hands[hand], historicalGoal.hands[hand])
             XCTAssertEqual(saved.ladderStates?[hand], historicalStates[hand])
         }
-        try runtime.begin(piece: piece, division: division, at: date.addingTimeInterval(3))
+        try runtime.begin(piece: piece, division: division, at: date.addingTimeInterval(3), activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date.addingTimeInterval(3))
         XCTAssertEqual(runtime.session.currentHand, .both)
         XCTAssertEqual(Set(try XCTUnwrap(runtime.context?.goal.hands).keys), [.both])
         XCTAssertEqual(Set(try XCTUnwrap(runtime.execution).applicableLadderStates.keys), [.both])
@@ -1485,7 +1554,8 @@ extension PracticeCoreTests {
     func testA09HandoffAcceptanceSequenceKeepsIndependentRungsAndSession() throws {
         let (store, piece, division, runtime, _, date) = try ladderSetup()
         defer { withExtendedLifetime(store) {} }
-        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date)
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         let id = runtime.activeID
         record(runtime, 40, date: date)
         record(runtime, 42, date: date)
@@ -1517,7 +1587,8 @@ extension PracticeCoreTests {
             currentBPM: 88, repsCompleted: 1, noteUnit: .half)
         definition.ladderStates = [.right: dormant]
         division.coreDefinitionData = try JSONEncoder().encode(definition)
-        try runtime.begin(piece: piece, division: division, initialHand: .right, at: date)
+        try runtime.begin(piece: piece, division: division, initialHand: .right, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         XCTAssertEqual(runtime.preset, division.preset.normalized)
         runtime.switchHand(.left, at: date)
         XCTAssertEqual(runtime.preset.bpm, 40)
@@ -1537,7 +1608,8 @@ extension PracticeCoreTests {
         definition.goal?.hands[.right]?.ladder = CoreLadderConfiguration(startBPM: 80, stepBPM: 2, repsPerLevel: 2, noteUnit: .eighth)
         definition.goal?.hands[.right]?.speed = CoreTargetSpeed(bpm: 88, noteUnit: .eighth)
         division.coreDefinitionData = try JSONEncoder().encode(definition)
-        try runtime.begin(piece: piece, division: division, initialHand: .right, at: date)
+        try runtime.begin(piece: piece, division: division, initialHand: .right, at: date, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: date)
         XCTAssertEqual(runtime.preset.bpm, 80)
         XCTAssertEqual(runtime.preset.referenceNote, .eighth)
         record(runtime, 160, unit: .sixteenth, date: date)
@@ -1560,5 +1632,696 @@ extension PracticeCoreTests {
         XCTAssertEqual(runtime.preset.referenceNote, .eighth)
         XCTAssertEqual(runtime.session.completionSamples(for: .right).map { $0.preset.bpm }, [160, 160, 99])
         XCTAssertEqual(runtime.session.completionSamples(for: .right).map { $0.preset.referenceNote }, [.sixteenth, .sixteenth, .quarter])
+    }
+}
+
+
+extension PracticeCoreTests {
+    func testSkeletonCreateEditDivisionAndGoalAllReturnSinglePieceWorkspace() throws {
+        let store = try container(), context = store.mainContext
+        let piece = try CoreContracts.savePiece(name: "Workspace", structure: CorePieceStructure(mode: .sections, total: 8),
+            context: context, activeSessionID: nil)
+        let destination = CorePage.piece(piece.id)
+        XCTAssertEqual(try CoreContracts.saveCreatedDivision(piece: piece,
+            definition: CoreDivisionDefinition(first: 2, last: 3, handMode: .both), context: context, activeSessionID: nil), destination)
+        let division = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeEvent>()).first)
+        var definition = try XCTUnwrap(division.coreDefinition)
+        definition.last = 4
+        XCTAssertEqual(try CoreContracts.saveEditedDivision(piece: piece, division: division, definition: definition,
+            context: context, activeSessionID: nil), destination)
+        let nav = CoreNavigation()
+        for count in [5, 8] {
+            let goal = CoreGoal(hands: [.both: CoreHandGoal(count: count)])
+            XCTAssertEqual(try CoreContracts.saveGoal(piece: piece.id, division: division, goal: goal,
+                context: context, activeSessionID: nil, timing: .current), destination)
+            XCTAssertEqual(try CoreContracts.goalSavedReturn(piece: piece.id, division: division), destination)
+            nav.path = [destination]
+            nav.request(.editDivision(piece: piece.id, division: division.id))
+            try nav.goalSaved(piece: piece.id, division: division)
+            XCTAssertEqual(nav.path, [destination])
+            XCTAssertNil(nav.pendingRoute)
+            XCTAssertEqual(division.coreDefinition?.goal?.hands[.both]?.count, count)
+        }
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeEvent>()), 1)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+        XCTAssertEqual(try CoreContracts.startRoute(piece: piece.id, division: division.id,
+            definition: XCTUnwrap(division.coreDefinition), activeSessionID: nil), .startPractice(piece: piece.id, division: division.id))
+    }
+}
+
+extension PracticeCoreE2ETests {
+    func testRevisionUnifiedEditorCommitsRangeHandAndGoalPreservingDormantFacts() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, division) = try makeDivision(context, handMode: .all)
+        let original = try XCTUnwrap(division.coreDefinition)
+        let result = try CoreContracts.saveDivisionAndGoal(piece: piece, division: division,
+            first: 2, last: 3, handMode: .both,
+            editedGoal: CoreGoal(hands: [.both: CoreHandGoal(count: 7, speed: CoreTargetSpeed(bpm: 120, noteUnit: .eighth))]),
+            context: context, activeSessionID: nil, timing: .current)
+        XCTAssertEqual(result, .piece(piece.id))
+        let saved = try XCTUnwrap(division.coreDefinition)
+        XCTAssertEqual(saved.first, 2); XCTAssertEqual(saved.last, 3)
+        XCTAssertEqual(saved.handMode, .both)
+        XCTAssertEqual(saved.goal?.hands[.both]?.count, 7)
+        XCTAssertEqual(saved.goal?.hands[.both]?.speed?.noteUnit, .eighth)
+        XCTAssertEqual(saved.goal?.hands[.left], original.goal?.hands[.left])
+        XCTAssertEqual(saved.goal?.hands[.right], original.goal?.hands[.right])
+        XCTAssertEqual(saved.ladderStates, original.ladderStates)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+    }
+
+    func testRevisionUnifiedEditorNoGoalCanSaveRangeOrCreateGoal() throws {
+        let store = try container(), context = store.mainContext
+        let piece = try CoreContracts.savePiece(name: "Combined", structure: CorePieceStructure(mode: .sections, total: 8),
+            context: context, activeSessionID: nil)
+        _ = try CoreContracts.saveCreatedDivision(piece: piece, definition: CoreDivisionDefinition(first: 1, last: 1, handMode: .both),
+            context: context, activeSessionID: nil)
+        let division = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeEvent>()).first)
+        _ = try CoreContracts.saveDivisionAndGoal(piece: piece, division: division, first: 2, last: 3, handMode: .both,
+            editedGoal: nil, context: context, activeSessionID: nil)
+        XCTAssertNil(division.coreDefinition?.goal)
+        _ = try CoreContracts.saveDivisionAndGoal(piece: piece, division: division, first: 2, last: 4, handMode: .both,
+            editedGoal: CoreGoal(hands: [.both: CoreHandGoal(count: 5)]), context: context, activeSessionID: nil)
+        XCTAssertTrue(division.coreDefinition?.hasValidGoal == true)
+        XCTAssertEqual(division.coreDefinition?.last, 4)
+    }
+
+    func testRevisionUnifiedEditorAtomicFailureAndHAND05() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, division) = try makeDivision(context, handMode: .both)
+        let original = division.coreDefinitionData, name = division.name
+        let valid = CoreGoal(hands: [.both: CoreHandGoal(count: 9)])
+        for injected in [false, true] {
+            XCTAssertThrowsError(try CoreContracts.saveDivisionAndGoal(piece: piece, division: division,
+                first: 2, last: 3, handMode: .both,
+                editedGoal: injected ? valid : CoreGoal(hands: [.both: CoreHandGoal(count: 0)]),
+                context: context, activeSessionID: nil, timing: .current,
+                saving: { throw CoreFlowError.invalidInput("Injected save failure") }))
+            XCTAssertEqual(division.coreDefinitionData, original)
+            XCTAssertEqual(division.name, name)
+            let fresh = ModelContext(store)
+            XCTAssertEqual(try fresh.fetch(FetchDescriptor<PracticeEvent>()).first?.coreDefinitionData, original)
+        }
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, at: start, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: true, at: start)
+        runtime.record(preset: preset(100), at: start.addingTimeInterval(1))
+        let route = CoreRoute.editDivision(piece: piece.id, division: division.id)
+        try runtime.requestExit(.transition(route))
+        XCTAssertTrue(runtime.exitRequest?.saveOnly == true)
+        XCTAssertThrowsError(try runtime.resolveExit(.discard, division: division, in: context))
+        XCTAssertThrowsError(try CoreContracts.saveDivisionAndGoal(piece: piece, division: division, first: 2, last: 3,
+            handMode: .both, editedGoal: valid, context: context, activeSessionID: runtime.activeID))
+        XCTAssertEqual(try runtime.resolveExit(.save, division: division, in: context, at: start.addingTimeInterval(2)), .route(route))
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 1)
+    }
+
+    func testRevisionEveryHandEntersPausedAndBackLeavesNoDraftOrFormalFacts() throws {
+        for mode in CoreHandMode.allCases {
+            let store = try container(), context = store.mainContext
+            let (piece, division) = try makeDivision(context, handMode: mode)
+            let preferences = defaults(), runtime = CoreSessionRuntime(defaults: preferences)
+            if mode == .all {
+                XCTAssertThrowsError(try runtime.begin(piece: piece, division: division, at: start, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true)))
+                XCTAssertNil(runtime.context)
+            }
+            try runtime.begin(piece: piece, division: division, initialHand: mode == .all ? .right : nil, at: start, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            XCTAssertFalse(runtime.session.isRunning)
+            XCTAssertFalse(runtime.hasStartedPlayback)
+            XCTAssertEqual(runtime.session.stats(for: runtime.session.currentHand, at: start.addingTimeInterval(30)).durationMilliseconds, 0)
+            runtime.record(preset: preset(100), at: start.addingTimeInterval(30))
+            XCTAssertEqual(runtime.count, 0)
+            runtime.persist()
+            XCTAssertNil(preferences.data(forKey: CoreSessionRuntime.draftKey))
+            XCTAssertEqual(try runtime.cancelBeforePlayback(), piece.id)
+            XCTAssertNil(runtime.activeID)
+            XCTAssertNil(runtime.exitRequest)
+            XCTAssertNil(preferences.data(forKey: CoreSessionRuntime.draftKey))
+            XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+        }
+    }
+
+    func testRevisionPlaybackCommitPauseResumeAndRecordTiming() throws {
+        let store = try container(), (piece, division) = try makeDivision(store.mainContext, handMode: .both)
+        let preferences = defaults(), runtime = CoreSessionRuntime(defaults: preferences)
+        try runtime.begin(piece: piece, division: division, at: start, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.synchronizePlayback(isPlaying: false, at: start.addingTimeInterval(10)) // unsuccessful start
+        XCTAssertFalse(runtime.hasStartedPlayback)
+        XCTAssertEqual(runtime.session.stats(for: .both, at: start.addingTimeInterval(20)).durationMilliseconds, 0)
+        runtime.synchronizePlayback(isPlaying: true, at: start.addingTimeInterval(20))
+        let id = runtime.activeID
+        XCTAssertTrue(runtime.hasStartedPlayback)
+        XCTAssertTrue(runtime.session.isRunning)
+        XCTAssertNotNil(preferences.data(forKey: CoreSessionRuntime.draftKey))
+        XCTAssertThrowsError(try runtime.cancelBeforePlayback())
+        runtime.record(preset: preset(100), at: start.addingTimeInterval(22))
+        runtime.synchronizePlayback(isPlaying: false, at: start.addingTimeInterval(25))
+        runtime.record(preset: preset(100), at: start.addingTimeInterval(28))
+        XCTAssertEqual(runtime.count, 1)
+        XCTAssertEqual(runtime.session.stats(for: .both, at: start.addingTimeInterval(40)).durationMilliseconds, 5_000)
+        runtime.synchronizePlayback(isPlaying: true, at: start.addingTimeInterval(40))
+        runtime.synchronizePlayback(isPlaying: false, at: start.addingTimeInterval(43))
+        XCTAssertEqual(runtime.activeID, id)
+        XCTAssertEqual(runtime.session.stats(for: .both, at: start.addingTimeInterval(100)).durationMilliseconds, 8_000)
+        let restored = CoreSessionRuntime(defaults: preferences)
+        XCTAssertTrue(restored.hasStartedPlayback)
+        XCTAssertFalse(restored.session.isRunning)
+        XCTAssertEqual(restored.count, 1)
+        XCTAssertEqual(restored.session.stats(for: .both, at: start.addingTimeInterval(100)).durationMilliseconds, 8_000)
+    }
+}
+
+
+extension PracticeCoreE2ETests {
+    func testPhase01AProvisionalAndFailedPlaybackHaveNoSessionIdentityOrSideEffects() throws {
+        for mode in CoreHandMode.allCases {
+            let store = try container(), (piece, division) = try makeDivision(store.mainContext, handMode: mode)
+            let preferences = defaults(), runtime = CoreSessionRuntime(defaults: preferences)
+            let original = division.coreDefinitionData
+            let hand = mode.directInitialHand ?? .right
+            try runtime.begin(piece: piece, division: division, initialHand: hand, at: start, calendar: calendar, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            XCTAssertNil(runtime.activeID)
+            XCTAssertNil(runtime.session.startedAt)
+            XCTAssertNil(runtime.session.sourceEventID)
+            XCTAssertEqual(runtime.session.phase, .idle)
+            XCTAssertEqual(runtime.currentHand, hand)
+            XCTAssertThrowsError(try runtime.requestExit(.ordinary))
+            runtime.resume(at: start.addingTimeInterval(5))
+            runtime.record(preset: preset(100), at: start.addingTimeInterval(10))
+            var startupCalls = 0
+            XCTAssertFalse(try runtime.startPlayback(at: start.addingTimeInterval(20)) {
+                startupCalls += 1
+                return false // Audio startup failed, not merely a Play tap.
+            })
+            XCTAssertEqual(startupCalls, 1)
+            XCTAssertNil(runtime.activeID)
+            XCTAssertNil(runtime.session.startedAt)
+            XCTAssertFalse(runtime.hasStartedPlayback)
+            XCTAssertEqual(runtime.count, 0)
+            XCTAssertEqual(runtime.session.stats(for: hand, at: start.addingTimeInterval(50)).durationMilliseconds, 0)
+            XCTAssertNil(preferences.data(forKey: CoreSessionRuntime.draftKey))
+            XCTAssertEqual(division.coreDefinitionData, original)
+            XCTAssertEqual(try runtime.cancelBeforePlayback(), piece.id)
+            XCTAssertNil(runtime.context)
+            XCTAssertNil(runtime.exitRequest)
+            XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+        }
+    }
+
+    func testPhase01ACommitTimeIdentityHandClockAndRecoveryUseSuccessfulPlayback() throws {
+        let store = try container(), (piece, division) = try makeDivision(store.mainContext)
+        let preferences = defaults(), runtime = CoreSessionRuntime(defaults: preferences)
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: start, calendar: calendar, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        runtime.switchHand(.right, at: start.addingTimeInterval(10))
+        XCTAssertNil(runtime.activeID)
+        XCTAssertEqual(runtime.currentHand, .right)
+        let commit = start.addingTimeInterval(20)
+        XCTAssertTrue(try runtime.startPlayback(at: commit) { true })
+        let identity = try XCTUnwrap(runtime.activeID)
+        XCTAssertEqual(runtime.session.startedAt, commit)
+        XCTAssertEqual(runtime.session.sourceEventID, division.id)
+        runtime.record(preset: preset(100), at: commit.addingTimeInterval(2))
+        runtime.synchronizePlayback(isPlaying: true, at: commit.addingTimeInterval(3))
+        runtime.pause(at: commit.addingTimeInterval(5))
+        runtime.record(preset: preset(100), at: commit.addingTimeInterval(10))
+        XCTAssertEqual(runtime.count, 1)
+        XCTAssertEqual(runtime.session.stats(for: .right, at: commit.addingTimeInterval(20)).durationMilliseconds, 5_000)
+        XCTAssertTrue(try runtime.startPlayback(at: commit.addingTimeInterval(20)) { true })
+        runtime.switchHand(.left, at: commit.addingTimeInterval(22))
+        runtime.record(preset: preset(80), at: commit.addingTimeInterval(23))
+        runtime.pause(at: commit.addingTimeInterval(24))
+        XCTAssertEqual(runtime.activeID, identity)
+        XCTAssertEqual(runtime.session.startedAt, commit)
+        XCTAssertEqual(runtime.session.stats(for: .right, at: commit.addingTimeInterval(50)).durationMilliseconds, 7_000)
+        XCTAssertEqual(runtime.session.stats(for: .left, at: commit.addingTimeInterval(50)).durationMilliseconds, 2_000)
+        let recovered = CoreSessionRuntime(defaults: preferences)
+        XCTAssertEqual(recovered.activeID, identity)
+        XCTAssertEqual(recovered.currentHand, .left)
+        XCTAssertEqual(recovered.count, 2)
+        XCTAssertFalse(recovered.session.isRunning)
+        try recovered.requestExit(.ordinary)
+        _ = try recovered.resolveExit(.save, division: division, in: store.mainContext, at: commit.addingTimeInterval(60))
+        let saved = try XCTUnwrap(store.mainContext.fetch(FetchDescriptor<PracticeAttempt>()).first)
+        XCTAssertEqual(saved.sessionID, identity)
+        XCTAssertEqual(saved.startedAt, commit)
+        XCTAssertEqual(saved.completions.map(\.hand), [.right, .left])
+        XCTAssertEqual(saved.stats(for: .right).durationMilliseconds, 7_000)
+        XCTAssertEqual(saved.stats(for: .left).durationMilliseconds, 2_000)
+    }
+
+    func testPhase01APlayedWithoutRecordStillUsesSES04NoHistoryRule() throws {
+        for choice in [CoreExitChoice.save, .discard, .cancel] {
+            let store = try container(), (piece, division) = try makeDivision(store.mainContext, handMode: .both)
+            let preferences = defaults(), runtime = CoreSessionRuntime(defaults: preferences)
+            try runtime.begin(piece: piece, division: division, at: start, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            XCTAssertTrue(try runtime.startPlayback(at: start.addingTimeInterval(20)) { true })
+            let identity = runtime.activeID
+            try runtime.requestExit(.ordinary)
+            _ = try runtime.resolveExit(choice, division: division, in: store.mainContext, at: start.addingTimeInterval(50))
+            XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+            if choice == .cancel {
+                XCTAssertEqual(runtime.activeID, identity)
+                XCTAssertTrue(runtime.session.isRunning)
+            } else {
+                XCTAssertNil(runtime.activeID)
+                XCTAssertNil(preferences.data(forKey: CoreSessionRuntime.draftKey))
+            }
+        }
+    }
+
+    func testPhase01AFirstPlayRevalidatesCycleAfterProvisionalMidnight() throws {
+        let store = try container(), (piece, division) = try makeDivision(store.mainContext, handMode: .both)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        let midnight = calendar.startOfDay(for: start)
+        let entry = midnight.addingTimeInterval(86_399)
+        let commit = midnight.addingTimeInterval(86_405)
+        try runtime.begin(piece: piece, division: division, at: entry, calendar: calendar, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+        XCTAssertEqual(runtime.context?.cycleStart, midnight)
+        XCTAssertTrue(try runtime.startPlayback(at: commit) { true })
+        XCTAssertEqual(runtime.context?.cycleStart, calendar.startOfDay(for: commit))
+        XCTAssertEqual(runtime.session.startedAt, commit)
+        XCTAssertEqual(runtime.session.stats(for: .both, at: commit).durationMilliseconds, 0)
+    }
+
+    func testPhase01AAtomicEditorFailureRetryAndBothSourceReturnsPreserveHistory() throws {
+        for fromDivision in [false, true] {
+            let store = try container(), context = store.mainContext
+            let (piece, division) = try makeDivision(context, handMode: .all)
+            let runtime = CoreSessionRuntime(defaults: defaults())
+            try runtime.begin(piece: piece, division: division, initialHand: .left, at: start, activation: CoreLadderActivation(enabled: division.coreDefinition?.goal?.ladderEnabled == true, isPro: true))
+            XCTAssertTrue(try runtime.startPlayback(at: start) { true })
+            runtime.record(preset: preset(90), at: start.addingTimeInterval(1))
+            runtime.finish(at: start.addingTimeInterval(2))
+            let history = try runtime.save(division: division, in: context)
+            let historicalContext = history.coreContextData, samples = history.completions
+            let before = division.coreDefinitionData
+            let source: CorePage = fromDivision ? .division(piece: piece.id, division: division.id) : .piece(piece.id)
+            let navigation = CoreNavigation()
+            navigation.path = fromDivision ? [.piece(piece.id), source] : [source]
+            let sourcePath = navigation.path
+            navigation.request(.editDivision(piece: piece.id, division: division.id))
+            let goal = CoreGoal(hands: [.both: CoreHandGoal(count: 8, speed: CoreTargetSpeed(bpm: 120))])
+            XCTAssertThrowsError(try CoreContracts.saveDivisionAndGoal(piece: piece, division: division,
+                first: 2, last: 4, handMode: .both, editedGoal: goal, context: context,
+                activeSessionID: nil, timing: .current, saving: { throw CoreFlowError.invalidInput("Disk unavailable") }))
+            XCTAssertEqual(division.coreDefinitionData, before)
+            XCTAssertEqual(navigation.path, sourcePath)
+            XCTAssertNotNil(navigation.pendingRoute)
+            var saves = 0
+            let page = try CoreContracts.saveDivisionAndGoal(piece: piece, division: division,
+                first: 2, last: 4, handMode: .both, editedGoal: goal, context: context,
+                activeSessionID: nil, timing: .current, saving: {
+                    saves += 1
+                    XCTAssertEqual(try ModelContext(store).fetch(FetchDescriptor<PracticeEvent>()).first?.coreDefinitionData, before)
+                    try context.save()
+                })
+            navigation.editorSaved(page)
+            XCTAssertEqual(saves, 1)
+            XCTAssertEqual(navigation.path, sourcePath)
+            XCTAssertNil(navigation.pendingRoute)
+            XCTAssertEqual(division.coreDefinition?.first, 2)
+            XCTAssertEqual(division.coreDefinition?.last, 4)
+            XCTAssertEqual(division.coreDefinition?.handMode, .both)
+            XCTAssertEqual(division.coreDefinition?.goal?.hands[.both]?.count, 8)
+            XCTAssertEqual(history.coreContextData, historicalContext)
+            XCTAssertEqual(history.completions, samples)
+            XCTAssertEqual(CoreAnalysis.stable([history], hand: .left), 90)
+            XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 1)
+            navigation.enteredPractice(piece: piece.id, division: division.id)
+            XCTAssertEqual(navigation.path, [])
+            navigation.returnedBeforePlayback(piece: piece.id)
+            XCTAssertEqual(navigation.path, sourcePath)
+        }
+    }
+}
+
+extension PracticeCoreE2ETests {
+    private func globalFixture(_ context: ModelContext, pending: Bool = false, openOnly: Bool = false) throws -> (PracticeSong, PracticeEvent) {
+        let (piece, event) = try makeDivision(context, handMode: .both)
+        var value = try XCTUnwrap(event.coreDefinition)
+        value.goal = CoreGoal(hands: [.both: CoreHandGoal(count: openOnly ? nil : 5,
+            speed: openOnly ? nil : CoreTargetSpeed(bpm: 108),
+            ladder: CoreLadderConfiguration(startBPM: 100, stepBPM: 3, repsPerLevel: 2),
+            ladderParticipation: pending ? false : nil)], ladderEnabled: true)
+        value.ladderStates = [.both: CoreLadderState(cycleStart: calendar.startOfDay(for: start), cycleStartBPM: 100,
+            currentBPM: 106, repsCompleted: 1, noteUnit: .quarter, firstValidRecordAt: start,
+            previousValidBPM: 106, activationEpoch: 1)]
+        event.coreDefinitionData = try JSONEncoder().encode(value); try context.save()
+        return (piece, event)
+    }
+    private var globalOn: CoreLadderActivation { CoreLadderActivation(enabled: true, isPro: true, epoch: 1) }
+
+    func testPhase01BGlobalDefaultOffProGatePersistenceAndEpoch() {
+        let preferences = defaults(), settings = CorePracticeSettings(defaults: preferences)
+        XCTAssertFalse(settings.ladderEnabled); XCTAssertEqual(settings.ladderEpoch, 0)
+        settings.setLadderEnabled(true, isPro: false)
+        XCTAssertFalse(settings.ladderEnabled)
+        settings.setLadderEnabled(true, isPro: true)
+        XCTAssertTrue(settings.activation(isPro: true).enabled)
+        XCTAssertFalse(settings.activation(isPro: false).enabled)
+        XCTAssertEqual(CorePracticeSettings(defaults: preferences).ladderEpoch, 1)
+        settings.setLadderEnabled(false, isPro: true)
+        settings.setLadderEnabled(true, isPro: true)
+        XCTAssertEqual(settings.ladderEpoch, 2)
+    }
+
+    func testPhase01BOffOpenOnlyBlockedWithoutDeletingConfiguration() throws {
+        let store = try container(), (piece, event) = try globalFixture(store.mainContext, openOnly: true)
+        let bytes = event.coreDefinitionData, runtime = CoreSessionRuntime(defaults: defaults())
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, at: start, activation: CoreLadderActivation()))
+        XCTAssertNil(runtime.activeID); XCTAssertNil(runtime.context)
+        XCTAssertEqual(event.coreDefinitionData, bytes)
+        try runtime.begin(piece: piece, division: event, at: start, activation: globalOn)
+        XCTAssertEqual(runtime.preset.bpm, 106)
+        XCTAssertFalse(runtime.hasStartedPlayback)
+    }
+
+    func testPhase01BActiveSnapshotOffRecordingAndRestartNewOrigin() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, event) = try globalFixture(context)
+        let runtime = CoreSessionRuntime(defaults: defaults()), preferences = CorePracticeSettings(defaults: defaults())
+        preferences.setLadderEnabled(true, isPro: true)
+        try runtime.begin(piece: piece, division: event, at: start, activation: preferences.activation(isPro: true))
+        XCTAssertTrue(try runtime.startPlayback(at: start, using: { true }))
+        preferences.setLadderEnabled(false, isPro: true)
+        runtime.record(preset: preset(106), at: start.addingTimeInterval(1))
+        XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 108)
+        try runtime.requestExit(.ordinary)
+        _ = try runtime.resolveExit(.save, division: event, in: context, at: start.addingTimeInterval(2))
+        let formal = event.coreDefinition?.ladderStates
+        try runtime.begin(piece: piece, division: event, at: start.addingTimeInterval(3), activation: preferences.activation(isPro: true))
+        XCTAssertFalse(runtime.context?.goal.ladderEnabled == true)
+        XCTAssertNil(runtime.context?.goal.hands[.both]?.ladder)
+        _ = try runtime.startPlayback(at: start.addingTimeInterval(3), using: { true })
+        runtime.record(preset: preset(150), at: start.addingTimeInterval(4))
+        try runtime.requestExit(.ordinary)
+        _ = try runtime.resolveExit(.save, division: event, in: context, at: start.addingTimeInterval(5))
+        XCTAssertEqual(event.coreDefinition?.ladderStates, formal)
+        preferences.setLadderEnabled(true, isPro: true)
+        let onAgain = preferences.activation(isPro: true)
+        XCTAssertEqual(try CoreSessionRuntime.prepare(division: event, at: start, activation: onAgain).needsStart, [.both])
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, at: start, activation: onAgain))
+        try runtime.begin(piece: piece, division: event, at: start, confirmedStarts: [.both: 90], activation: onAgain)
+        XCTAssertEqual(runtime.preset.bpm, 90)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.repsCompleted, 0)
+        XCTAssertNil(runtime.execution?.ladderStates?[.both]?.firstValidRecordAt)
+        XCTAssertEqual(event.coreDefinition?.ladderStates, formal)
+        _ = try runtime.cancelBeforePlayback()
+        XCTAssertEqual(event.coreDefinition?.ladderStates, formal)
+    }
+
+    func testPhase01BLegacyPendingOnlyExplicitAtomicConfirmationWithFailureRetry() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, event) = try globalFixture(context, pending: true)
+        let state = event.coreDefinition?.ladderStates
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: event, at: start, activation: globalOn)
+        XCTAssertNil(runtime.context?.goal.hands[.both]?.ladder)
+        _ = try runtime.cancelBeforePlayback()
+        _ = try CoreContracts.saveDivisionAndGoal(piece: piece, division: event, first: 1, last: 8, handMode: .both,
+            editedGoal: nil, context: context, activeSessionID: nil, isPro: true, activation: globalOn)
+        XCTAssertTrue(event.coreDefinition?.goal?.hands[.both]?.needsLadderConfirmation == true)
+        let original = event.coreDefinitionData
+        XCTAssertThrowsError(try CoreContracts.saveDivisionAndGoal(piece: piece, division: event, first: 2, last: 8, handMode: .both,
+            editedGoal: nil, context: context, activeSessionID: nil, isPro: true, activation: globalOn,
+            confirmedHands: [.both], saving: { throw CoreFlowError.invalidInput("Injected disk failure") }))
+        XCTAssertEqual(event.coreDefinitionData, original)
+        _ = try CoreContracts.saveDivisionAndGoal(piece: piece, division: event, first: 2, last: 8, handMode: .both,
+            editedGoal: nil, context: context, activeSessionID: nil, isPro: true, activation: globalOn, confirmedHands: [.both])
+        XCTAssertFalse(event.coreDefinition?.goal?.hands[.both]?.needsLadderConfirmation == true)
+        XCTAssertEqual(event.coreDefinition?.ladderStates, state)
+        XCTAssertThrowsError(try runtime.begin(piece: piece, division: event, at: start, activation: globalOn))
+        try runtime.begin(piece: piece, division: event, at: start, confirmedStarts: [.both: 95], activation: globalOn)
+        XCTAssertEqual(runtime.preset.bpm, 95); XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.repsCompleted, 0)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+    }
+
+    func testPhase01BLegacyOpenOnlyPendingCannotExecuteAndNilIsNotOptOut() throws {
+        let store = try container(), (piece, event) = try globalFixture(store.mainContext, pending: true, openOnly: true)
+        XCTAssertFalse(try XCTUnwrap(event.coreDefinition).canStart(activation: globalOn))
+        XCTAssertThrowsError(try CoreSessionRuntime(defaults: defaults()).begin(piece: piece, division: event, at: start, activation: globalOn))
+        var definition = try XCTUnwrap(event.coreDefinition)
+        definition.goal?.hands[.both]?.ladderParticipation = nil
+        XCTAssertTrue(definition.canStart(activation: globalOn), "Missing legacy evidence is not an explicit opt-out")
+        let data = try JSONEncoder().encode(definition)
+        XCTAssertNil(try JSONDecoder().decode(CoreDivisionDefinition.self, from: data).goal?.hands[.both]?.ladderParticipation)
+    }
+
+    func testPhase01BConfirmationIsolationCopyAndInvalidAtomicRollback() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, event) = try makeDivision(context, handMode: .all)
+        var definition = try XCTUnwrap(event.coreDefinition)
+        let ladder = CoreLadderConfiguration(startBPM: 40, stepBPM: 2, repsPerLevel: 3)
+        definition.goal = CoreGoal(hands: Dictionary(uniqueKeysWithValues: PracticeHand.allCases.map {
+            ($0, CoreHandGoal(count: 5, ladder: ladder, ladderParticipation: false))
+        }), ladderEnabled: true)
+        event.coreDefinitionData = try JSONEncoder().encode(definition); try context.save()
+        var copy = try CoreContracts.copyLeftLadderToRight(in: XCTUnwrap(definition.goal), mode: .all)
+        XCTAssertTrue(copy.hands[.right]?.needsLadderConfirmation == true)
+        XCTAssertNil(copy.hands[.right]?.ladderConfigurationConfirmed)
+        copy.hands[.left]?.ladder?.stepBPM = 21
+        XCTAssertThrowsError(try CoreContracts.saveDivisionAndGoal(piece: piece, division: event, first: 1, last: 8,
+            handMode: .all, editedGoal: copy, context: context, activeSessionID: nil, isPro: true,
+            timing: .current, activation: globalOn, confirmedHands: [.left]))
+        XCTAssertEqual(event.coreDefinition, definition)
+        _ = try CoreContracts.saveDivisionAndGoal(piece: piece, division: event, first: 1, last: 8,
+            handMode: .all, editedGoal: nil, context: context, activeSessionID: nil, isPro: true,
+            activation: globalOn, confirmedHands: [.left])
+        XCTAssertFalse(event.coreDefinition?.goal?.hands[.left]?.needsLadderConfirmation == true)
+        XCTAssertTrue(event.coreDefinition?.goal?.hands[.right]?.needsLadderConfirmation == true)
+        XCTAssertTrue(event.coreDefinition?.goal?.hands[.both]?.needsLadderConfirmation == true)
+    }
+
+    func testPhase01BGlobalOverridesGoalSwitchButKeepsFreeGateAndPerHandHandoff() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, event) = try makeDivision(context, handMode: .all)
+        var definition = try XCTUnwrap(event.coreDefinition)
+        definition.goal = CoreGoal(hands: [
+            .left: CoreHandGoal(count: 5, ladder: CoreLadderConfiguration(startBPM: 40, stepBPM: 2, repsPerLevel: 3)),
+            .right: CoreHandGoal(count: 5, ladder: CoreLadderConfiguration(startBPM: 70, stepBPM: 4, repsPerLevel: 2)),
+            .both: CoreHandGoal(count: 5)
+        ], ladderEnabled: false)
+        definition.ladderConfigurationEpochs = [.left: 1, .right: 1]
+        event.coreDefinitionData = try JSONEncoder().encode(definition); try context.save()
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start, activation: globalOn)
+        XCTAssertEqual(runtime.preset.bpm, 40)
+        _ = try runtime.startPlayback(at: start, using: { true })
+        let id = runtime.activeID
+        runtime.switchHand(.right, at: start)
+        XCTAssertEqual(runtime.preset.bpm, 70)
+        runtime.switchHand(.both, at: start)
+        XCTAssertEqual(runtime.preset.bpm, 70, "No configured Ladder means no BPM handoff")
+        XCTAssertEqual(runtime.activeID, id)
+        try runtime.requestExit(.ordinary)
+        _ = try runtime.resolveExit(.discard, division: event, in: context)
+        try runtime.begin(piece: piece, division: event, initialHand: .left, at: start,
+            activation: CoreLadderActivation(enabled: true, isPro: false, epoch: 1))
+        XCTAssertNil(runtime.context?.goal.hands[.left]?.ladder)
+    }
+}
+
+
+extension PracticeCoreE2ETests {
+    func testAuthorityCorrectionFinalShortStepAtomicSaveRetryPreservesHistory() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, division) = try globalFixture(context)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, at: start, activation: globalOn)
+        _ = try runtime.startPlayback(at: start, using: { true })
+        runtime.record(preset: preset(106), at: start.addingTimeInterval(1))
+        XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 108)
+        try runtime.requestExit(.ordinary)
+        _ = try runtime.resolveExit(.save, division: division, in: context, at: start.addingTimeInterval(2))
+        let history = try XCTUnwrap(context.fetch(FetchDescriptor<PracticeAttempt>()).first)
+        let samples = history.completions, historicalContext = history.coreContextData
+        let original = division.coreDefinitionData, states = division.coreDefinition?.ladderStates
+        var edited = try XCTUnwrap(division.coreDefinition?.goal)
+        edited.hands[.both]?.count = 7
+        XCTAssertTrue(edited.hands[.both]?.ladder?.isValid(target: CoreTargetSpeed(bpm: 108)) == true)
+        XCTAssertThrowsError(try CoreContracts.saveDivisionAndGoal(piece: piece, division: division,
+            first: 2, last: 8, handMode: .both, editedGoal: edited, context: context,
+            activeSessionID: nil, isPro: true, timing: .current, activation: globalOn,
+            saving: { throw CoreFlowError.invalidInput("Injected disk failure") }))
+        XCTAssertEqual(division.coreDefinitionData, original)
+        XCTAssertEqual(history.completions, samples); XCTAssertEqual(history.coreContextData, historicalContext)
+        _ = try CoreContracts.saveDivisionAndGoal(piece: piece, division: division,
+            first: 2, last: 8, handMode: .both, editedGoal: edited, context: context,
+            activeSessionID: nil, isPro: true, timing: .current, activation: globalOn)
+        XCTAssertEqual(division.coreDefinition?.first, 2)
+        XCTAssertEqual(division.coreDefinition?.goal?.hands[.both]?.count, 7)
+        XCTAssertEqual(division.coreDefinition?.goal?.hands[.both]?.speed?.bpm, 108)
+        XCTAssertEqual(division.coreDefinition?.ladderStates, states)
+        XCTAssertEqual(history.completions, samples); XCTAssertEqual(history.coreContextData, historicalContext)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 1)
+        XCTAssertFalse(context.hasChanges)
+    }
+
+    func testAuthorityCorrectionSavedFinalShortStepConfigurationRemainsExecutableWithoutRewrite() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, division) = try globalFixture(context)
+        let definition = try XCTUnwrap(division.coreDefinition)
+        let bytes = division.coreDefinitionData, facts = definition.ladderStates
+        XCTAssertTrue(try XCTUnwrap(definition.goal).isValid(for: .both))
+        XCTAssertNotNil(definition.executionGoal(activation: globalOn)?.hands[.both]?.ladder)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, at: start, activation: globalOn)
+        XCTAssertEqual(runtime.preset.bpm, 106)
+        XCTAssertNotNil(runtime.context?.goal.hands[.both]?.ladder)
+        _ = try runtime.cancelBeforePlayback()
+        XCTAssertEqual(division.coreDefinitionData, bytes)
+        XCTAssertEqual(division.coreDefinition?.ladderStates, facts)
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+        XCTAssertFalse(context.hasChanges)
+    }
+}
+
+extension PracticeCoreE2ETests {
+    func testFocusDefaultProGatePersistenceAndCapturedSessionSetting() throws {
+        let preferences = defaults(), settings = CorePracticeSettings(defaults: preferences)
+        XCTAssertTrue(settings.focusActivation(isPro: true))
+        XCTAssertFalse(settings.focusActivation(isPro: false))
+        settings.setFocusEnabled(false, isPro: false)
+        XCTAssertTrue(settings.focusEnabled)
+        let store = try container(), (piece, division) = try makeDivision(store.mainContext, handMode: .both)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, at: start, calendar: calendar, focusEnabled: settings.focusActivation(isPro: true))
+        settings.setFocusEnabled(false, isPro: true)
+        XCTAssertFalse(CorePracticeSettings(defaults: preferences).focusEnabled)
+        XCTAssertTrue(try runtime.startPlayback(at: start) { true })
+        XCTAssertTrue(runtime.isFocusEnabled)
+        XCTAssertEqual(runtime.focusDurationMilliseconds(at: start.addingTimeInterval(10)), 10_000)
+        let next = CoreSessionRuntime(defaults: defaults())
+        try next.begin(piece: piece, division: division, at: start, calendar: calendar, focusEnabled: settings.focusActivation(isPro: true))
+        XCTAssertTrue(try next.startPlayback(at: start) { true })
+        XCTAssertEqual(next.focusDurationMilliseconds(at: start.addingTimeInterval(10)), 0)
+        XCTAssertEqual(next.practiceDurationMilliseconds(at: start.addingTimeInterval(10)), 10_000)
+    }
+
+    func testFocusFirstSuccessfulPlayPauseResumeAndHandContinuity() throws {
+        let store = try container(), (piece, division) = try makeDivision(store.mainContext)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: start, calendar: calendar, focusEnabled: true)
+        XCTAssertEqual(runtime.focusDurationMilliseconds(at: start.addingTimeInterval(100)), 0)
+        XCTAssertFalse(try runtime.startPlayback(at: start.addingTimeInterval(10)) { false })
+        XCTAssertEqual(runtime.focusDurationMilliseconds(at: start.addingTimeInterval(100)), 0)
+        XCTAssertTrue(try runtime.startPlayback(at: start.addingTimeInterval(20)) { true })
+        let id = runtime.activeID
+        runtime.synchronizePlayback(isPlaying: true, at: start.addingTimeInterval(22))
+        runtime.switchHand(.right, at: start.addingTimeInterval(25))
+        runtime.pause(at: start.addingTimeInterval(30))
+        XCTAssertEqual(runtime.focusDurationMilliseconds(at: start.addingTimeInterval(60)), 10_000)
+        runtime.resume(at: start.addingTimeInterval(60))
+        runtime.switchHand(.both, at: start.addingTimeInterval(65))
+        runtime.pause(at: start.addingTimeInterval(70))
+        XCTAssertEqual(runtime.activeID, id)
+        XCTAssertEqual(runtime.focusDurationMilliseconds(at: start.addingTimeInterval(100)), 20_000)
+        XCTAssertEqual(runtime.focusDurationMilliseconds(at: start.addingTimeInterval(100)), runtime.practiceDurationMilliseconds(at: start.addingTimeInterval(100)))
+    }
+
+    func testFocusRecoveryExcludesDowntimeAndRetainsSnapshot() throws {
+        let store = try container(), (piece, division) = try makeDivision(store.mainContext, handMode: .both)
+        let preferences = defaults(), runtime = CoreSessionRuntime(defaults: preferences)
+        try runtime.begin(piece: piece, division: division, at: start, calendar: calendar, focusEnabled: true)
+        XCTAssertTrue(try runtime.startPlayback(at: start) { true })
+        runtime.record(preset: preset(100), at: start.addingTimeInterval(2))
+        runtime.persist(at: start.addingTimeInterval(7))
+        let restored = CoreSessionRuntime(defaults: preferences)
+        XCTAssertEqual(restored.activeID, runtime.activeID)
+        XCTAssertTrue(restored.isFocusEnabled)
+        XCTAssertFalse(restored.session.isRunning)
+        XCTAssertEqual(restored.focusDurationMilliseconds(at: start.addingTimeInterval(1000)), 7_000)
+        restored.resume(at: start.addingTimeInterval(1000))
+        restored.pause(at: start.addingTimeInterval(1003))
+        XCTAssertEqual(restored.focusDurationMilliseconds(at: start.addingTimeInterval(2000)), 10_000)
+    }
+
+    func testFocusSavedFactPersistenceFailureRetryAndLegacyAbsence() throws {
+        let store = try container(), (piece, division) = try makeDivision(store.mainContext, handMode: .both)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, at: start, calendar: calendar, focusEnabled: true)
+        XCTAssertTrue(try runtime.startPlayback(at: start) { true })
+        runtime.record(preset: preset(100), at: start.addingTimeInterval(2))
+        runtime.pause(at: start.addingTimeInterval(8))
+        try runtime.requestExit(.ordinary)
+        XCTAssertThrowsError(try runtime.resolveExit(.save, division: division, in: store.mainContext, at: start.addingTimeInterval(20), saving: { throw CoreFlowError.noRecording }))
+        XCTAssertEqual(runtime.focusDurationMilliseconds(at: start.addingTimeInterval(25)), 8_000)
+        XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+        _ = try runtime.resolveExit(.save, division: division, in: store.mainContext, at: start.addingTimeInterval(30))
+        let saved = try XCTUnwrap(store.mainContext.fetch(FetchDescriptor<PracticeAttempt>()).first)
+        XCTAssertEqual(saved.coreContext?.focusDurationMilliseconds, 8_000)
+        XCTAssertEqual(saved.coreContext?.focusEnabled, true)
+        let original = saved.coreContextData
+        CorePracticeSettings(defaults: defaults()).setFocusEnabled(false, isPro: true)
+        XCTAssertEqual(saved.coreContextData, original)
+        var legacy = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(original)) as? [String: Any])
+        legacy.removeValue(forKey: "focusEnabled"); legacy.removeValue(forKey: "focusDurationMilliseconds")
+        let decoded = try JSONDecoder().decode(CoreSessionContext.self, from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertNil(decoded.focusEnabled); XCTAssertNil(decoded.focusDurationMilliseconds)
+    }
+
+    func testFocusCancelDiscardAndPreplayBackDoNotManufactureFacts() throws {
+        let store = try container(), (piece, division) = try makeDivision(store.mainContext, handMode: .both)
+        let preferences = defaults(), runtime = CoreSessionRuntime(defaults: preferences)
+        try runtime.begin(piece: piece, division: division, at: start, calendar: calendar, focusEnabled: true)
+        _ = try runtime.cancelBeforePlayback()
+        XCTAssertNil(preferences.data(forKey: CoreSessionRuntime.draftKey))
+        try runtime.begin(piece: piece, division: division, at: start, calendar: calendar, focusEnabled: true)
+        XCTAssertTrue(try runtime.startPlayback(at: start) { true })
+        runtime.record(preset: preset(100), at: start.addingTimeInterval(2))
+        runtime.pause(at: start.addingTimeInterval(5))
+        try runtime.requestExit(.ordinary)
+        XCTAssertNil(try runtime.resolveExit(.cancel, division: division, in: store.mainContext))
+        XCTAssertEqual(runtime.focusDurationMilliseconds(at: start.addingTimeInterval(50)), 5_000)
+        try runtime.requestExit(.ordinary)
+        _ = try runtime.resolveExit(.discard, division: division, in: store.mainContext)
+        XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+        XCTAssertNil(preferences.data(forKey: CoreSessionRuntime.draftKey))
+        XCTAssertEqual(runtime.focusDurationMilliseconds(at: start.addingTimeInterval(100)), 0)
+    }
+}
+
+extension PracticeCoreE2ETests {
+    func testFocusOnPreservesLadderProgressionAndIndependentPlaybackPause() throws {
+        let store = try container(), (piece, division) = try globalFixture(store.mainContext)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, at: start, calendar: calendar, activation: globalOn, focusEnabled: true)
+        XCTAssertTrue(try runtime.startPlayback(at: start) { true })
+        let id = runtime.activeID
+        runtime.record(preset: preset(106), at: start.addingTimeInterval(1))
+        XCTAssertEqual(runtime.preset.bpm, 108) // Final short step still holds.
+        runtime.pause(at: start.addingTimeInterval(4)) // Explicit independent detachment boundary.
+        let independent = CoreSessionRuntime(defaults: defaults())
+        independent.synchronizePlayback(isPlaying: true, at: start.addingTimeInterval(5))
+        independent.record(preset: preset(200), at: start.addingTimeInterval(7))
+        XCTAssertEqual(runtime.focusDurationMilliseconds(at: start.addingTimeInterval(50)), 4_000)
+        XCTAssertEqual(runtime.count, 1); XCTAssertEqual(independent.count, 0)
+        runtime.resume(at: start.addingTimeInterval(50))
+        runtime.pause(at: start.addingTimeInterval(52))
+        XCTAssertEqual(runtime.activeID, id)
+        XCTAssertEqual(runtime.focusDurationMilliseconds(at: start.addingTimeInterval(100)), 6_000)
+        XCTAssertEqual(runtime.execution?.ladderStates?[.both]?.currentBPM, 108)
+    }
+
+    func testFocusSavedFactSurvivesDiskReopen() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent("Focus.\(UUID())")
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let url = directory.appendingPathComponent("store.sqlite")
+        do {
+            let store = try container(url: url), (piece, division) = try makeDivision(store.mainContext, handMode: .both)
+            let runtime = CoreSessionRuntime(defaults: defaults())
+            try runtime.begin(piece: piece, division: division, at: start, calendar: calendar, focusEnabled: true)
+            XCTAssertTrue(try runtime.startPlayback(at: start) { true })
+            runtime.record(preset: preset(100), at: start.addingTimeInterval(1))
+            runtime.pause(at: start.addingTimeInterval(3))
+            try runtime.requestExit(.ordinary)
+            _ = try runtime.resolveExit(.save, division: division, in: store.mainContext, at: start.addingTimeInterval(10))
+        }
+        let reopened = try container(url: url)
+        let facts = try reopened.mainContext.fetch(FetchDescriptor<PracticeAttempt>())
+        XCTAssertEqual(facts.count, 1)
+        XCTAssertEqual(facts.first?.coreContext?.focusDurationMilliseconds, 3_000)
+        XCTAssertEqual(facts.first?.coreContext?.focusEnabled, true)
     }
 }

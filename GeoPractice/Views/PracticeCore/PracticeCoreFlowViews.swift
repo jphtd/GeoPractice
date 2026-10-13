@@ -591,22 +591,34 @@ struct CoreSessionView: View {
 
     private var ordinaryLayout: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
+            VStack(alignment: .leading, spacing: runtime.context == nil ? 20 : 12) {
                 if runtime.context == nil { Text("GeoBeat").font(.largeTitle.bold()) }
                 if let context = runtime.context {
                     if showDetails {
-                    HStack(alignment: .center, spacing: 12) {
-                        sessionActions(context).frame(minHeight: 44)
-                        Spacer(minLength: 12)
-                        Button(runtime.hasStartedPlayback ? "结束练习" : "返回", action: finish)
-                            .buttonStyle(.plain).foregroundStyle(CorePalette.accent)
-                            .frame(minWidth: 44, minHeight: 44)
-                            .accessibilityIdentifier(runtime.hasStartedPlayback ? "core.session.finish" : "core.session.back")
+                        HStack(alignment: .center, spacing: 8) {
+                            sessionActions(context).font(.headline.bold()).frame(minHeight: 44)
+                            Spacer(minLength: 8)
+                            provisionalBack
+                                .opacity(runtime.hasStartedPlayback ? 0 : 1)
+                                .allowsHitTesting(!runtime.hasStartedPlayback)
+                                .accessibilityHidden(runtime.hasStartedPlayback)
+                        }.frame(height: 44)
+                        HStack(alignment: .bottom, spacing: 8) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(context.pieceName).coreType(.body)
+                                    .accessibilityIdentifier("core.focus.context")
+                                Text(context.divisionName).coreType(.body)
+                            }.frame(maxWidth: .infinity, alignment: .leading)
+                            TimelineView(.periodic(from: .now, by: 1)) { timeline in
+                                let seconds = PracticeHand.allCases.reduce(Int64(0)) { $0 + runtime.session.stats(for: $1, at: timeline.date).durationMilliseconds } / 1000
+                                Text("有效时间 \(seconds / 60):\(String(format: "%02lld", seconds % 60))")
+                                    .monospacedDigit().coreType(.caption).foregroundStyle(.secondary)
+                                    .fixedSize(horizontal: true, vertical: false)
+                                    .accessibilityIdentifier("core.session.duration")
+                            }
+                        }
                     }
-                    Text("《\(context.pieceName)》 · \(context.divisionName)").coreType(.body)
-                        .accessibilityIdentifier("core.focus.context")
-                    }
-                    handControl(context)
+                    handControl(context).frame(maxWidth: .infinity, alignment: .leading)
                     if showDetails, let goal = context.goal.hands[runtime.currentHand] {
                         let actualCount =
                             CoreAnalysis.count(
@@ -643,29 +655,24 @@ struct CoreSessionView: View {
                 } else {
                     Text("独立 GeoBeat · 未关联计划练习").font(.headline)
                 }
-                if isGeoBeat || runtime.context != nil {
-                    beatControl
-
-                }
-                CoreTempoControls(engine: engine, compact: runtime.isFocusEnabled && !contextRevealed)
                 if showDetails, let context = runtime.context, context.goal.ladderEnabled == true,
                    let config = context.goal.hands[runtime.currentHand]?.ladder,
                    let state = runtime.execution?.ladderStates?[runtime.currentHand] {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("当前档 \(state.currentBPM) BPM（\(state.noteUnit.title)） · \(state.repsCompleted) / \(config.repsPerLevel)")
                             .accessibilityIdentifier("core.session.ladder")
-                        Text(state.startLocked ? "本周期起始速度已锁定" : "本周期起始速度未锁定")
-                            .accessibilityIdentifier("core.session.startLock")
                         if let target = context.goal.hands[runtime.currentHand]?.speed {
-                            Text("阶梯目标 \(target.bpm) BPM")
+                            Text("阶梯目标 \(target.bpm) BPM · \(state.startLocked ? "起始速度已锁定" : "起始速度未锁定")")
+                                .accessibilityIdentifier("core.session.startLock")
                             if state.currentBPM > target.bpm {
                                 Text("当前档高于新目标，停止自动升速；已有进度不回退。")
                             } else if state.currentBPM == target.bpm {
                                 Text("已达到目标速度")
                             }
-                        } else if state.currentBPM == 300 {
-                            Text("已到执行上限 300 BPM")
-                        } else { Text("开放式阶梯 · 无目标速度") }
+                        } else {
+                            Text("\(state.currentBPM == 300 ? "执行上限 300 BPM" : "开放式阶梯 · 无目标速度") · \(state.startLocked ? "起始速度已锁定" : "起始速度未锁定")")
+                                .accessibilityIdentifier("core.session.startLock")
+                        }
                     }.font(.caption).foregroundStyle(.secondary)
                 }
                 if showDetails, let context = runtime.context, context.goal.ladderEnabled != true,
@@ -674,15 +681,15 @@ struct CoreSessionView: View {
                     Text("建议起始速度：\(suggested.formatted(.number.precision(.fractionLength(0...1)))) BPM（\(engine.preset.referenceNote.title)）。可自行修改。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if let message = playbackError ?? engine.errorMessage { Text(message).foregroundStyle(.red) }
-                if showDetails, runtime.context != nil {
-                    TimelineView(.periodic(from: .now, by: 1)) { timeline in
-                        let seconds = PracticeHand.allCases.reduce(Int64(0)) { $0 + runtime.session.stats(for: $1, at: timeline.date).durationMilliseconds } / 1000
-                        Text("有效时间 \(seconds / 60):\(String(format: "%02lld", seconds % 60))")
-                            .monospacedDigit().coreType(.caption).foregroundStyle(.secondary)
-                            .accessibilityIdentifier("core.session.duration")
-                    }
+                if runtime.context != nil {
+                    beatControl.frame(maxWidth: .infinity, alignment: .center)
+                } else if isGeoBeat {
+                    beatControl
                 }
+                if runtime.context == nil {
+                    CoreTempoControls(engine: engine, showsBeats: true, independentGeoBeat: true)
+                }
+                if let message = playbackError ?? engine.errorMessage { Text(message).foregroundStyle(.red) }
                 if runtime.isFocusEnabled {
                     Color.clear.frame(height: 56).contentShape(Rectangle())
                         .onTapGesture { revealContext() }
@@ -699,32 +706,40 @@ struct CoreSessionView: View {
                 }
         }
         .background(sessionCanvas)
-        .safeAreaInset(edge: .bottom) {
+        .safeAreaInset(edge: .bottom, spacing: 0) {
             if let context = runtime.context {
-                if runtime.hasStartedPlayback && allTargetCountsReached(in: context) && !continueAfterTargets {
-                    HStack(spacing: 12) {
-                        CoreButton(title: "继续练习") {
-                            continueAfterTargets = true
+                let showsTargetActions = runtime.hasStartedPlayback && allTargetCountsReached(in: context) && !continueAfterTargets
+                VStack(spacing: 8) {
+                    CoreTempoControls(engine: engine, showsBeats: true)
+                    if showsTargetActions {
+                        HStack(spacing: 12) {
+                            CoreButton(title: "继续练习") {
+                                continueAfterTargets = true
+                            }
+
+                            CoreButton(title: "结束练习", action: finish)
                         }
-
-                        CoreButton(title: "结束练习", action: finish)
+                    } else {
+                        CoreButton(title: runtime.hasStartedPlayback ? "完成一次 · \(runtime.currentHand.title)" : "开始播放后可记录") {
+                            runtime.record(preset: engine.effectivePlaybackPreset)
+                            engine.apply(runtime.preset)
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        }
+                        .disabled(!runtime.session.isRunning || !engine.isPlaying)
+                        .accessibilityIdentifier("core.session.record")
                     }
-                    .padding(.horizontal)
-                    .padding(.vertical, 8)
-                    .background(sessionCanvas)
-
-                } else {
-                    CoreButton(title: runtime.hasStartedPlayback ? "完成一次 · \(runtime.currentHand.title)" : "开始播放后可记录") {
-                        runtime.record(preset: engine.effectivePlaybackPreset)
-                        engine.apply(runtime.preset)
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    }
-                    .disabled(!runtime.session.isRunning || !engine.isPlaying)
-                    .accessibilityIdentifier("core.session.record")
-                    .padding(.horizontal)
-                    .padding(.vertical, 8)
-                    .background(sessionCanvas)
+                    Button("结束练习", action: finish)
+                        .foregroundStyle(CorePalette.accent)
+                        .frame(minWidth: 44, minHeight: 44)
+                        .opacity(runtime.hasStartedPlayback && !showsTargetActions ? 1 : 0)
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: runtime.hasStartedPlayback)
+                        .allowsHitTesting(runtime.hasStartedPlayback && !showsTargetActions)
+                        .accessibilityHidden(!runtime.hasStartedPlayback || showsTargetActions)
+                        .accessibilityIdentifier("core.session.finish")
                 }
+                .padding(.horizontal).padding(.vertical, 8)
+                .frame(maxWidth: 720).frame(maxWidth: .infinity)
+                .background(sessionCanvas)
             }
         }
         .padding(.bottom, 56)
@@ -760,7 +775,7 @@ struct CoreSessionView: View {
                         pulse: engine.lastPulse,
                         isPlaying: engine.isPlaying
                     )
-                    .frame(height: 240)
+                    .frame(height: runtime.context == nil || runtime.isFocusEnabled ? 240 : 180)
                     .contentShape(Rectangle())
                     .onTapGesture { togglePlayback() }
                     .accessibilityAddTraits(.isButton)
@@ -803,13 +818,14 @@ struct CoreSessionView: View {
                 VStack(spacing: 12) {
                     VStack(spacing: 6) {
                         HStack(alignment: .center, spacing: 8) {
-                            if !runtime.hasStartedPlayback { provisionalBack }
+                            provisionalBack
+                                .opacity(runtime.hasStartedPlayback ? 0 : 1)
+                                .allowsHitTesting(!runtime.hasStartedPlayback)
+                                .accessibilityHidden(runtime.hasStartedPlayback)
                             Text(context.pieceName).font(.headline)
                                 .multilineTextAlignment(.center).frame(maxWidth: .infinity)
                                 .fixedSize(horizontal: false, vertical: true)
-                            if !runtime.hasStartedPlayback {
-                                provisionalBack.hidden().accessibilityHidden(true)
-                            }
+                            provisionalBack.hidden().accessibilityHidden(true)
                         }
                         let actual = CoreAnalysis.count(CoreAnalysis.planned(attempts, division: context.divisionID), hand: runtime.currentHand, cycleStart: context.cycleStart)
                             + runtime.session.completionSamples(for: runtime.currentHand).count
@@ -855,10 +871,11 @@ struct CoreSessionView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
+            let showsTargetActions = runtime.hasStartedPlayback && allTargetCountsReached(in: context) && !continueAfterTargets
             VStack(spacing: 12) {
                 handControl(context).frame(minHeight: 44)
-                CoreTempoControls(engine: engine, compact: true)
-                if runtime.hasStartedPlayback && allTargetCountsReached(in: context) && !continueAfterTargets {
+                CoreTempoControls(engine: engine)
+                if showsTargetActions {
                     HStack {
                         CoreButton(title: "继续练习") { continueAfterTargets = true }
                         CoreButton(title: "结束练习", action: finish)
@@ -870,11 +887,14 @@ struct CoreSessionView: View {
                         UIImpactFeedbackGenerator(style: .light).impactOccurred()
                     }.disabled(!runtime.session.isRunning || !engine.isPlaying)
                         .accessibilityIdentifier("core.session.record")
-                    if runtime.hasStartedPlayback {
-                        Button("结束练习", action: finish).frame(minHeight: 44)
-                            .accessibilityIdentifier("core.session.finish")
-                    }
                 }
+                Button("结束练习", action: finish)
+                    .frame(minHeight: 44)
+                    .opacity(runtime.hasStartedPlayback && !showsTargetActions ? 1 : 0)
+                    .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: runtime.hasStartedPlayback)
+                    .allowsHitTesting(runtime.hasStartedPlayback && !showsTargetActions)
+                    .accessibilityHidden(!runtime.hasStartedPlayback || showsTargetActions)
+                    .accessibilityIdentifier("core.session.finish")
             }.padding(.horizontal).padding(.bottom, 12)
                 .frame(maxWidth: 720).frame(maxWidth: .infinity).background(sessionCanvas)
         }
@@ -911,49 +931,98 @@ struct CoreSessionView: View {
 
 private struct CoreTempoControls: View {
     @ObservedObject var engine: MetronomeEngine
-    var compact = false
+    var showsBeats = false
+    var independentGeoBeat = false
     @State private var dragStartBPM: Int?
+    @State private var dragStartBeats: Int?
     @State private var enteredBPM = ""
     @State private var inputError: String?
     @FocusState private var bpmFocused: Bool
     var body: some View {
-        VStack(alignment: compact ? .center : .leading, spacing: compact ? 8 : 16) {
-            if compact {
-                Text("\(engine.preset.bpm) BPM").font(.title.monospacedDigit()).frame(maxWidth: .infinity, minHeight: 44)
-                    .contentShape(Rectangle())
-                    .gesture(DragGesture(minimumDistance: 4).onChanged { value in
-                        let start = dragStartBPM ?? engine.preset.bpm
-                        dragStartBPM = start
-                        engine.setBPM(min(300, max(20, start + Int((value.translation.width - value.translation.height) / 4))))
-                    }.onEnded { _ in dragStartBPM = nil })
-                    .accessibilityLabel("实际速度")
-                    .accessibilityValue("\(engine.preset.bpm) BPM")
-                    .accessibilityHint("滑动调整速度")
-                    .accessibilityAdjustableAction { direction in
-                        engine.setBPM(min(300, max(20, engine.preset.bpm + (direction == .increment ? 1 : -1))))
-                    }.accessibilityIdentifier("core.tempo.bpm")
-            } else {
-            Stepper("实际速度：\(engine.preset.bpm) BPM", value: Binding(get: { engine.preset.bpm }, set: { engine.setBPM($0) }), in: 20...300)
+        Group {
+        if independentGeoBeat {
+            VStack(alignment: .leading, spacing: 16) {
+                Stepper("实际速度：\(engine.preset.bpm) BPM", value: Binding(get: { engine.preset.bpm }, set: { engine.setBPM($0) }), in: 20...300)
+                    .accessibilityIdentifier("core.tempo.bpm")
+                HStack {
+                    TextField("输入 BPM（20–300）", text: $enteredBPM).keyboardType(.numberPad).textFieldStyle(.roundedBorder).focused($bpmFocused)
+                        .accessibilityIdentifier("core.tempo.input")
+                    Button("应用") {
+                        guard let value = TempoScrubModel.validatedBPMInput(enteredBPM) else {
+                            inputError = "实际速度须为 20–300 的整数。"; return
+                        }
+                        engine.setBPM(value); enteredBPM = ""; inputError = nil; bpmFocused = false
+                    }.accessibilityIdentifier("core.tempo.apply")
+                }
+                if let inputError { Text(inputError).font(.caption).foregroundStyle(.red) }
+                Picker("实际音符单位", selection: Binding(get: { engine.preset.referenceNote }, set: {
+                    var value = engine.preset; value.referenceNote = $0; engine.apply(value)
+                })) {
+                    ForEach(TempoReferenceNote.allCases) { Text($0.title).tag($0) }
+                }
+                Stepper("每小节 \(engine.preset.beats) 拍", value: Binding(get: { engine.preset.beats }, set: { engine.setBeats($0) }), in: 1...9)
+            }
+        } else {
+        VStack(spacing: 8) {
+            HStack(spacing: 12) {
+                if dragStartBPM != nil && engine.preset.bpm > 20 {
+                    Text("\(engine.preset.bpm - 1)").font(.caption).foregroundStyle(.secondary)
+                }
+                Text("\(engine.preset.bpm) BPM").font(.title.monospacedDigit())
+                if dragStartBPM != nil && engine.preset.bpm < 300 {
+                    Text("\(engine.preset.bpm + 1)").font(.caption).foregroundStyle(.secondary)
+                }
+            }.frame(maxWidth: .infinity, minHeight: 44)
+                .contentShape(Rectangle())
+                .gesture(DragGesture(minimumDistance: 4).onChanged { value in
+                    let start = dragStartBPM ?? engine.preset.bpm
+                    dragStartBPM = start
+                    engine.setBPM(min(300, max(20, start - Int(value.translation.height / 4))))
+                }.onEnded { _ in dragStartBPM = nil })
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("实际速度")
+                .accessibilityValue("\(engine.preset.bpm) BPM")
+                .accessibilityHint("上下滑动调整速度")
+                .accessibilityAdjustableAction { direction in
+                    engine.setBPM(min(300, max(20, engine.preset.bpm + (direction == .increment ? 1 : -1))))
+                }
                 .accessibilityIdentifier("core.tempo.bpm")
-            HStack {
-                TextField("输入 BPM（20–300）", text: $enteredBPM).keyboardType(.numberPad).textFieldStyle(.roundedBorder).focused($bpmFocused)
-                    .accessibilityIdentifier("core.tempo.input")
-                Button("应用") {
-                    guard let value = TempoScrubModel.validatedBPMInput(enteredBPM) else {
-                        inputError = "实际速度须为 20–300 的整数。"; return
-                    }
-                    engine.setBPM(value); enteredBPM = ""; inputError = nil; bpmFocused = false
-                }.accessibilityIdentifier("core.tempo.apply")
+            HStack(spacing: 12) {
+                Picker("实际音符单位", selection: Binding(get: { engine.preset.referenceNote }, set: {
+                    var value = engine.preset; value.referenceNote = $0; engine.apply(value)
+                })) {
+                    ForEach(TempoReferenceNote.allCases) { Text($0.title).tag($0) }
+                }
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .accessibilityIdentifier("core.tempo.noteUnit")
+                if showsBeats {
+                    HStack(spacing: 12) {
+                        if dragStartBeats != nil && engine.preset.beats > 1 {
+                            Text("\(engine.preset.beats - 1)").font(.caption).foregroundStyle(.secondary)
+                        }
+                        Text("每小节 \(engine.preset.beats) 拍")
+                        if dragStartBeats != nil && engine.preset.beats < 9 {
+                            Text("\(engine.preset.beats + 1)").font(.caption).foregroundStyle(.secondary)
+                        }
+                    }.frame(maxWidth: .infinity, minHeight: 44)
+                        .contentShape(Rectangle())
+                        .gesture(DragGesture(minimumDistance: 4).onChanged { value in
+                            let start = dragStartBeats ?? engine.preset.beats
+                            dragStartBeats = start
+                            engine.setBeats(min(9, max(1, start - Int(value.translation.height / 16))))
+                        }.onEnded { _ in dragStartBeats = nil })
+                        .accessibilityElement(children: .ignore)
+                        .accessibilityLabel("每小节拍数")
+                        .accessibilityValue("\(engine.preset.beats) 拍")
+                        .accessibilityHint("上下滑动调整每小节拍数")
+                        .accessibilityAdjustableAction { direction in
+                            engine.setBeats(min(9, max(1, engine.preset.beats + (direction == .increment ? 1 : -1))))
+                        }
+                        .accessibilityIdentifier("core.tempo.beats")
+                }
             }
-            if let inputError { Text(inputError).font(.caption).foregroundStyle(.red) }
-            }
-            Picker("实际音符单位", selection: Binding(get: { engine.preset.referenceNote }, set: {
-                var value = engine.preset; value.referenceNote = $0; engine.apply(value)
-            })) {
-                ForEach(TempoReferenceNote.allCases) { Text($0.title).tag($0) }
-            }
-            .frame(maxWidth: compact ? .infinity : nil, minHeight: compact ? 44 : nil, alignment: .center)
-            if !compact { Stepper("每小节 \(engine.preset.beats) 拍", value: Binding(get: { engine.preset.beats }, set: { engine.setBeats($0) }), in: 1...9) }
+        }
+        }
         }
     }
 }
@@ -1537,6 +1606,15 @@ struct CoreGlobalSettingsView: View {
     var body: some View {
         NavigationStack {
             Form {
+                #if DEBUG
+                Section("开发测试") {
+                    Toggle("启用测试 Pro", isOn: Binding(
+                        get: { subscription.debugProEnabled },
+                        set: { subscription.setDebugProEnabled($0) }
+                    ))
+                    .accessibilityIdentifier("core.settings.debugPro")
+                }
+                #endif
                 Section("Pro 功能") {
                     if subscription.isPro {
                         Toggle("专注模式", isOn: Binding(get: { settings.focusEnabled }, set: {

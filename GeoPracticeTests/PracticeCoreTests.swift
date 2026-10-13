@@ -1,5 +1,7 @@
 import XCTest
 import SwiftData
+import SwiftUI
+import UIKit
 @testable import GeoPractice
 
 @MainActor
@@ -598,6 +600,54 @@ final class PracticeCoreE2ETests: XCTestCase {
         var value = Calendar(identifier: .gregorian); value.timeZone = TimeZone(secondsFromGMT: 0)!; return value
     }
     private var start: Date { Date(timeIntervalSince1970: 1_790_467_200) }
+
+    func testFirstPlayPreservesLongTitleScrollPositionAcrossPracticeAppearances() async throws {
+        for focus in [false, true] {
+            for dark in [false, true] {
+                for largeType in [false, true] {
+                    let store = try container()
+                    _ = try CoreFixture.make("long", context: store.mainContext)
+                    let piece = try XCTUnwrap(store.mainContext.fetch(FetchDescriptor<PracticeSong>()).first)
+                    let division = try XCTUnwrap(store.mainContext.fetch(FetchDescriptor<PracticeEvent>()).first)
+                    let runtime = CoreSessionRuntime(defaults: defaults(), restore: false)
+                    try runtime.begin(piece: piece, division: division, initialHand: .left,
+                                      focusEnabled: focus)
+                    let engine = MetronomeEngine()
+                    let view = CoreSessionView(runtime: runtime, engine: engine, isGeoBeat: false,
+                                               openGeoBeat: {}, finish: {})
+                        .preferredColorScheme(dark ? .dark : .light)
+                        .modelContainer(store)
+                    let host = UIHostingController(rootView: view)
+                    let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 320, height: 568))
+                    window.traitOverrides.preferredContentSizeCategory = largeType ? .accessibilityExtraExtraExtraLarge : .large
+                    window.rootViewController = host
+                    window.makeKeyAndVisible()
+                    try await Task.sleep(for: .milliseconds(100))
+                    host.view.layoutIfNeeded()
+                    let scroll = try XCTUnwrap(firstScrollView(in: host.view))
+                    let maxOffset = scroll.contentSize.height - scroll.bounds.height
+                    if largeType { XCTAssertGreaterThan(maxOffset, 80) }
+                    let before = maxOffset > 30 ? min(100, maxOffset - 10) : 0
+                    scroll.setContentOffset(CGPoint(x: 0, y: before), animated: false)
+                    XCTAssertTrue(try runtime.startPlayback { true })
+                    try await Task.sleep(for: .milliseconds(100))
+                    host.view.layoutIfNeeded()
+                    XCTAssertTrue(firstScrollView(in: host.view) === scroll, "First play must keep ScrollView identity")
+                    XCTAssertEqual(scroll.contentOffset.y, before, accuracy: 3,
+                                   "First play must not recreate the \(focus ? "Focus" : "Normal") scroll view")
+                    window.isHidden = true
+                }
+            }
+        }
+    }
+
+    private func firstScrollView(in view: UIView) -> UIScrollView? {
+        if let scroll = view as? UIScrollView { return scroll }
+        for child in view.subviews {
+            if let scroll = firstScrollView(in: child) { return scroll }
+        }
+        return nil
+    }
 
     func testRealCreateRecordSaveReopenAndAssociation() throws {
         let directory = FileManager.default.temporaryDirectory.appendingPathComponent("CoreE2E.\(UUID())")

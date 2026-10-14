@@ -1038,8 +1038,38 @@ struct CoreAnalyzeView: View {
             records: scopedAttempts.map(\.statisticsSnapshot),
             calendar: analysisCalendar
         )
+        let durationRecords = scopedAttempts.map(\.statisticsSnapshot)
+        let duration = switch scope {
+        case .overall: PracticeStatisticsEngine.globalDuration(records: durationRecords)
+        case .piece: PracticeStatisticsEngine.pieceDuration(records: durationRecords)
+        case .division: PracticeStatisticsEngine.pieceDuration(records: durationRecords)
+        }
         List {
             Section("历史练习") {
+                if case .overall = scope {
+                    LabeledContent("全局练习时长", value: durationValue(duration))
+                        .accessibilityIdentifier("analyze.history.globalDuration")
+                } else if case .piece = scope {
+                    LabeledContent("曲目练习时长", value: durationValue(duration))
+                        .accessibilityIdentifier("analyze.history.pieceDuration")
+                }
+                if case .overall = scope, duration.removedOverlapMilliseconds > 0 {
+                    Text("全局时长已对重叠时间去重；各曲目时长按实际练习归属统计，因此两者合计可能不同。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if case .piece = scope {
+                    Text("按曲目归属统计")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if case .overall = scope, duration.exactMilliseconds != nil {
+                    Text("按可核验的实际计时区间去重")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if duration.state == .incomplete || duration.state == .unverifiable {
+                    Text("数据不完整 · 时长仅显示可核实部分")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .accessibilityIdentifier("analyze.history.durationIntegrity")
+                }
                 LabeledContent("练习天数", value: practiceDaysValue(days))
                     .accessibilityIdentifier("analyze.history.practiceDays")
                 if let disclosure = practiceDaysDisclosure(days) {
@@ -1097,6 +1127,18 @@ struct CoreAnalyzeView: View {
         case .noRecords: "无记录"
         case .incomplete: "至少 \(result.verifiedDayCount) 天"
         case .unverifiable: "N/A"
+        }
+    }
+    private func durationValue(_ result: PracticeDurationResult) -> String {
+        switch result.state {
+        case .verified, .verifiedZero:
+            return "\(result.verifiedMilliseconds / 1_000) 秒"
+        case .noRecords:
+            return "无记录"
+        case .incomplete:
+            return "至少 \(result.verifiedMilliseconds / 1_000) 秒"
+        case .unverifiable:
+            return "N/A"
         }
     }
     private func practiceDaysDisclosure(_ result: PracticeDaysResult) -> String? {

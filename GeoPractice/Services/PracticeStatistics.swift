@@ -1629,6 +1629,20 @@ struct PracticeDaysResult: Equatable, Sendable {
     )
 }
 
+/// A duration is exact only when every contributing interval can be placed in time.
+struct PracticeDurationResult: Equatable, Sendable {
+    let state: HistoricalMetricState
+    let verifiedMilliseconds: Int64
+    let exactMilliseconds: Int64?
+    let incompleteRecordCount: Int
+    let removedOverlapMilliseconds: Int64
+
+    static let noRecords = PracticeDurationResult(
+        state: .noRecords, verifiedMilliseconds: 0, exactMilliseconds: nil,
+        incompleteRecordCount: 0, removedOverlapMilliseconds: 0
+    )
+}
+
 struct PracticeStatisticsSummary: Equatable, Sendable {
     let totalCount: Int
     let sessionCount: Int
@@ -1761,6 +1775,91 @@ enum StatisticsTimelineOrder: Sendable {
 }
 
 enum PracticeStatisticsEngine {
+    /// Global duration uses the union of saved, verifiable real-time intervals.
+    /// The record and its Piece ownership are never changed by this operation.
+    static func globalDuration(
+        records: [PracticeHistoryRecordSnapshot]
+    ) -> PracticeDurationResult {
+        guard !records.isEmpty else { return .noRecords }
+        var intervals: [DateInterval] = []
+        var rawMilliseconds: Int64 = 0
+        var incomplete = 0
+        for record in records {
+            guard case .success(let verified) = verifiedPracticeIntervals(
+                for: record, calendar: .current
+            ) else {
+                incomplete += 1
+                continue
+            }
+            if record.activeIntervals == nil {
+                let elapsed = record.finishedAt.timeIntervalSince(record.startedAt) * 1_000
+                guard abs(elapsed - Double(record.totalDurationMilliseconds)) <= 5 else {
+                    incomplete += 1
+                    continue
+                }
+            }
+            intervals.append(contentsOf: verified)
+            rawMilliseconds = StatisticsMath.saturatedSum([
+                rawMilliseconds, record.totalDurationMilliseconds
+            ])
+        }
+        let sorted = intervals.sorted { $0.start < $1.start }
+        var union: [DateInterval] = []
+        for interval in sorted {
+            if let last = union.last, interval.start <= last.end {
+                union[union.count - 1] = DateInterval(
+                    start: last.start, end: max(last.end, interval.end)
+                )
+            } else {
+                union.append(interval)
+            }
+        }
+        let verified = StatisticsMath.saturatedSum(union.map { interval in
+            PracticeDurationInterval(startedAt: interval.start, finishedAt: interval.end)?
+                .durationMilliseconds ?? 0
+        })
+        return PracticeDurationResult(
+            state: incomplete > 0
+                ? (intervals.isEmpty ? .unverifiable : .incomplete)
+                : (verified == 0 ? .verifiedZero : .verified),
+            verifiedMilliseconds: verified,
+            exactMilliseconds: incomplete == 0 ? verified : nil,
+            incompleteRecordCount: incomplete,
+            removedOverlapMilliseconds: max(0, rawMilliseconds - verified)
+        )
+    }
+
+    /// Piece duration keeps each saved record's attribution, including time
+    /// that overlaps a different Piece's record in the Global union.
+    static func pieceDuration(
+        records: [PracticeHistoryRecordSnapshot]
+    ) -> PracticeDurationResult {
+        guard !records.isEmpty else { return .noRecords }
+        var verified: Int64 = 0
+        var incomplete = 0
+        for record in records {
+            guard record.finishedAt >= record.startedAt,
+                  record.totalDurationMilliseconds >= 0,
+                  case .success = verifiedPracticeIntervals(for: record, calendar: .current)
+            else {
+                incomplete += 1
+                continue
+            }
+            verified = StatisticsMath.saturatedSum([
+                verified, record.totalDurationMilliseconds
+            ])
+        }
+        return PracticeDurationResult(
+            state: incomplete > 0
+                ? (incomplete == records.count ? .unverifiable : .incomplete)
+                : (verified == 0 ? .verifiedZero : .verified),
+            verifiedMilliseconds: verified,
+            exactMilliseconds: incomplete == 0 ? verified : nil,
+            incompleteRecordCount: incomplete,
+            removedOverlapMilliseconds: 0
+        )
+    }
+
     static func query(
         records: [PracticeHistoryRecordSnapshot],
         period: StatisticsPeriod,

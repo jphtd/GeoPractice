@@ -422,6 +422,84 @@ final class PracticeStatisticsTests: XCTestCase {
         XCTAssertEqual(zero.exactDayCount, 0)
     }
 
+    func testGlobalDurationDeduplicatesIntervalsWithoutRemovingPieceAttribution() throws {
+        let first = date(2026, 8, 20, 9)
+        let second = date(2026, 8, 20, 9, 5)
+        let end = date(2026, 8, 20, 9, 10)
+        let records = [
+            snapshot(eventID: UUID(), startedAt: first, finishedAt: end,
+                     bothDuration: 600_000,
+                     activeIntervals: [try XCTUnwrap(PracticeDurationInterval(
+                        startedAt: first, finishedAt: end))]),
+            snapshot(eventID: UUID(), startedAt: second, finishedAt: end,
+                     bothDuration: 300_000,
+                     activeIntervals: [try XCTUnwrap(PracticeDurationInterval(
+                        startedAt: second, finishedAt: end))])
+        ]
+        let global = PracticeStatisticsEngine.globalDuration(records: records)
+        XCTAssertEqual(global.state, .verified)
+        XCTAssertEqual(global.exactMilliseconds, 600_000)
+        XCTAssertEqual(global.removedOverlapMilliseconds, 300_000)
+        XCTAssertEqual(PracticeStatisticsEngine.pieceDuration(records: [records[0]])
+            .exactMilliseconds, 600_000)
+        XCTAssertEqual(PracticeStatisticsEngine.pieceDuration(records: [records[1]])
+            .exactMilliseconds, 300_000)
+        XCTAssertEqual(PracticeStatisticsEngine.pieceDuration(records: records)
+            .exactMilliseconds, 900_000)
+    }
+
+    func testGlobalDurationUsesSavedNonPausedIntervalsAcrossMidnight() throws {
+        let before = try XCTUnwrap(PracticeDurationInterval(
+            startedAt: date(2026, 8, 20, 23, 50),
+            finishedAt: date(2026, 8, 20, 23, 55)))
+        let after = try XCTUnwrap(PracticeDurationInterval(
+            startedAt: date(2026, 8, 21, 0, 5),
+            finishedAt: date(2026, 8, 21, 0, 10)))
+        let overlap = try XCTUnwrap(PracticeDurationInterval(
+            startedAt: date(2026, 8, 21, 0, 7),
+            finishedAt: date(2026, 8, 21, 0, 12)))
+        let result = PracticeStatisticsEngine.globalDuration(records: [
+            snapshot(startedAt: before.startedAt, finishedAt: after.finishedAt,
+                     bothDuration: 600_000, activeIntervals: [before, after]),
+            snapshot(startedAt: overlap.startedAt, finishedAt: overlap.finishedAt,
+                     bothDuration: 300_000, activeIntervals: [overlap])
+        ])
+        XCTAssertEqual(result.state, .verified)
+        XCTAssertEqual(result.exactMilliseconds, 720_000)
+        XCTAssertEqual(result.removedOverlapMilliseconds, 180_000)
+    }
+
+    func testGlobalDurationDoesNotClaimExactLegacyPausedOrCrossMidnightTime() throws {
+        let start = date(2026, 8, 20, 9)
+        let end = date(2026, 8, 20, 9, 10)
+        let records = [
+            snapshot(startedAt: start, finishedAt: end, bothDuration: 300_000),
+            snapshot(startedAt: date(2026, 8, 20, 23, 55),
+                     finishedAt: date(2026, 8, 21, 0, 5), bothDuration: 300_000),
+            snapshot(startedAt: start, finishedAt: end, bothDuration: 600_000,
+                     activeIntervals: [try XCTUnwrap(PracticeDurationInterval(
+                        startedAt: start, finishedAt: end))])
+        ]
+        let global = PracticeStatisticsEngine.globalDuration(records: records)
+        XCTAssertEqual(global.state, .incomplete)
+        XCTAssertNil(global.exactMilliseconds)
+        XCTAssertEqual(global.verifiedMilliseconds, 600_000)
+        XCTAssertEqual(global.incompleteRecordCount, 2)
+        XCTAssertEqual(PracticeStatisticsEngine.pieceDuration(records: [records[0]])
+            .exactMilliseconds, 300_000)
+    }
+
+    func testGlobalDurationSeparatesNoRecordsAndSavedZero() {
+        XCTAssertEqual(PracticeStatisticsEngine.globalDuration(records: []).state, .noRecords)
+        let zero = snapshot(startedAt: date(2026, 8, 20, 9),
+                            finishedAt: date(2026, 8, 20, 9),
+                            bothCount: 0, bothDuration: 0, activeIntervals: [])
+        XCTAssertEqual(PracticeStatisticsEngine.globalDuration(records: [zero]).state,
+                       .verifiedZero)
+        XCTAssertEqual(PracticeStatisticsEngine.pieceDuration(records: [zero]).state,
+                       .verifiedZero)
+    }
+
     func testPracticeSessionPersistsNonPausedTimingEvidence() throws {
         var session = PracticeSession()
         let start = date(2026, 8, 20, 23, 55)

@@ -182,7 +182,16 @@ final class CoreSessionRuntime: ObservableObject {
     static func prepare(division: PracticeEvent, at date: Date = .now, calendar: Calendar = .current,
                         activation: CoreLadderActivation = CoreLadderActivation())
         throws -> (definition: CoreDivisionDefinition, cycle: Date, needsStart: [PracticeHand]) {
-        guard var definition = division.coreDefinition, var goal = definition.goal else { throw CoreIntegrationError.invalidGoal }
+        guard let definition = division.coreDefinition else { throw CoreIntegrationError.invalidGoal }
+        return try prepare(definition: definition, at: date, calendar: calendar, activation: activation)
+    }
+
+    // Pure projection shared with Analyze; never persists pending goals or cycle changes.
+    static func prepare(definition stored: CoreDivisionDefinition, at date: Date = .now,
+                        calendar: Calendar = .current, activation: CoreLadderActivation = CoreLadderActivation())
+        throws -> (definition: CoreDivisionDefinition, cycle: Date, needsStart: [PracticeHand]) {
+        var definition = stored
+        guard var goal = definition.goal, goal.reset?.isValid ?? true else { throw CoreIntegrationError.invalidGoal }
         let today = calendar.startOfDay(for: date)
         let oldCycle = definition.executionCycleStart ?? definition.applicableLadderStates.values.map(\.cycleStart).min()
         var reset = goal.reset ?? CoreResetConfiguration()
@@ -450,5 +459,117 @@ enum CoreAnalysis {
         let values = definition.handMode.hands.compactMap { mastery(attempts, hand: $0, goal: goal, now: now) }
         guard values.count == definition.handMode.hands.count else { return nil }
         return values.count == 1 ? values[0] : values[0] * 0.25 + values[1] * 0.25 + values[2] * 0.5
+    }
+}
+
+// A11-TC / A12-ANA-05: progress against finite goals, independent of Weakness.
+struct CoreHandTargetCompletion: Equatable {
+    let actualCount: Int?
+    let count: Double?
+    let speed: Double?
+    let combined: Double?
+}
+
+struct CoreDivisionTargetCompletion {
+    let goal: CoreGoal?
+    let hands: [PracticeHand: CoreHandTargetCompletion]
+    let combined: Double?
+}
+
+struct CorePieceTargetCompletion {
+    let combined: Double?
+    let divisionCount: Int
+    let achievedCount: Int
+    let inProgressCount: Int
+    let unavailableCount: Int
+}
+
+@MainActor
+enum CoreTargetCompletion {
+    static func hand(target: CoreHandGoal, actualCount: Int?, stableSpeed: Double?) -> CoreHandTargetCompletion {
+        let count: Double? = target.count.flatMap { denominator in
+            guard denominator > 0, let actualCount, actualCount >= 0 else { return nil }
+            return min(1, Double(actualCount) / Double(denominator))
+        }
+        let speed: Double? = target.speed.flatMap { target in
+            guard (20...300).contains(target.bpm), let stableSpeed,
+                  stableSpeed.isFinite, stableSpeed > 0 else { return nil }
+            return min(1, stableSpeed / target.quarterEquivalent)
+        }
+        let combined: Double?
+        switch (target.count != nil, target.speed != nil) {
+        case (true, true): combined = count.flatMap { c in speed.map { (c + $0) / 2 } }
+        case (true, false): combined = count
+        case (false, true): combined = speed
+        case (false, false): combined = nil // Only open-ended Ladder has no finite denominator.
+        }
+        return CoreHandTargetCompletion(actualCount: actualCount, count: count, speed: speed, combined: combined)
+    }
+
+    static func division(definition: CoreDivisionDefinition, attempts: [PracticeAttempt],
+                         isCurrent: Bool = true, now: Date = .now, calendar: Calendar = .current) -> CoreDivisionTargetCompletion {
+        guard isCurrent, let projected = try? CoreSessionRuntime.prepare(definition: definition, at: now, calendar: calendar),
+              let executionGoal = projected.definition.goal else {
+            return CoreDivisionTargetCompletion(goal: nil, hands: [:], combined: nil)
+        }
+        // An explicit immediate Analyze choice uses pending targets without changing execution.
+        let goal = definition.nextCycleAnalyzeTiming == .immediately
+            ? (definition.nextCycleGoal ?? executionGoal) : executionGoal
+        let saved = attempts.filter { $0.coreContext?.source == "planned" && $0.finishedAt <= now }
+            .sorted { $0.finishedAt == $1.finishedAt ? $0.createdAt > $1.createdAt : $0.finishedAt > $1.finishedAt }
+        var hands: [PracticeHand: CoreHandTargetCompletion] = [:]
+        for hand in definition.handMode.hands {
+            guard let target = goal.hands[hand] else { continue }
+            // Saved aggregate counts remain facts even when per-record speed evidence is absent.
+            let actual = saved.filter { $0.coreContext?.cycleStart == projected.cycle }.reduce(0) { total, attempt in
+                let (sum, overflow) = total.addingReportingOverflow(max(0, attempt.stats(for: hand).count))
+                return overflow ? Int.max : sum
+            }
+            hands[hand] = self.hand(target: target, actualCount: actual, stableSpeed: CoreAnalysis.stable(saved, hand: hand))
+        }
+        let values = definition.handMode.hands.compactMap { hands[$0]?.combined }
+        let combined = values.count == definition.handMode.hands.count
+            ? values.reduce(0, +) / Double(values.count) : nil
+        return CoreDivisionTargetCompletion(goal: goal, hands: hands, combined: combined)
+    }
+
+    static func piece(structure: CorePieceStructure?, divisions: [(CoreDivisionDefinition, CoreDivisionTargetCompletion)],
+                      isCurrent: Bool = true) -> CorePieceTargetCompletion {
+        let achieved = divisions.filter { $0.1.combined == 1 }.count
+        let progressing = divisions.filter { $0.1.combined.map { $0 < 1 } ?? false }.count
+        let unavailable = divisions.count - achieved - progressing
+        var completion: Double?
+        if isCurrent, let structure, let total = structure.total, total > 0, !divisions.isEmpty {
+            let ordered = divisions.sorted { $0.0.first < $1.0.first }
+            var coveredEnd = 0
+            var weighted = 0.0
+            var covered = true
+            for (definition, result) in ordered {
+                guard definition.fits(structure), coveredEnd < total, definition.first == coveredEnd + 1, let value = result.combined else {
+                    covered = false; break
+                }
+                weighted += Double(definition.last - definition.first + 1) * value
+                coveredEnd = definition.last
+            }
+            if covered && coveredEnd == total { completion = weighted / Double(total) }
+        }
+        return CorePieceTargetCompletion(combined: completion, divisionCount: divisions.count,
+            achievedCount: achieved, inProgressCount: progressing, unavailableCount: unavailable)
+    }
+
+    static func piece(_ piece: PracticeSong, events: [PracticeEvent], attempts: [PracticeAttempt],
+                      now: Date = .now, calendar: Calendar = .current) -> CorePieceTargetCompletion {
+        let current = !piece.isArchived && piece.deletedAt == nil
+        let divisions = events.filter { $0.songID == piece.id }.compactMap { event -> (CoreDivisionDefinition, CoreDivisionTargetCompletion)? in
+            guard let definition = event.coreDefinition else { return nil }
+            return (definition, division(definition: definition, attempts: CoreAnalysis.planned(attempts, division: event.id),
+                                         isCurrent: current, now: now, calendar: calendar))
+        }
+        return self.piece(structure: piece.coreStructure, divisions: divisions, isCurrent: current)
+    }
+
+    static func percentage(_ value: Double?) -> String {
+        value.map { ($0 * 100).formatted(.number.precision(.fractionLength(0...1))) + "%" }
+            ?? "暂无法计算（N/A）"
     }
 }

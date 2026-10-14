@@ -2375,3 +2375,183 @@ extension PracticeCoreE2ETests {
         XCTAssertEqual(facts.first?.coreContext?.focusEnabled, true)
     }
 }
+
+@MainActor
+final class CoreTargetCompletionTests: XCTestCase {
+    private var calendar: Calendar {
+        var c = Calendar(identifier: .gregorian); c.timeZone = TimeZone(secondsFromGMT: 0)!; return c
+    }
+    private var day: Date { calendar.startOfDay(for: Date(timeIntervalSince1970: 1_790_467_200)) }
+    private func definition(_ mode: CoreHandMode = .both, count: Int? = 5, speed: Int? = 100) -> CoreDivisionDefinition {
+        CoreDivisionDefinition(first: 1, last: 8, handMode: mode,
+            goal: CoreGoal(hands: Dictionary(uniqueKeysWithValues: mode.hands.map {
+                ($0, CoreHandGoal(count: count, speed: speed.map { CoreTargetSpeed(bpm: $0) }))
+            }), reset: CoreResetConfiguration(anchor: day)), executionCycleStart: day)
+    }
+    private func attempt(_ definition: CoreDivisionDefinition, hand: PracticeHand = .both,
+                         count: Int = 3, bpm: Int = 100, cycle: Date? = nil, source: String = "planned") throws -> PracticeAttempt {
+        let cycle = cycle ?? day
+        let id = UUID()
+        var preset = MetronomePreset.standard; preset.bpm = bpm
+        let samples = (0..<count).map { PracticeCompletionSample(hand: hand, preset: preset, completedAt: cycle.addingTimeInterval(Double($0 + 1))) }
+        let attempt = PracticeAttempt(eventID: id, summary: PracticeSessionSummary(startedAt: cycle,
+            finishedAt: cycle.addingTimeInterval(10),
+            left: HandPracticeStats(count: hand == .left ? count : 0),
+            right: HandPracticeStats(count: hand == .right ? count : 0),
+            both: HandPracticeStats(count: hand == .both ? count : 0), completions: samples))
+        attempt.coreContextData = try JSONEncoder().encode(CoreSessionContext(pieceID: UUID(), divisionID: id,
+            pieceName: "Test", divisionName: "Test", handMode: definition.handMode, goal: definition.goal!,
+            cycleStart: cycle, timeZoneID: calendar.timeZone.identifier, source: source))
+        return attempt
+    }
+
+    func testT06DualFiniteMissingDimensionNeverReweightsOrZeroFills() {
+        let target = CoreHandGoal(count: 5, speed: CoreTargetSpeed(bpm: 100))
+        let value = CoreTargetCompletion.hand(target: target, actualCount: 3, stableSpeed: nil)
+        XCTAssertEqual(value.count, 0.6)
+        XCTAssertNil(value.speed); XCTAssertNil(value.combined)
+        XCTAssertEqual(CoreTargetCompletion.percentage(value.combined), "暂无法计算（N/A）")
+        XCTAssertEqual(CoreTargetCompletion.percentage(value.count), "60%")
+        XCTAssertNil(CoreTargetCompletion.hand(target: target, actualCount: nil, stableSpeed: 100).combined)
+    }
+
+    func testFiniteDimensionsCapIndependentlyAndRetainActualOverrun() throws {
+        let target = CoreHandGoal(count: 5, speed: CoreTargetSpeed(bpm: 100))
+        let value = CoreTargetCompletion.hand(target: target, actualCount: 7, stableSpeed: 50)
+        XCTAssertEqual(value.actualCount, 7); XCTAssertEqual(value.count, 1)
+        XCTAssertEqual(value.speed, 0.5); XCTAssertEqual(value.combined, 0.75)
+        XCTAssertEqual(CoreTargetCompletion.hand(target: target, actualCount: 7, stableSpeed: 200).combined, 1)
+    }
+
+    func testSingleFiniteTargetsOpenEndedAndInvalidInputs() {
+        XCTAssertEqual(CoreTargetCompletion.hand(target: CoreHandGoal(count: 5), actualCount: 3, stableSpeed: nil).combined, 0.6)
+        XCTAssertEqual(CoreTargetCompletion.hand(target: CoreHandGoal(speed: CoreTargetSpeed(bpm: 160, noteUnit: .eighth)), actualCount: nil, stableSpeed: 40).combined, 0.5)
+        let open = CoreHandGoal(ladder: CoreLadderConfiguration(startBPM: 80, stepBPM: 4, repsPerLevel: 3))
+        XCTAssertNil(CoreTargetCompletion.hand(target: open, actualCount: 20, stableSpeed: 100).combined)
+        XCTAssertNil(CoreTargetCompletion.hand(target: CoreHandGoal(count: 0), actualCount: 1, stableSpeed: 100).combined)
+        for value in [Double.nan, Double.infinity, 0, -1] {
+            XCTAssertNil(CoreTargetCompletion.hand(target: CoreHandGoal(speed: CoreTargetSpeed(bpm: 100)), actualCount: 0, stableSpeed: value).combined)
+        }
+        XCTAssertEqual(CoreTargetCompletion.hand(target: CoreHandGoal(count: 5), actualCount: 0, stableSpeed: nil).combined, 0)
+    }
+
+    func testT07ApplicableHandsPropagateNAAndTogetherIgnoresDormantHands() throws {
+        let all = definition(.all)
+        let saved = try attempt(all)
+        let result = CoreTargetCompletion.division(definition: all, attempts: [saved], now: day.addingTimeInterval(30), calendar: calendar)
+        XCTAssertNotNil(result.hands[.both]?.combined); XCTAssertNil(result.hands[.left]?.combined)
+        XCTAssertNil(result.combined)
+        var together = all; together.handMode = .both
+        let single = CoreTargetCompletion.division(definition: together, attempts: [saved], now: day.addingTimeInterval(30), calendar: calendar)
+        XCTAssertEqual(single.hands.count, 1); XCTAssertEqual(single.combined, 0.8)
+        XCTAssertNil(CoreTargetCompletion.division(definition: together, attempts: [saved], isCurrent: false).combined)
+    }
+
+    func testMultiHandCompletionUsesEqualWeightsAndDoesNotChangeWeakness() throws {
+        let d = definition(.all, count: nil)
+        let saved = try [attempt(d, hand: .left, bpm: 20), attempt(d, hand: .right, bpm: 40), attempt(d, hand: .both, bpm: 100)]
+        let before = CoreAnalysis.divisionMastery(saved, definition: d, now: day.addingTimeInterval(30))
+        let completion = CoreTargetCompletion.division(definition: d, attempts: saved, now: day.addingTimeInterval(30), calendar: calendar)
+        XCTAssertEqual(try XCTUnwrap(completion.combined), (0.2 + 0.4 + 1) / 3, accuracy: 0.00001)
+        XCTAssertEqual(try XCTUnwrap(before), 0.65, accuracy: 0.00001)
+        XCTAssertEqual(CoreAnalysis.divisionMastery(saved, definition: d, now: day.addingTimeInterval(30)), before)
+    }
+
+    func testResetMultiDayOffAndCrossMidnightUseCapturedCycle() throws {
+        var d = definition(count: 5, speed: nil)
+        let saved = try attempt(d)
+        let tomorrow = day.addingTimeInterval(86400 + 30)
+        XCTAssertEqual(CoreTargetCompletion.division(definition: d, attempts: [saved], now: tomorrow, calendar: calendar).combined, 0)
+        d.goal?.reset?.days = 3
+        XCTAssertEqual(CoreTargetCompletion.division(definition: d, attempts: [saved], now: tomorrow, calendar: calendar).combined, 0.6)
+        d.goal?.reset?.enabled = false
+        XCTAssertEqual(CoreTargetCompletion.division(definition: d, attempts: [saved], now: day.addingTimeInterval(10 * 86400), calendar: calendar).combined, 0.6)
+        // A completion saved after midnight still belongs to its captured cycle.
+        saved.finishedAt = tomorrow
+        d.goal?.reset?.enabled = true; d.goal?.reset?.days = 1
+        XCTAssertEqual(CoreTargetCompletion.division(definition: d, attempts: [saved], now: tomorrow, calendar: calendar).combined, 0)
+    }
+
+    func testPendingAnalyzeChoiceAndCycleProjectionNeverMutateFacts() throws {
+        var d = definition(count: 5, speed: nil)
+        let saved = try attempt(d)
+        d.nextCycleGoal = CoreGoal(hands: [.both: CoreHandGoal(count: 10)])
+        d.nextCycleAnalyzeTiming = .nextCycle
+        let bytes = saved.coreContextData
+        XCTAssertEqual(CoreTargetCompletion.division(definition: d, attempts: [saved], now: day.addingTimeInterval(30), calendar: calendar).combined, 0.6)
+        d.nextCycleAnalyzeTiming = .immediately
+        XCTAssertEqual(CoreTargetCompletion.division(definition: d, attempts: [saved], now: day.addingTimeInterval(30), calendar: calendar).combined, 0.3)
+        XCTAssertEqual(saved.coreContextData, bytes); XCTAssertEqual(d.goal?.hands[.both]?.count, 5)
+    }
+
+    func testPieceFullCoverageWeightedAndGapOverlapUnknownOrNARejectPercent() throws {
+        var first = definition(count: 5, speed: nil); first.last = 2
+        var second = first; second.first = 3; second.last = 8
+        let half = CoreDivisionTargetCompletion(goal: first.goal, hands: [:], combined: 0.5)
+        let done = CoreDivisionTargetCompletion(goal: second.goal, hands: [:], combined: 1)
+        let missing = CoreDivisionTargetCompletion(goal: second.goal, hands: [:], combined: nil)
+        let structure = CorePieceStructure(mode: .measures, total: 8)
+        let result = CoreTargetCompletion.piece(structure: structure, divisions: [(first, half), (second, done)])
+        XCTAssertEqual(result.combined, 0.875); XCTAssertEqual(result.achievedCount, 1); XCTAssertEqual(result.inProgressCount, 1)
+        let na = CoreTargetCompletion.piece(structure: structure, divisions: [(first, half), (second, missing)])
+        XCTAssertNil(na.combined); XCTAssertEqual(na.unavailableCount, 1)
+        XCTAssertNil(CoreTargetCompletion.piece(structure: structure, divisions: [(first, done)]).combined)
+        second.first = 2
+        XCTAssertNil(CoreTargetCompletion.piece(structure: structure, divisions: [(first, done), (second, done)]).combined)
+        XCTAssertNil(CoreTargetCompletion.piece(structure: CorePieceStructure(mode: .sections), divisions: [(first, done)]).combined)
+        XCTAssertNil(CoreTargetCompletion.piece(structure: structure, divisions: [(first, done)], isCurrent: false).combined)
+    }
+
+    func testT06T07PersistedCountWithoutSpeedEvidenceRendersNAForFreeAndPro() async throws {
+        let schema = Schema([PracticeSong.self, PracticeEvent.self, PracticeAttempt.self, PracticeDailyGoal.self, PracticeFolder.self])
+        let store = try ModelContainer(for: schema, configurations: ModelConfiguration(schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none))
+        let piece = try CoreContracts.savePiece(name: "A12 完成度验证", structure: CorePieceStructure(mode: .measures, total: 8), context: store.mainContext, activeSessionID: nil)
+        var d = definition(); d.goal?.reset?.enabled = false
+        _ = try CoreContracts.saveCreatedDivision(piece: piece, definition: d, context: store.mainContext, activeSessionID: nil)
+        let event = try XCTUnwrap(store.mainContext.fetch(FetchDescriptor<PracticeEvent>()).first)
+        let record = PracticeAttempt(eventID: event.id, summary: PracticeSessionSummary(startedAt: day,
+            finishedAt: day.addingTimeInterval(10), both: HandPracticeStats(count: 3)))
+        record.coreContextData = try JSONEncoder().encode(CoreSessionContext(pieceID: piece.id, divisionID: event.id,
+            pieceName: piece.name, divisionName: event.name, handMode: .both, goal: d.goal!, cycleStart: day,
+            timeZoneID: calendar.timeZone.identifier))
+        store.mainContext.insert(record); try store.mainContext.save()
+        let facts = record.coreContextData
+        let result = CoreTargetCompletion.division(definition: d, attempts: [record], now: day.addingTimeInterval(30), calendar: calendar)
+        XCTAssertEqual(result.hands[.both]?.count, 0.6)
+        XCTAssertNil(result.hands[.both]?.speed); XCTAssertNil(result.hands[.both]?.combined); XCTAssertNil(result.combined)
+        let pieceResult = CoreTargetCompletion.piece(piece, events: [event], attempts: [record], now: day.addingTimeInterval(30), calendar: calendar)
+        XCTAssertNil(pieceResult.combined); XCTAssertEqual(pieceResult.unavailableCount, 1)
+        for (name, pro, large) in [("Free", false, false), ("Pro", true, false), ("Free-Large", false, true)] {
+            let defaults = UserDefaults(suiteName: "TargetCompletionUI.\(UUID())")!
+            defaults.set(pro, forKey: "rovia.debug.testProEnabled")
+            let subscription = SubscriptionStore(observesTransactions: false, defaults: defaults)
+            let host = UIHostingController(rootView: CoreAnalyzeView(scope: .piece(piece.id))
+                .modelContainer(store).environmentObject(subscription).preferredColorScheme(.light)
+                .environment(\.dynamicTypeSize, large ? .accessibility3 : .large))
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: large ? 320 : 390, height: 1600))
+            window.traitOverrides.preferredContentSizeCategory = large ? .accessibilityExtraExtraExtraLarge : .large
+            window.rootViewController = host; window.makeKeyAndVisible()
+            try await Task.sleep(for: .milliseconds(250))
+            host.view.layoutIfNeeded()
+            let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+                host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "Phase02A-T06-T07-\(name)"; attachment.lifetime = .keepAlways
+            add(attachment)
+            XCTAssertGreaterThan(image.size.width, 0)
+            window.isHidden = true
+        }
+        XCTAssertEqual(record.coreContextData, facts)
+        XCTAssertEqual(record.bothCount, 3)
+        XCTAssertEqual(try store.mainContext.fetchCount(FetchDescriptor<PracticeAttempt>()), 1)
+    }
+
+    func testIndependentLegacyAndFutureFactsDoNotEnterCurrentCompletion() throws {
+        let d = definition(count: 5, speed: nil)
+        let independent = try attempt(d, source: "independent")
+        let legacy = try attempt(d); legacy.coreContextData = nil
+        let future = try attempt(d, cycle: day.addingTimeInterval(86400))
+        XCTAssertEqual(CoreTargetCompletion.division(definition: d, attempts: [independent, legacy, future], now: day.addingTimeInterval(30), calendar: calendar).combined, 0)
+    }
+}

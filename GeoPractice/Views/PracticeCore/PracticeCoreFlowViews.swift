@@ -1034,10 +1034,19 @@ struct CoreAnalyzeView: View {
     let scope: CoreAnalyzeContext
     var body: some View {
         List {
+            if case .piece(let id) = scope, let piece = songs.first(where: { $0.id == id }) {
+                let result = CoreTargetCompletion.piece(piece, events: events, attempts: attempts)
+                Section("当前目标状态") {
+                    Text("整曲目标完成度：\(CoreTargetCompletion.percentage(result.combined))")
+                        .accessibilityIdentifier("analyze.target.piece")
+                    Text("\(result.divisionCount) 个练习划分 / \(result.achievedCount) 个已达到当前目标 / \(result.inProgressCount) 个进行中 / \(result.unavailableCount) 个暂无法计算")
+                        .font(.caption)
+                }
+            }
             ForEach(filteredEvents) { event in
                 if let definition = event.coreDefinition {
                     Section("《\(songs.first { $0.id == event.songID }?.name ?? "曲目")》 · \(event.name)") {
-                        CoreDivisionAnalysis(definition: definition, attempts: CoreAnalysis.planned(attempts, division: event.id))
+                        CoreDivisionAnalysis(definition: definition, attempts: CoreAnalysis.planned(attempts, division: event.id), isCurrent: songs.contains { $0.id == event.songID && !$0.isArchived && $0.deletedAt == nil })
                         if let latest = CoreAnalysis.planned(attempts, division: event.id).first {
                             NavigationLink("查看最近一次练习结果") { CoreSavedSessionView(attempt: latest) }
                         }
@@ -1065,7 +1074,12 @@ struct CoreDivisionAnalysis: View {
     let definition: CoreDivisionDefinition
     let attempts: [PracticeAttempt]
     var comparison: [PracticeHand: Double] = [:]
+    var isCurrent = true
     var body: some View {
+        let completion = CoreTargetCompletion.division(definition: definition, attempts: attempts, isCurrent: isCurrent)
+        Text("当前目标完成度仅表示已达到当前配置的目标，不代表演奏质量。")
+            .font(.caption).foregroundStyle(.secondary)
+        if !isCurrent { Text("此曲目不参与当前目标完成度计算。") }
         if attempts.isEmpty { Text("暂无已保存的计划练习") }
         ForEach(definition.handMode.hands) { hand in
             VStack(alignment: .leading, spacing: 8) {
@@ -1075,21 +1089,23 @@ struct CoreDivisionAnalysis: View {
                 if let previous = comparison[hand], let stable {
                     Text("保存前 \(format(previous)) → 保存后 \(format(stable))").font(.caption)
                 }
-                if let goal = definition.goal, let target = goal.hands[hand] {
-                    let count = CoreAnalysis.count(attempts, hand: hand, cycleStart: Calendar.current.startOfDay(for: .now))
-                    if let targetCount = target.count { Text("本周期次数：\(count) / \(targetCount)") }
-                    if count == 0, let latest = attempts.first(where: { $0.completions.contains { $0.hand == hand } }),
-                       (goal.updatedAt ?? .distantPast) <= latest.finishedAt {
-                        Text("本周期尚无此手型的已保存记录；熟练度沿用上一份有效值。").font(.caption).foregroundStyle(.secondary)
+                if let goal = completion.goal, let target = goal.hands[hand], let result = completion.hands[hand] {
+                    let count = result.actualCount ?? 0
+                    Text("当前目标完成度：\(CoreTargetCompletion.percentage(result.combined))")
+                        .accessibilityIdentifier("analyze.target.hand.\(hand.rawValue)")
+                    if let targetCount = target.count {
+                        Text("当前目标周期次数：\(count) / \(targetCount)")
+                        Text("次数完成度：\(CoreTargetCompletion.percentage(result.count))")
                     }
                     if let speed = target.speed {
                         Text("当前目标：\(speed.noteUnit.title) = \(speed.bpm) BPM")
-                        if let stable { Text("速度完成度：\(format(100 * stable / speed.quarterEquivalent))%") }
+                        Text("速度完成度：\(CoreTargetCompletion.percentage(result.speed))")
                     }
-                    if let mastery = CoreAnalysis.mastery(attempts, hand: hand, goal: goal) {
-                        Text("手型 Mastery：\(format(mastery * 100))%")
-                    } else if target.speed == nil {
-                        Text("当前只有次数目标，暂时无法计算熟练度；设置练习目标速度后可计算熟练度与弱项。").font(.caption)
+                    if target.count == nil && target.speed == nil, let ladder = target.ladder {
+                        Text("开放式速度阶梯没有有限终点，不显示完成度百分比。")
+                        if let state = definition.ladderStates?[hand] {
+                            Text("当前档：\(state.currentBPM) BPM · \(state.repsCompleted) / \(ladder.repsPerLevel) 次")
+                        }
                     }
                     if subscription.isPro || previewPro {
                         Text("目标差距").font(.subheadline.bold())
@@ -1102,12 +1118,13 @@ struct CoreDivisionAnalysis: View {
                 }
             }.padding(.vertical, 8)
         }
+        Text("划分当前目标完成度：\(CoreTargetCompletion.percentage(completion.combined))")
+            .accessibilityIdentifier("analyze.target.division")
         if let mastery = CoreAnalysis.divisionMastery(attempts, definition: definition) {
-            Text("划分 Mastery：\(format(mastery * 100))%")
-            Text(mastery <= 0.8 ? "基础弱项提醒：距当前目标熟练度仍有至少 20% 差距。" : "当前划分未触发基础弱项提醒。")
-        } else { Text("划分 Mastery：尚未建立").foregroundStyle(.secondary) }
+            Text(mastery <= 0.8 ? "这个划分需要关注。" : "当前划分未触发基础弱项提醒。")
+        } else { Text("弱项诊断：数据不足").foregroundStyle(.secondary) }
         if !subscription.isPro {
-            Text("详细目标差距为 Pro 分析。Free 可查看当前稳定速度、次数进度及基础熟练度。").font(.caption).foregroundStyle(.secondary)
+            Text("详细目标差距为 Pro 分析。Free 可查看当前稳定速度、次数进度及当前目标完成度。").font(.caption).foregroundStyle(.secondary)
 #if DEBUG
             Toggle("测试预览 Pro 目标差距", isOn: $previewPro)
             if previewPro { Text("仅此 Debug 界面的验收预览；不代表购买或解锁 Pro。").font(.caption).foregroundStyle(.secondary) }

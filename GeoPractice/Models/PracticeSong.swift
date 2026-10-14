@@ -1968,6 +1968,7 @@ private struct PracticeLibraryBackupDocument: Codable {
         let right: HandPracticeStats
         let both: HandPracticeStats
         let completions: [PracticeCompletionSample]
+        let activeIntervals: [PracticeDurationInterval]?
         let leftSpeed: PracticeHandSpeedSummary
         let rightSpeed: PracticeHandSpeedSummary
         let bothSpeed: PracticeHandSpeedSummary
@@ -1993,6 +1994,7 @@ private struct PracticeLibraryBackupDocument: Codable {
             right = value.stats(for: .right)
             both = value.stats(for: .both)
             completions = value.completions
+            activeIntervals = value.activeIntervals
             leftSpeed = value.speedSummary(for: .left)
             rightSpeed = value.speedSummary(for: .right)
             bothSpeed = value.speedSummary(for: .both)
@@ -2013,6 +2015,7 @@ private struct PracticeLibraryBackupDocument: Codable {
                 right: right,
                 both: both,
                 completions: completions,
+                activeIntervals: activeIntervals,
                 leftPreset: leftSessionPreset,
                 rightPreset: rightSessionPreset,
                 bothPreset: bothSessionPreset,
@@ -2049,6 +2052,7 @@ private struct PracticeLibraryBackupDocument: Codable {
                 right: right,
                 both: both,
                 completions: completions,
+                activeIntervals: activeIntervals,
                 leftSpeed: leftSpeed,
                 rightSpeed: rightSpeed,
                 bothSpeed: bothSpeed,

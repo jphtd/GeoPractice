@@ -44,6 +44,7 @@ final class PracticeAttempt {
     private var rightMaximumAttemptData: Data?
     private var bothMaximumAttemptData: Data?
     private var completionSamplesData: Data?
+    private var practiceIntervalsData: Data?
     private var leftSessionPresetData: Data?
     private var rightSessionPresetData: Data?
     private var bothSessionPresetData: Data?
@@ -91,6 +92,7 @@ final class PracticeAttempt {
         rightMaximumAttemptData = Self.encode(rightSpeed.maximumAttempt)
         bothMaximumAttemptData = Self.encode(bothSpeed.maximumAttempt)
         completionSamplesData = Self.encode(summary.completions)
+        practiceIntervalsData = summary.activeIntervals.flatMap(Self.encode)
         leftSessionPresetData = Self.encode(summary.leftPreset)
         rightSessionPresetData = Self.encode(summary.rightPreset)
         bothSessionPresetData = Self.encode(summary.bothPreset)
@@ -158,12 +160,18 @@ final class PracticeAttempt {
             rightPreset: rightPreset,
             bothPreset: bothPreset,
             sessionID: sessionID,
-            completionSamples: completions
+            completionSamples: completions,
+            activeIntervals: activeIntervals
         )
     }
 
     var completions: [PracticeCompletionSample] {
         Self.decode([PracticeCompletionSample].self, from: completionSamplesData) ?? []
+    }
+
+    var activeIntervals: [PracticeDurationInterval]? {
+        guard let practiceIntervalsData else { return nil }
+        return Self.decode([PracticeDurationInterval].self, from: practiceIntervalsData)
     }
 
     /// The final live setting for a hand is independent from completion
@@ -424,6 +432,12 @@ final class PracticeAttempt {
                 durationMilliseconds: edit.value(for: .both).durationMilliseconds
             ),
             completions: editedSamples,
+            activeIntervals: activeIntervals?.compactMap {
+                PracticeDurationInterval(
+                    startedAt: $0.startedAt.addingTimeInterval(timeShift),
+                    finishedAt: $0.finishedAt.addingTimeInterval(timeShift)
+                )
+            },
             leftSpeed: speeds[.left] ?? PracticeHandSpeedSummary(),
             rightSpeed: speeds[.right] ?? PracticeHandSpeedSummary(),
             bothSpeed: speeds[.both] ?? PracticeHandSpeedSummary(),
@@ -813,6 +827,7 @@ final class PracticeAttempt {
         right: HandPracticeStats,
         both: HandPracticeStats,
         completions: [PracticeCompletionSample],
+        activeIntervals: [PracticeDurationInterval]? = nil,
         leftSpeed: PracticeHandSpeedSummary,
         rightSpeed: PracticeHandSpeedSummary,
         bothSpeed: PracticeHandSpeedSummary,
@@ -852,6 +867,7 @@ final class PracticeAttempt {
         rightMaximumAttemptData = Self.encode(rightSpeed.maximumAttempt)
         bothMaximumAttemptData = Self.encode(bothSpeed.maximumAttempt)
         completionSamplesData = Self.encode(completions)
+        practiceIntervalsData = activeIntervals.flatMap(Self.encode)
         leftSessionPresetData = Self.encode(leftSessionPreset?.normalized)
         rightSessionPresetData = Self.encode(rightSessionPreset?.normalized)
         bothSessionPresetData = Self.encode(bothSessionPreset?.normalized)
@@ -1002,6 +1018,7 @@ final class PracticeAttempt {
             right: statsByHand[.right] ?? HandPracticeStats(),
             both: statsByHand[.both] ?? HandPracticeStats(),
             completions: samples,
+            activeIntervals: activeIntervals,
             leftSpeed: Self.reconciledSpeedSummary(
                 hand: .left,
                 count: statsByHand[.left]?.count ?? 0,

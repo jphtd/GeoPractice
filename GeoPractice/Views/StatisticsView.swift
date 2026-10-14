@@ -54,7 +54,8 @@ struct StatisticsView: View {
             totalCount: allTimeCompletedCount,
             sessionCount: traceableSummary.sessionCount,
             activeDayCount: traceableSummary.activeDayCount,
-            totalDurationMilliseconds: traceableSummary.totalDurationMilliseconds
+            totalDurationMilliseconds: traceableSummary.totalDurationMilliseconds,
+            practiceDays: traceableSummary.practiceDays
         )
         let periodResult = PracticeStatisticsEngine.query(
             records: snapshotValues,
@@ -113,8 +114,8 @@ struct StatisticsView: View {
                 )
                 StatisticsMetricCard(
                     title: "总练习天数",
-                    value: allTimeSummary.activeDayCount.formatted(),
-                    detail: "按本地自然日去重"
+                    value: practiceDaysValue(allTimeSummary.practiceDays),
+                    detail: practiceDaysDetail(allTimeSummary.practiceDays)
                 )
             }
 
@@ -126,8 +127,8 @@ struct StatisticsView: View {
                 )
                 StatisticsMetricCard(
                     title: "总练习天数",
-                    value: allTimeSummary.activeDayCount.formatted(),
-                    detail: "按本地自然日去重"
+                    value: practiceDaysValue(allTimeSummary.practiceDays),
+                    detail: practiceDaysDetail(allTimeSummary.practiceDays)
                 )
             }
         }
@@ -210,7 +211,7 @@ struct StatisticsView: View {
                     Text(
                         "\(result.summary.totalCount) 次 · "
                             + "\(result.summary.sessionCount) 轮 · "
-                            + "\(result.summary.activeDayCount) 天"
+                            + practiceDaysInline(result.summary.practiceDays)
                     )
                     Text(practiceDurationString(milliseconds: result.summary.totalDurationMilliseconds))
                         .monospacedDigit()
@@ -222,7 +223,7 @@ struct StatisticsView: View {
                     Text("·")
                     Label("\(result.summary.sessionCount) 轮", systemImage: "rectangle.stack")
                     Text("·")
-                    Label("\(result.summary.activeDayCount) 天", systemImage: "calendar")
+                    Label(practiceDaysInline(result.summary.practiceDays), systemImage: "calendar")
                     Spacer(minLength: 4)
                     Text(practiceDurationString(milliseconds: result.summary.totalDurationMilliseconds))
                         .monospacedDigit()
@@ -237,9 +238,48 @@ struct StatisticsView: View {
         .accessibilityLabel(
             "本周期完成 \(result.summary.totalCount) 次，"
                 + "保存 \(result.summary.sessionCount) 轮，"
-                + "练习 \(result.summary.activeDayCount) 天，"
+                + "练习天数\(practiceDaysAccessibility(result.summary.practiceDays))，"
                 + "总时长 \(practiceDurationString(milliseconds: result.summary.totalDurationMilliseconds))"
         )
+    }
+
+    private func practiceDaysValue(_ result: PracticeDaysResult) -> String {
+        switch result.state {
+        case .verified: result.verifiedDayCount.formatted()
+        case .verifiedZero: "0"
+        case .noRecords: "无记录"
+        case .incomplete: "至少 \(result.verifiedDayCount)"
+        case .unverifiable: "N/A"
+        }
+    }
+
+    private func practiceDaysInline(_ result: PracticeDaysResult) -> String {
+        switch result.state {
+        case .verified: "\(result.verifiedDayCount) 天"
+        case .verifiedZero: "0 天"
+        case .noRecords: "无记录"
+        case .incomplete: "至少 \(result.verifiedDayCount) 天 · 数据不完整"
+        case .unverifiable: "N/A · 数据不完整"
+        }
+    }
+
+    private func practiceDaysDetail(_ result: PracticeDaysResult) -> String {
+        switch result.state {
+        case .verified, .verifiedZero: "合法正时长 · 按本地自然日"
+        case .noRecords: "没有已保存的历史记录"
+        case .incomplete: "数据不完整 · 仅显示可核实部分"
+        case .unverifiable: "数据不完整 · 日期统计不可核验"
+        }
+    }
+
+    private func practiceDaysAccessibility(_ result: PracticeDaysResult) -> String {
+        switch result.state {
+        case .verified: "为 \(result.verifiedDayCount) 天"
+        case .verifiedZero: "为已核验的 0 天"
+        case .noRecords: "无记录"
+        case .incomplete: "至少 \(result.verifiedDayCount) 天，数据不完整"
+        case .unverifiable: "不可核验，数据不完整"
+        }
     }
 
     @ViewBuilder

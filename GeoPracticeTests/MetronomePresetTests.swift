@@ -4775,14 +4775,20 @@ final class MetronomePresetTests: XCTestCase {
         var bothPreset = MetronomePreset.standard
         bothPreset.bpm = 98
         bothPreset.subdivision = 4
+        let intervalStart = Date(timeIntervalSinceReferenceDate: 91_500)
+        let intervalEnd = Date(timeIntervalSinceReferenceDate: 91_530)
         let summary = PracticeSessionSummary(
             sessionID: UUID(),
             sourceEventID: sectionID,
-            startedAt: Date(timeIntervalSinceReferenceDate: 91_500),
-            finishedAt: Date(timeIntervalSinceReferenceDate: 91_530),
+            startedAt: intervalStart,
+            finishedAt: intervalEnd,
             left: HandPracticeStats(durationMilliseconds: 10_000),
             right: HandPracticeStats(durationMilliseconds: 8_000),
             both: HandPracticeStats(durationMilliseconds: 12_000),
+            activeIntervals: [try XCTUnwrap(PracticeDurationInterval(
+                startedAt: intervalStart,
+                finishedAt: intervalEnd
+            ))],
             leftPreset: leftPreset,
             rightPreset: rightPreset,
             bothPreset: bothPreset
@@ -4823,6 +4829,7 @@ final class MetronomePresetTests: XCTestCase {
         XCTAssertEqual(restored.statisticsSnapshot.preset(for: .left), leftPreset.normalized)
         XCTAssertEqual(restored.statisticsSnapshot.preset(for: .right), rightPreset.normalized)
         XCTAssertEqual(restored.statisticsSnapshot.preset(for: .both), bothPreset.normalized)
+        XCTAssertEqual(restored.activeIntervals, summary.activeIntervals)
     }
 
     @MainActor

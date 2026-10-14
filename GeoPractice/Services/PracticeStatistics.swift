@@ -35,6 +35,8 @@ struct PracticeHistoryRecordSnapshot: Identifiable, Equatable, Sendable {
     /// Older stores legitimately decode to an empty array. Callers must keep
     /// that distinction instead of manufacturing per-tap timestamps.
     let completionSamples: [PracticeCompletionSample]
+    /// `nil` identifies legacy aggregate timing with no saved active intervals.
+    let activeIntervals: [PracticeDurationInterval]?
 
     init(
         id: UUID,
@@ -58,7 +60,8 @@ struct PracticeHistoryRecordSnapshot: Identifiable, Equatable, Sendable {
         rightPreset: MetronomePreset? = nil,
         bothPreset: MetronomePreset? = nil,
         sessionID: UUID? = nil,
-        completionSamples: [PracticeCompletionSample] = []
+        completionSamples: [PracticeCompletionSample] = [],
+        activeIntervals: [PracticeDurationInterval]? = nil
     ) {
         self.id = id
         self.sourceEventID = sourceEventID
@@ -82,6 +85,7 @@ struct PracticeHistoryRecordSnapshot: Identifiable, Equatable, Sendable {
         self.bothPreset = bothPreset?.normalized
         self.sessionID = sessionID
         self.completionSamples = completionSamples
+        self.activeIntervals = activeIntervals
     }
 
     var left: HandPracticeStats {
@@ -1601,17 +1605,62 @@ struct PracticeStatisticsQuery: Equatable, Sendable {
     }
 }
 
+enum HistoricalMetricState: Equatable, Sendable {
+    case verified
+    case verifiedZero
+    case noRecords
+    case incomplete
+    case unverifiable
+}
+
+/// Product A12 result for Practice Days. `verifiedDayCount` is always factual;
+/// `exactDayCount` is present only when every contributing record is verifiable.
+struct PracticeDaysResult: Equatable, Sendable {
+    let state: HistoricalMetricState
+    let verifiedDayCount: Int
+    let exactDayCount: Int?
+    let incompleteRecordCount: Int
+
+    static let noRecords = PracticeDaysResult(
+        state: .noRecords,
+        verifiedDayCount: 0,
+        exactDayCount: nil,
+        incompleteRecordCount: 0
+    )
+}
+
 struct PracticeStatisticsSummary: Equatable, Sendable {
     let totalCount: Int
     let sessionCount: Int
-    let activeDayCount: Int
+    let practiceDays: PracticeDaysResult
     let totalDurationMilliseconds: Int64
+
+    var activeDayCount: Int { practiceDays.verifiedDayCount }
+
+    init(
+        totalCount: Int,
+        sessionCount: Int,
+        activeDayCount: Int,
+        totalDurationMilliseconds: Int64,
+        practiceDays: PracticeDaysResult? = nil
+    ) {
+        self.totalCount = totalCount
+        self.sessionCount = sessionCount
+        self.practiceDays = practiceDays ?? PracticeDaysResult(
+            state: activeDayCount == 0 ? .verifiedZero : .verified,
+            verifiedDayCount: activeDayCount,
+            exactDayCount: activeDayCount,
+            incompleteRecordCount: 0
+        )
+        self.totalDurationMilliseconds = totalDurationMilliseconds
+    }
 
     static let zero = PracticeStatisticsSummary(
         totalCount: 0,
         sessionCount: 0,
         activeDayCount: 0,
-        totalDurationMilliseconds: 0
+        totalDurationMilliseconds: 0,
+        practiceDays: .noRecords
     )
 }
 
@@ -1740,11 +1789,20 @@ enum PracticeStatisticsEngine {
         let filtered = sortedNewestFirst(records.filter {
             interval.containsHalfOpen($0.startedAt)
         })
+        let practiceDays = practiceDays(
+            records: records,
+            calendar: query.calendar,
+            interval: interval
+        )
         return PracticeStatisticsResult(
             query: query,
             interval: interval,
             records: filtered,
-            summary: summary(records: filtered, calendar: query.calendar),
+            summary: summary(
+                records: filtered,
+                calendar: query.calendar,
+                practiceDays: practiceDays
+            ),
             events: aggregateEvents(records: filtered, calendar: query.calendar)
         )
     }
@@ -1793,19 +1851,154 @@ enum PracticeStatisticsEngine {
 
     static func summary(
         records: [PracticeHistoryRecordSnapshot],
-        calendar: Calendar = .current
+        calendar: Calendar = .current,
+        practiceDays suppliedPracticeDays: PracticeDaysResult? = nil
     ) -> PracticeStatisticsSummary {
-        guard !records.isEmpty else { return .zero }
+        if records.isEmpty {
+            guard let suppliedPracticeDays,
+                  suppliedPracticeDays.state != .noRecords
+            else { return .zero }
+            return PracticeStatisticsSummary(
+                totalCount: 0,
+                sessionCount: 0,
+                activeDayCount: suppliedPracticeDays.verifiedDayCount,
+                totalDurationMilliseconds: 0,
+                practiceDays: suppliedPracticeDays
+            )
+        }
 
-        let days = Set(records.map { calendar.startOfDay(for: $0.startedAt) })
+        let days = suppliedPracticeDays ?? practiceDays(
+            records: records,
+            calendar: calendar
+        )
         return PracticeStatisticsSummary(
             totalCount: StatisticsMath.saturatedSum(records.map(\.totalCount)),
             sessionCount: records.count,
-            activeDayCount: days.count,
+            activeDayCount: days.verifiedDayCount,
             totalDurationMilliseconds: StatisticsMath.saturatedSum(
                 records.map(\.totalDurationMilliseconds)
-            )
+            ),
+            practiceDays: days
         )
+    }
+
+    /// Counts only local calendar days backed by positive, saved timing facts.
+    /// Legacy same-day aggregates remain verifiable because their complete
+    /// bounding interval lies within one day. A cross-midnight aggregate needs
+    /// saved non-paused intervals; otherwise its date allocation is unknown.
+    static func practiceDays(
+        records: [PracticeHistoryRecordSnapshot],
+        calendar: Calendar = .current,
+        interval queryInterval: DateInterval? = nil
+    ) -> PracticeDaysResult {
+        let scopedRecords = queryInterval.map { interval in
+            records.filter { record in
+                interval.containsHalfOpen(record.startedAt)
+                    || (record.startedAt < interval.end
+                        && record.finishedAt > interval.start)
+            }
+        } ?? records
+        guard !scopedRecords.isEmpty else { return .noRecords }
+
+        var verifiedDays: Set<Date> = []
+        var incompleteRecords = 0
+
+        for record in scopedRecords {
+            switch verifiedPracticeIntervals(for: record, calendar: calendar) {
+            case .success(let intervals):
+                for interval in intervals {
+                    addPositiveDays(
+                        in: interval,
+                        limitedTo: queryInterval,
+                        calendar: calendar,
+                        into: &verifiedDays
+                    )
+                }
+            case .failure:
+                incompleteRecords += 1
+            }
+        }
+
+        if incompleteRecords > 0 {
+            return PracticeDaysResult(
+                state: verifiedDays.isEmpty ? .unverifiable : .incomplete,
+                verifiedDayCount: verifiedDays.count,
+                exactDayCount: nil,
+                incompleteRecordCount: incompleteRecords
+            )
+        }
+        let count = verifiedDays.count
+        return PracticeDaysResult(
+            state: count == 0 ? .verifiedZero : .verified,
+            verifiedDayCount: count,
+            exactDayCount: count,
+            incompleteRecordCount: 0
+        )
+    }
+
+    private enum PracticeIntervalEvidence {
+        case success([DateInterval])
+        case failure
+    }
+
+    private static func verifiedPracticeIntervals(
+        for record: PracticeHistoryRecordSnapshot,
+        calendar: Calendar
+    ) -> PracticeIntervalEvidence {
+        let duration = record.totalDurationMilliseconds
+        guard record.finishedAt >= record.startedAt else { return .failure }
+
+        if let saved = record.activeIntervals {
+            guard duration > 0 || saved.isEmpty else { return .failure }
+            let sorted = saved.sorted { $0.startedAt < $1.startedAt }
+            var previousEnd: Date?
+            var total: Int64 = 0
+            var intervals: [DateInterval] = []
+            for value in sorted {
+                guard value.startedAt >= record.startedAt,
+                      value.finishedAt <= record.finishedAt,
+                      value.finishedAt > value.startedAt,
+                      previousEnd.map({ value.startedAt >= $0 }) ?? true
+                else { return .failure }
+                previousEnd = value.finishedAt
+                total = StatisticsMath.saturatedSum([total, value.durationMilliseconds])
+                intervals.append(DateInterval(start: value.startedAt, end: value.finishedAt))
+            }
+            let tolerance = Int64(max(5, saved.count * 2))
+            guard abs(total - duration) <= tolerance else { return .failure }
+            return .success(intervals)
+        }
+
+        guard duration > 0, record.finishedAt > record.startedAt else {
+            return .failure
+        }
+        let elapsed = record.finishedAt.timeIntervalSince(record.startedAt) * 1_000
+        guard elapsed.isFinite, Double(duration) <= elapsed + 5 else { return .failure }
+        let lastActiveInstant = record.finishedAt.addingTimeInterval(-0.001)
+        guard calendar.isDate(record.startedAt, inSameDayAs: lastActiveInstant) else {
+            return .failure
+        }
+        return .success([DateInterval(start: record.startedAt, end: record.finishedAt)])
+    }
+
+    private static func addPositiveDays(
+        in interval: DateInterval,
+        limitedTo queryInterval: DateInterval?,
+        calendar: Calendar,
+        into days: inout Set<Date>
+    ) {
+        let start = max(interval.start, queryInterval?.start ?? interval.start)
+        let end = min(interval.end, queryInterval?.end ?? interval.end)
+        guard end > start else { return }
+
+        var cursor = start
+        while cursor < end {
+            let day = calendar.startOfDay(for: cursor)
+            let next = calendar.date(byAdding: .day, value: 1, to: day) ?? end
+            let segmentEnd = min(end, next)
+            if segmentEnd > cursor { days.insert(day) }
+            cursor = segmentEnd
+        }
     }
 
     static func eventStatistics(

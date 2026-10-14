@@ -1028,12 +1028,27 @@ private struct CoreTempoControls: View {
 }
 
 struct CoreAnalyzeView: View {
+    @Environment(\.calendar) private var environmentCalendar
     @Query private var events: [PracticeEvent]
     @Query private var songs: [PracticeSong]
     @Query private var attempts: [PracticeAttempt]
     let scope: CoreAnalyzeContext
     var body: some View {
+        let days = PracticeStatisticsEngine.practiceDays(
+            records: scopedAttempts.map(\.statisticsSnapshot),
+            calendar: analysisCalendar
+        )
         List {
+            Section("历史练习") {
+                LabeledContent("练习天数", value: practiceDaysValue(days))
+                    .accessibilityIdentifier("analyze.history.practiceDays")
+                if let disclosure = practiceDaysDisclosure(days) {
+                    Text(disclosure)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .accessibilityIdentifier("analyze.history.integrity")
+                }
+            }
             if case .piece(let id) = scope, let piece = songs.first(where: { $0.id == id }) {
                 let result = CoreTargetCompletion.piece(piece, events: events, attempts: attempts)
                 Section("当前目标状态") {
@@ -1065,6 +1080,32 @@ struct CoreAnalyzeView: View {
             case .division(let piece, let division): return event.songID == piece && event.id == division
             }
         }.sorted { $0.createdAt < $1.createdAt }
+    }
+    private var scopedAttempts: [PracticeAttempt] {
+        let eventIDs = Set(filteredEvents.map(\.id))
+        return attempts.filter { eventIDs.contains($0.eventID) }
+    }
+    private var analysisCalendar: Calendar {
+        var calendar = environmentCalendar
+        calendar.timeZone = .autoupdatingCurrent
+        return calendar
+    }
+    private func practiceDaysValue(_ result: PracticeDaysResult) -> String {
+        switch result.state {
+        case .verified: "\(result.verifiedDayCount) 天"
+        case .verifiedZero: "0 天（已核验）"
+        case .noRecords: "无记录"
+        case .incomplete: "至少 \(result.verifiedDayCount) 天"
+        case .unverifiable: "N/A"
+        }
+    }
+    private func practiceDaysDisclosure(_ result: PracticeDaysResult) -> String? {
+        switch result.state {
+        case .verified, .verifiedZero: nil
+        case .noRecords: "没有已保存的历史记录。"
+        case .incomplete: "数据不完整 · 仅显示可核实部分"
+        case .unverifiable: "数据不完整 · 日期统计不可核验"
+        }
     }
 }
 

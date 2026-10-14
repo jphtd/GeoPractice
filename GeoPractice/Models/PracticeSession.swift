@@ -196,6 +196,28 @@ struct PracticeHandSpeedSummary: Codable, Equatable, Sendable {
     }
 }
 
+/// One persisted, non-paused practice interval.
+///
+/// Keeping the real intervals lets calendar statistics split a session at
+/// local midnight without inventing how an aggregate duration was distributed.
+struct PracticeDurationInterval: Codable, Equatable, Sendable {
+    let startedAt: Date
+    let finishedAt: Date
+
+    init?(startedAt: Date, finishedAt: Date) {
+        guard finishedAt > startedAt else { return nil }
+        self.startedAt = startedAt
+        self.finishedAt = finishedAt
+    }
+
+    var durationMilliseconds: Int64 {
+        let milliseconds = finishedAt.timeIntervalSince(startedAt) * 1_000
+        guard milliseconds.isFinite, milliseconds > 0 else { return 0 }
+        if milliseconds >= Double(Int64.max) { return Int64.max }
+        return Int64(milliseconds.rounded())
+    }
+}
+
 struct PracticeSessionSummary: Codable, Equatable, Sendable {
     let sessionID: UUID
     let sourceEventID: UUID?
@@ -205,6 +227,9 @@ struct PracticeSessionSummary: Codable, Equatable, Sendable {
     let right: HandPracticeStats
     let both: HandPracticeStats
     let completions: [PracticeCompletionSample]
+    /// `nil` means a legacy payload did not contain interval evidence.
+    /// An empty array is an explicit, verified zero-duration session.
+    let activeIntervals: [PracticeDurationInterval]?
     /// The live metronome setting last used for each hand, even when the user
     /// accumulated duration without tapping the explicit completion button.
     /// Optional fields keep summaries written by older builds decodable.
@@ -223,6 +248,7 @@ struct PracticeSessionSummary: Codable, Equatable, Sendable {
         right: HandPracticeStats = HandPracticeStats(),
         both: HandPracticeStats = HandPracticeStats(),
         completions: [PracticeCompletionSample] = [],
+        activeIntervals: [PracticeDurationInterval]? = nil,
         leftPreset: MetronomePreset? = nil,
         rightPreset: MetronomePreset? = nil,
         bothPreset: MetronomePreset? = nil,
@@ -237,6 +263,7 @@ struct PracticeSessionSummary: Codable, Equatable, Sendable {
         self.right = right
         self.both = both
         self.completions = completions
+        self.activeIntervals = activeIntervals
         self.leftPreset = leftPreset?.normalized
         self.rightPreset = rightPreset?.normalized
         self.bothPreset = bothPreset?.normalized
@@ -276,6 +303,7 @@ struct PracticeSessionSummary: Codable, Equatable, Sendable {
             right: right,
             both: both,
             completions: completions,
+            activeIntervals: activeIntervals,
             leftPreset: leftPreset ?? presetsByHand[.left],
             rightPreset: rightPreset ?? presetsByHand[.right],
             bothPreset: bothPreset ?? presetsByHand[.both],
@@ -310,6 +338,7 @@ struct PracticeSessionSummary: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case sessionID, sourceEventID, startedAt, finishedAt
         case left, right, both, completions
+        case activeIntervals
         case leftPreset, rightPreset, bothPreset
         case goalLaunchContext, goalReport
     }
@@ -330,6 +359,10 @@ struct PracticeSessionSummary: Codable, Equatable, Sendable {
             [PracticeCompletionSample].self,
             forKey: .completions
         ) ?? []
+        activeIntervals = try container.decodeIfPresent(
+            [PracticeDurationInterval].self,
+            forKey: .activeIntervals
+        )
         leftPreset = try container.decodeIfPresent(
             MetronomePreset.self,
             forKey: .leftPreset
@@ -377,6 +410,7 @@ struct PracticeSession: Codable, Equatable, Sendable {
     private var right = HandPracticeStats()
     private var both = HandPracticeStats()
     private var completions: [PracticeCompletionSample] = []
+    private var activeIntervals: [PracticeDurationInterval] = []
     private var completedSummary: PracticeSessionSummary?
 
     init() {}
@@ -541,6 +575,7 @@ struct PracticeSession: Codable, Equatable, Sendable {
             right: right,
             both: both,
             completions: completions,
+            activeIntervals: activeIntervals,
             leftPreset: presetsByHand[.left],
             rightPreset: presetsByHand[.right],
             bothPreset: presetsByHand[.both],
@@ -582,6 +617,13 @@ struct PracticeSession: Codable, Equatable, Sendable {
     }
 
     private mutating func settleCurrentSegment(at date: Date) {
+        if let segmentStartedAt,
+           let interval = PracticeDurationInterval(
+               startedAt: segmentStartedAt,
+               finishedAt: date
+           ) {
+            activeIntervals.append(interval)
+        }
         let elapsed = currentSegmentMilliseconds(at: date)
         withStats(for: currentHand) { $0.addDuration(milliseconds: elapsed) }
     }
@@ -602,6 +644,7 @@ struct PracticeSession: Codable, Equatable, Sendable {
     private enum CodingKeys: String, CodingKey {
         case sessionID, phase, sourceEventID, currentHand, startedAt, segmentStartedAt
         case left, right, both, completions, completedSummary, goalLaunchContext
+        case activeIntervals
     }
 
     init(from decoder: Decoder) throws {
@@ -616,6 +659,10 @@ struct PracticeSession: Codable, Equatable, Sendable {
             PracticeGoalLaunchContext.self,
             forKey: .goalLaunchContext
         )
+        activeIntervals = try container.decodeIfPresent(
+            [PracticeDurationInterval].self,
+            forKey: .activeIntervals
+        ) ?? []
         left = try container.decodeIfPresent(HandPracticeStats.self, forKey: .left)
             ?? HandPracticeStats()
         right = try container.decodeIfPresent(HandPracticeStats.self, forKey: .right)

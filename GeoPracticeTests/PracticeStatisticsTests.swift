@@ -50,7 +50,8 @@ final class PracticeStatisticsTests: XCTestCase {
         leftPreset: MetronomePreset? = nil,
         rightPreset: MetronomePreset? = nil,
         bothPreset: MetronomePreset? = nil,
-        completionSamples: [PracticeCompletionSample] = []
+        completionSamples: [PracticeCompletionSample] = [],
+        activeIntervals: [PracticeDurationInterval]? = nil
     ) -> PracticeHistoryRecordSnapshot {
         PracticeHistoryRecordSnapshot(
             id: id,
@@ -73,7 +74,8 @@ final class PracticeStatisticsTests: XCTestCase {
             leftPreset: leftPreset,
             rightPreset: rightPreset,
             bothPreset: bothPreset,
-            completionSamples: completionSamples
+            completionSamples: completionSamples,
+            activeIntervals: activeIntervals
         )
     }
 
@@ -210,7 +212,7 @@ final class PracticeStatisticsTests: XCTestCase {
         XCTAssertEqual(summary.totalDurationMilliseconds, 150_000)
     }
 
-    func testSavedZeroActionAttemptStillCountsAsSessionAndActiveDay() {
+    func testSavedZeroDurationAttemptIsVerifiedZeroNotAnActiveDay() {
         let record = snapshot(
             startedAt: date(2026, 8, 20, 9),
             leftCount: 0,
@@ -218,7 +220,8 @@ final class PracticeStatisticsTests: XCTestCase {
             bothCount: 0,
             leftDuration: 0,
             rightDuration: 0,
-            bothDuration: 0
+            bothDuration: 0,
+            activeIntervals: []
         )
         let summary = PracticeStatisticsEngine.summary(
             records: [record],
@@ -227,8 +230,208 @@ final class PracticeStatisticsTests: XCTestCase {
 
         XCTAssertEqual(summary.totalCount, 0)
         XCTAssertEqual(summary.sessionCount, 1)
-        XCTAssertEqual(summary.activeDayCount, 1)
+        XCTAssertEqual(summary.activeDayCount, 0)
+        XCTAssertEqual(summary.practiceDays.state, .verifiedZero)
+        XCTAssertEqual(summary.practiceDays.exactDayCount, 0)
         XCTAssertEqual(summary.totalDurationMilliseconds, 0)
+    }
+
+    func testPracticeDaysSplitsVerifiedActiveIntervalAcrossLocalMidnight() throws {
+        let start = date(2026, 8, 20, 23, 55)
+        let finish = date(2026, 8, 21, 0, 5)
+        let interval = try XCTUnwrap(
+            PracticeDurationInterval(startedAt: start, finishedAt: finish)
+        )
+        let result = PracticeStatisticsEngine.practiceDays(
+            records: [snapshot(
+                startedAt: start,
+                finishedAt: finish,
+                bothDuration: 600_000,
+                activeIntervals: [interval]
+            )],
+            calendar: calendar
+        )
+
+        XCTAssertEqual(result.state, .verified)
+        XCTAssertEqual(result.exactDayCount, 2)
+        XCTAssertEqual(result.verifiedDayCount, 2)
+    }
+
+    func testPracticeDaysUsesOnlyPositivePausedSegmentsAcrossMidnight() throws {
+        let start = date(2026, 8, 20, 23, 50)
+        let finish = date(2026, 8, 21, 0, 20)
+        let beforeMidnight = try XCTUnwrap(PracticeDurationInterval(
+            startedAt: start,
+            finishedAt: date(2026, 8, 20, 23, 55)
+        ))
+        let result = PracticeStatisticsEngine.practiceDays(
+            records: [snapshot(
+                startedAt: start,
+                finishedAt: finish,
+                bothDuration: 300_000,
+                activeIntervals: [beforeMidnight]
+            )],
+            calendar: calendar
+        )
+
+        XCTAssertEqual(result.state, .verified)
+        XCTAssertEqual(result.exactDayCount, 1)
+    }
+
+    func testDayQueryCountsVerifiedCrossMidnightPracticeOnSecondDay() throws {
+        let start = date(2026, 8, 20, 23, 55)
+        let finish = date(2026, 8, 21, 0, 5)
+        let interval = try XCTUnwrap(
+            PracticeDurationInterval(startedAt: start, finishedAt: finish)
+        )
+        let result = PracticeStatisticsEngine.query(
+            records: [snapshot(
+                startedAt: start,
+                finishedAt: finish,
+                bothDuration: 600_000,
+                activeIntervals: [interval]
+            )],
+            period: .day,
+            anchorDate: finish,
+            calendar: calendar
+        )
+
+        XCTAssertTrue(result.records.isEmpty)
+        XCTAssertEqual(result.summary.practiceDays.state, .verified)
+        XCTAssertEqual(result.summary.practiceDays.exactDayCount, 1)
+    }
+
+    func testDayQueryIgnoresUnrelatedOldIncompleteRecord() throws {
+        let target = date(2026, 8, 21, 12)
+        let currentStart = date(2026, 8, 21, 9)
+        let currentFinish = date(2026, 8, 21, 9, 10)
+        let currentInterval = try XCTUnwrap(
+            PracticeDurationInterval(startedAt: currentStart, finishedAt: currentFinish)
+        )
+        let result = PracticeStatisticsEngine.query(
+            records: [
+                snapshot(
+                    startedAt: date(2026, 8, 1, 23, 55),
+                    finishedAt: date(2026, 8, 2, 0, 5),
+                    bothDuration: 300_000
+                ),
+                snapshot(
+                    startedAt: currentStart,
+                    finishedAt: currentFinish,
+                    bothDuration: 600_000,
+                    activeIntervals: [currentInterval]
+                )
+            ],
+            period: .day,
+            anchorDate: target,
+            calendar: calendar
+        )
+
+        XCTAssertEqual(result.summary.practiceDays.state, .verified)
+        XCTAssertEqual(result.summary.practiceDays.exactDayCount, 1)
+        XCTAssertEqual(result.summary.practiceDays.incompleteRecordCount, 0)
+    }
+
+    func testDayQueryWithOnlyUnrelatedOldRecordsIsNoRecords() {
+        let result = PracticeStatisticsEngine.query(
+            records: [snapshot(
+                startedAt: date(2026, 8, 1, 9),
+                finishedAt: date(2026, 8, 1, 9, 10),
+                bothDuration: 600_000
+            )],
+            period: .day,
+            anchorDate: date(2026, 8, 21),
+            calendar: calendar
+        )
+
+        XCTAssertTrue(result.records.isEmpty)
+        XCTAssertEqual(result.summary.practiceDays.state, .noRecords)
+        XCTAssertNil(result.summary.practiceDays.exactDayCount)
+    }
+
+    func testDayQueryKeepsIncompleteRecordInsideRange() {
+        let result = PracticeStatisticsEngine.query(
+            records: [snapshot(
+                startedAt: date(2026, 8, 21, 23, 55),
+                finishedAt: date(2026, 8, 22, 0, 5),
+                bothDuration: 300_000
+            )],
+            period: .day,
+            anchorDate: date(2026, 8, 21),
+            calendar: calendar
+        )
+
+        XCTAssertEqual(result.summary.practiceDays.state, .unverifiable)
+        XCTAssertEqual(result.summary.practiceDays.incompleteRecordCount, 1)
+    }
+
+    func testLegacyCrossMidnightAggregateIsUnverifiable() {
+        let result = PracticeStatisticsEngine.practiceDays(
+            records: [snapshot(
+                startedAt: date(2026, 8, 20, 23, 55),
+                finishedAt: date(2026, 8, 21, 0, 5),
+                bothDuration: 300_000
+            )],
+            calendar: calendar
+        )
+
+        XCTAssertEqual(result.state, .unverifiable)
+        XCTAssertNil(result.exactDayCount)
+        XCTAssertEqual(result.verifiedDayCount, 0)
+        XCTAssertEqual(result.incompleteRecordCount, 1)
+    }
+
+    func testIncompleteHistoryPreservesVerifiedPracticeDays() {
+        let result = PracticeStatisticsEngine.practiceDays(
+            records: [
+                snapshot(
+                    startedAt: date(2026, 8, 19, 9),
+                    finishedAt: date(2026, 8, 19, 9, 10),
+                    bothDuration: 300_000
+                ),
+                snapshot(
+                    startedAt: date(2026, 8, 20, 23, 55),
+                    finishedAt: date(2026, 8, 21, 0, 5),
+                    bothDuration: 300_000
+                )
+            ],
+            calendar: calendar
+        )
+
+        XCTAssertEqual(result.state, .incomplete)
+        XCTAssertNil(result.exactDayCount)
+        XCTAssertEqual(result.verifiedDayCount, 1)
+    }
+
+    func testPracticeDaysDistinguishesNoRecordsFromVerifiedZero() {
+        XCTAssertEqual(
+            PracticeStatisticsEngine.practiceDays(records: []).state,
+            .noRecords
+        )
+        let zero = PracticeStatisticsEngine.practiceDays(
+            records: [snapshot(
+                startedAt: date(2026, 8, 20, 9),
+                finishedAt: date(2026, 8, 20, 9),
+                bothCount: 0,
+                bothDuration: 0,
+                activeIntervals: []
+            )],
+            calendar: calendar
+        )
+        XCTAssertEqual(zero.state, .verifiedZero)
+        XCTAssertEqual(zero.exactDayCount, 0)
+    }
+
+    func testPracticeSessionPersistsNonPausedTimingEvidence() throws {
+        var session = PracticeSession()
+        let start = date(2026, 8, 20, 23, 55)
+        session.begin(at: start)
+        session.pause(at: date(2026, 8, 20, 23, 58))
+        session.resume(at: date(2026, 8, 21, 0, 2))
+        let summary = try XCTUnwrap(session.finish(at: date(2026, 8, 21, 0, 5)))
+
+        XCTAssertEqual(summary.activeIntervals?.count, 2)
+        XCTAssertEqual(summary.totalDurationMilliseconds, 360_000)
     }
 
     func testTimelineDefaultsToNewestFirstAndPreservesAllHands() throws {

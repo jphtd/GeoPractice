@@ -1,5 +1,27 @@
 import Foundation
 
+enum PracticeRecordSource: String, Equatable, Sendable {
+    case planned
+    case independentGeoBeat
+
+    var title: String {
+        switch self {
+        case .planned: "计划练习"
+        case .independentGeoBeat: "独立节拍器练习"
+        }
+    }
+}
+
+struct PracticeHistoricalSpeedPoint: Identifiable, Equatable, Sendable {
+    let id: UUID
+    let completedAt: Date
+    let hand: PracticeHand
+    let bpm: Int
+    let noteUnit: TempoReferenceNote
+    let quarterEquivalentBPM: Double
+    let recordSource: PracticeRecordSource
+}
+
 /// Immutable input consumed by the statistics engine.
 ///
 /// Persisted models should be converted to this value before aggregation so
@@ -37,6 +59,7 @@ struct PracticeHistoryRecordSnapshot: Identifiable, Equatable, Sendable {
     let completionSamples: [PracticeCompletionSample]
     /// `nil` identifies legacy aggregate timing with no saved active intervals.
     let activeIntervals: [PracticeDurationInterval]?
+    let recordSource: PracticeRecordSource?
 
     init(
         id: UUID,
@@ -61,7 +84,8 @@ struct PracticeHistoryRecordSnapshot: Identifiable, Equatable, Sendable {
         bothPreset: MetronomePreset? = nil,
         sessionID: UUID? = nil,
         completionSamples: [PracticeCompletionSample] = [],
-        activeIntervals: [PracticeDurationInterval]? = nil
+        activeIntervals: [PracticeDurationInterval]? = nil,
+        recordSource: PracticeRecordSource? = nil
     ) {
         self.id = id
         self.sourceEventID = sourceEventID
@@ -86,6 +110,7 @@ struct PracticeHistoryRecordSnapshot: Identifiable, Equatable, Sendable {
         self.sessionID = sessionID
         self.completionSamples = completionSamples
         self.activeIntervals = activeIntervals
+        self.recordSource = recordSource
     }
 
     var left: HandPracticeStats {
@@ -1775,6 +1800,44 @@ enum StatisticsTimelineOrder: Sendable {
 }
 
 enum PracticeStatisticsEngine {
+    static func historicalSpeedPoints(
+        records: [PracticeHistoryRecordSnapshot],
+        divisionID: UUID,
+        applicableHands: [PracticeHand]
+    ) -> [PracticeHistoricalSpeedPoint] {
+        var points: [PracticeHistoricalSpeedPoint] = []
+        for record in records {
+            guard record.sourceEventID == divisionID,
+                  let source = record.recordSource,
+                  record.finishedAt >= record.startedAt
+            else { continue }
+            for sample in record.completionSamples {
+                let preset = sample.preset
+                guard sample.source == .live, sample.hasExplicitSource,
+                      applicableHands.contains(sample.hand),
+                      sample.completedAt >= record.startedAt,
+                      sample.completedAt <= record.finishedAt,
+                      (20...300).contains(preset.bpm)
+                else { continue }
+                points.append(PracticeHistoricalSpeedPoint(
+                    id: sample.id,
+                    completedAt: sample.completedAt,
+                    hand: sample.hand,
+                    bpm: preset.bpm,
+                    noteUnit: preset.referenceNote,
+                    quarterEquivalentBPM: Double(preset.bpm)
+                        * preset.referenceNote.durationInQuarterNotes,
+                    recordSource: source
+                ))
+            }
+        }
+        return points.sorted {
+            $0.completedAt == $1.completedAt
+                ? $0.id.uuidString < $1.id.uuidString
+                : $0.completedAt < $1.completedAt
+        }
+    }
+
     /// Global duration uses the union of saved, verifiable real-time intervals.
     /// The record and its Piece ownership are never changed by this operation.
     static func globalDuration(

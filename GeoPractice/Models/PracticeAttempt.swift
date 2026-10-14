@@ -161,7 +161,9 @@ final class PracticeAttempt {
             bothPreset: bothPreset,
             sessionID: sessionID,
             completionSamples: completions,
-            activeIntervals: activeIntervals
+            activeIntervals: activeIntervals,
+            recordSource: independentGeoBeatContext != nil ? .independentGeoBeat
+                : (coreContext?.source == "planned" ? .planned : nil)
         )
     }
 

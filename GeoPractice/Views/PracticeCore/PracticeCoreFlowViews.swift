@@ -1,3 +1,4 @@
+import Charts
 import SwiftData
 import SwiftUI
 import UIKit
@@ -538,10 +539,12 @@ struct CoreSessionView: View {
     @ObservedObject var runtime: CoreSessionRuntime
     @ObservedObject var engine: MetronomeEngine
     var isGeoBeat: Bool
+    var isIndependentGeoBeat = false
     let openGeoBeat: () -> Void
     let finish: () -> Void
     var onRoute: (CoreRoute) -> Void = { _ in }
     var detach: () -> Void = {}
+    var saveIndependent: (PracticeSong, PracticeEvent) -> Void = { _, _ in }
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var contextRevealed = false
@@ -550,6 +553,7 @@ struct CoreSessionView: View {
     private var sessionCanvas: Color { CorePalette.canvas }
     @State private var continueAfterTargets = false
     @State private var playbackError: String?
+    @State private var confirmsIndependentDiscard = false
     private func allTargetCountsReached(in context: CoreSessionContext) -> Bool {
         context.handMode.hands.allSatisfy { hand in
             guard let targetCount = context.goal.hands[hand]?.count else {
@@ -688,6 +692,50 @@ struct CoreSessionView: View {
                 }
                 if runtime.context == nil {
                     CoreTempoControls(engine: engine, showsBeats: true, independentGeoBeat: true)
+                    if isIndependentGeoBeat {
+                        Picker("历史手型", selection: Binding(
+                            get: { runtime.independentHand },
+                            set: { runtime.selectIndependentHand($0) }
+                        )) {
+                            ForEach(PracticeHand.allCases) { hand in
+                                Text(hand.title).tag(hand)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .accessibilityIdentifier("geobeat.independent.hand")
+                        if runtime.hasStartedPlayback {
+                            Button("记录一次 · \(runtime.independentHand.title)") {
+                                runtime.recordIndependent(preset: engine.effectivePlaybackPreset)
+                            }
+                            .disabled(!engine.isPlaying)
+                            .accessibilityIdentifier("geobeat.independent.record")
+                            Text("已记录 \(runtime.count) 次。独立记录不会更新当前目标、稳定速度、阶梯或弱项。")
+                                .font(.caption).foregroundStyle(.secondary)
+                            Menu("保存独立练习") {
+                                ForEach(songs.filter { $0.deletedAt == nil && !$0.isArchived }) { piece in
+                                    Menu(piece.name) {
+                                        ForEach(events.filter { event in
+                                            event.songID == piece.id && event.coreDefinition != nil
+                                        }) { event in
+                                            Button(event.name) { saveIndependent(piece, event) }
+                                        }
+                                        if let mode = piece.coreStructure?.mode {
+                                            Button("新建练习划分后保存") {
+                                                onRoute(.createDivision(piece: piece.id, mode: mode))
+                                            }
+                                        }
+                                    }
+                                }
+                                if songs.allSatisfy({ $0.deletedAt != nil || $0.isArchived }) {
+                                    Button("先添加曲目") { onRoute(.addPiece) }
+                                }
+                            }
+                            .accessibilityIdentifier("geobeat.independent.save")
+                            Button("不保存并清空", role: .destructive) {
+                                confirmsIndependentDiscard = true
+                            }
+                        }
+                    }
                 }
                 if let message = playbackError ?? engine.errorMessage { Text(message).foregroundStyle(.red) }
                 if runtime.isFocusEnabled {
@@ -706,6 +754,12 @@ struct CoreSessionView: View {
                 }
         }
         .background(sessionCanvas)
+        .confirmationDialog("清空未保存的独立练习？", isPresented: $confirmsIndependentDiscard) {
+            Button("清空", role: .destructive) {
+                engine.stop()
+                runtime.discardIndependent()
+            }
+        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let context = runtime.context {
                 let showsTargetActions = runtime.hasStartedPlayback && allTargetCountsReached(in: context) && !continueAfterTargets
@@ -916,12 +970,20 @@ struct CoreSessionView: View {
     private func togglePlayback() {
         if engine.isPlaying {
             engine.pause()
-            runtime.synchronizePlayback(isPlaying: false)
+            if isIndependentGeoBeat { runtime.pause() }
+            else { runtime.synchronizePlayback(isPlaying: false) }
         } else {
             do {
-                try runtime.startPlayback {
-                    engine.start()
-                    return engine.isPlaying
+                if isIndependentGeoBeat {
+                    runtime.startIndependentPlayback {
+                        engine.start()
+                        return engine.isPlaying
+                    }
+                } else {
+                    try runtime.startPlayback {
+                        engine.start()
+                        return engine.isPlaying
+                    }
                 }
                 playbackError = nil
             } catch { playbackError = error.localizedDescription }
@@ -1091,7 +1153,13 @@ struct CoreAnalyzeView: View {
             ForEach(filteredEvents) { event in
                 if let definition = event.coreDefinition {
                     Section("《\(songs.first { $0.id == event.songID }?.name ?? "曲目")》 · \(event.name)") {
-                        CoreDivisionAnalysis(definition: definition, attempts: CoreAnalysis.planned(attempts, division: event.id), isCurrent: songs.contains { $0.id == event.songID && !$0.isArchived && $0.deletedAt == nil })
+                        CoreDivisionAnalysis(
+                            definition: definition,
+                            attempts: CoreAnalysis.planned(attempts, division: event.id),
+                            divisionID: event.id,
+                            historicalAttempts: attempts.filter { $0.eventID == event.id },
+                            isCurrent: songs.contains { $0.id == event.songID && !$0.isArchived && $0.deletedAt == nil }
+                        )
                         if let latest = CoreAnalysis.planned(attempts, division: event.id).first {
                             NavigationLink("查看最近一次练习结果") { CoreSavedSessionView(attempt: latest) }
                         }
@@ -1153,13 +1221,64 @@ struct CoreAnalyzeView: View {
 
 struct CoreDivisionAnalysis: View {
     @State private var previewPro = false
+    @State private var historicalHand: PracticeHand?
     @EnvironmentObject private var subscription: SubscriptionStore
     let definition: CoreDivisionDefinition
     let attempts: [PracticeAttempt]
+    var divisionID: UUID? = nil
+    var historicalAttempts: [PracticeAttempt] = []
     var comparison: [PracticeHand: Double] = [:]
     var isCurrent = true
     var body: some View {
         let completion = CoreTargetCompletion.division(definition: definition, attempts: attempts, isCurrent: isCurrent)
+        let historicalPoints = divisionID.map { PracticeStatisticsEngine.historicalSpeedPoints(
+            records: historicalAttempts.map(\.statisticsSnapshot),
+            divisionID: $0,
+            applicableHands: definition.handMode.hands
+        ) } ?? []
+        let visiblePoints = historicalPoints.filter { point in
+            point.hand == ((subscription.isPro || previewPro)
+                ? historicalHand : definition.handMode.hands.first) ||
+                ((subscription.isPro || previewPro) && historicalHand == nil)
+        }
+        Text("历史速度趋势")
+            .font(.headline)
+        if subscription.isPro || previewPro, definition.handMode.hands.count > 1 {
+            Picker("历史手型", selection: $historicalHand) {
+                Text("所有").tag(Optional<PracticeHand>.none)
+                ForEach(definition.handMode.hands) { hand in
+                    Text(hand.title).tag(Optional(hand))
+                }
+            }
+            .accessibilityIdentifier("analyze.speed.handFilter")
+        }
+        if visiblePoints.isEmpty {
+            Text("暂无可核验的历史速度点")
+                .font(.caption).foregroundStyle(.secondary)
+        } else {
+            Chart(visiblePoints) { point in
+                LineMark(
+                    x: .value("时间", point.completedAt),
+                    y: .value("四分音符等值 BPM", point.quarterEquivalentBPM),
+                    series: .value("手型", point.hand.rawValue)
+                )
+                .foregroundStyle(.secondary)
+                PointMark(
+                    x: .value("时间", point.completedAt),
+                    y: .value("四分音符等值 BPM", point.quarterEquivalentBPM)
+                )
+                .foregroundStyle(by: .value("记录来源", point.recordSource.title))
+            }
+            .frame(height: 180)
+            .accessibilityIdentifier("analyze.speed.trend")
+            ForEach(visiblePoints) { point in
+                Text("\(point.bpm) BPM · \(point.noteUnit.title) · \(point.hand.title) · \(point.recordSource.title) · \(point.completedAt.formatted(date: .abbreviated, time: .shortened))")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("analyze.speed.point.\(point.id.uuidString)")
+            }
+        }
+        Text("历史速度点仅表示已保存的实际记录，不改变当前目标或稳定速度。")
+            .font(.caption).foregroundStyle(.secondary)
         Text("当前目标完成度仅表示已达到当前配置的目标，不代表演奏质量。")
             .font(.caption).foregroundStyle(.secondary)
         if !isCurrent { Text("此曲目不参与当前目标完成度计算。") }

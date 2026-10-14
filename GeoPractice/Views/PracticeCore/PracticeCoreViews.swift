@@ -44,6 +44,9 @@ struct PracticeCoreRootView: View {
     private var currentPieces: [PracticeSong] {
         songs.filter { !$0.isArchived && $0.deletedAt == nil }
     }
+    private var isIndependentGeoBeat: Bool {
+        independentGeoBeat || runtime.context == nil
+    }
     private var focusSurfaceVisible: Bool {
         runtime.isFocusEnabled && !runtime.needsRecovery &&
             (selectedTab == "Practice" || (selectedTab == "GeoBeat" && !independentGeoBeat))
@@ -53,12 +56,14 @@ struct PracticeCoreRootView: View {
             if selectedTab == "GeoBeat" {
                 NavigationStack {
                     CoreSessionView(
-                        runtime: independentGeoBeat ? independentRuntime : runtime,
+                        runtime: isIndependentGeoBeat ? independentRuntime : runtime,
                         engine: engine,
                         isGeoBeat: true,
+                        isIndependentGeoBeat: isIndependentGeoBeat,
                         openGeoBeat: {},
                         finish: finishSession,
-                        onRoute: request, detach: detachGeoBeat
+                        onRoute: request, detach: detachGeoBeat,
+                        saveIndependent: saveIndependent
                     )
                 }
             } else if selectedTab == "Analyze" {
@@ -196,10 +201,10 @@ struct PracticeCoreRootView: View {
         .onChange(of: engine.isPlaying) { _, current in
             // Commit uses the completed startup result, never a transient
             // isPlaying publication while the audio engine is still starting.
-            if !current { runtime.pause() }
+            if !current { runtime.pause(); independentRuntime.pause() }
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase != .active { engine.pause(); runtime.pause() }
+            if phase != .active { engine.pause(); runtime.pause(); independentRuntime.pause() }
             else { expireDeletedPieces() }
         }
     }
@@ -421,8 +426,17 @@ struct PracticeCoreRootView: View {
         independentGeoBeat = true; selectedTab = "GeoBeat"
     }
     private func reconnectPractice() {
-        if independentGeoBeat { engine.pause(); engine.apply(runtime.preset) }
+        if isIndependentGeoBeat { engine.pause(); engine.apply(runtime.preset) }
+        independentRuntime.pause()
         independentGeoBeat = false; selectedTab = "Practice"
+    }
+    private func saveIndependent(piece: PracticeSong, division: PracticeEvent) {
+        do {
+            _ = try independentRuntime.saveIndependent(
+                piece: piece, division: division, in: modelContext
+            )
+            engine.stop()
+        } catch { boundaryMessage = error.localizedDescription }
     }
     private func finishSession() {
         exitError = nil
@@ -461,6 +475,14 @@ struct PracticeCoreRootView: View {
         }
     }
     private func request(_ route: CoreRoute) {
+        if selectedTab == "GeoBeat", isIndependentGeoBeat {
+            switch route {
+            case .geoBeat: break
+            default:
+                engine.pause()
+                independentRuntime.pause()
+            }
+        }
         // Dismiss the presenting sheet before a guard or another destination can appear.
         if sheetRoute != nil {
             queuedRoute = route

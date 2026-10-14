@@ -26,10 +26,32 @@ struct CoreSessionContext: Codable, Equatable {
     }
 }
 
+/// Explicit provenance for a saved independent session. Association is chosen
+/// at Save; no current Goal or planned-session context is copied into it.
+struct CoreIndependentGeoBeatContext: Codable, Equatable {
+    let pieceID: UUID
+    let divisionID: UUID
+    let source: String
+
+    init(pieceID: UUID, divisionID: UUID) {
+        self.pieceID = pieceID
+        self.divisionID = divisionID
+        source = "independentGeoBeat"
+    }
+}
+
 extension PracticeAttempt {
     var coreContext: CoreSessionContext? {
         guard let coreContextData else { return nil }
         return try? JSONDecoder().decode(CoreSessionContext.self, from: coreContextData)
+    }
+
+    var independentGeoBeatContext: CoreIndependentGeoBeatContext? {
+        guard let coreContextData,
+              let value = try? JSONDecoder().decode(CoreIndependentGeoBeatContext.self, from: coreContextData),
+              value.source == "independentGeoBeat"
+        else { return nil }
+        return value
     }
 }
 
@@ -59,6 +81,7 @@ final class CoreSessionRuntime: ObservableObject {
     @Published private(set) var failure: String?
     @Published private(set) var execution: CoreDivisionDefinition?
     @Published private(set) var hasStartedPlayback = false
+    @Published private(set) var independentHand: PracticeHand = .both
     @Published private var provisionalHand: PracticeHand = .both
     private var provisionalSource: (piece: PracticeSong, division: PracticeEvent, calendar: Calendar, starts: [PracticeHand: Int], activation: CoreLadderActivation, focusEnabled: Bool)?
     private let defaults: UserDefaults
@@ -241,6 +264,69 @@ final class CoreSessionRuntime: ObservableObject {
     func updatePreset(_ value: MetronomePreset, at date: Date = .now) {
         preset = value.normalized
         persist(at: date)
+    }
+
+    @discardableResult
+    func startIndependentPlayback(at date: Date = .now, using start: () -> Bool) -> Bool {
+        let succeeded = start()
+        guard succeeded else { return false }
+        if !hasStartedPlayback {
+            session.begin(initialHand: independentHand, at: date)
+            hasStartedPlayback = true
+        } else {
+            session.resume(at: date)
+        }
+        return true
+    }
+
+    func selectIndependentHand(_ hand: PracticeHand, at date: Date = .now) {
+        independentHand = hand
+        if hasStartedPlayback { session.switchHand(to: hand, at: date) }
+    }
+
+    func recordIndependent(preset: MetronomePreset, at date: Date = .now) {
+        guard hasStartedPlayback, session.isRunning else { return }
+        self.preset = preset.normalized
+        session.recordCompletion(for: independentHand, preset: preset, at: date)
+    }
+
+    @discardableResult
+    func saveIndependent(
+        piece: PracticeSong,
+        division: PracticeEvent,
+        in modelContext: ModelContext,
+        at date: Date = .now
+    ) throws -> PracticeAttempt {
+        guard piece.deletedAt == nil, division.songID == piece.id,
+              let definition = division.coreDefinition,
+              hasStartedPlayback else { throw CoreIntegrationError.wrongDestination }
+        let usedHands = Set(PracticeHand.allCases.filter {
+            !session.completionSamples(for: $0).isEmpty
+                || session.stats(for: $0, at: date).durationMilliseconds > 0
+        })
+        guard usedHands.allSatisfy({ definition.handMode.hands.contains($0) }) else {
+            throw CoreFlowError.invalidInput("请选择包含本次记录手型的练习划分。")
+        }
+        if session.reviewSummary == nil { _ = session.finish(at: date) }
+        guard let summary = session.reviewSummary,
+              summary.totalDurationMilliseconds > 0 || !summary.completions.isEmpty
+        else { throw CoreFlowError.noRecording }
+        let provenance = CoreIndependentGeoBeatContext(
+            pieceID: piece.id, divisionID: division.id
+        )
+        let saved = try division.commit(
+            summary: summary,
+            in: modelContext,
+            coreContextData: JSONEncoder().encode(provenance)
+        ).attempt
+        session.reset()
+        hasStartedPlayback = false
+        return saved
+    }
+
+    func discardIndependent() {
+        session.reset()
+        hasStartedPlayback = false
     }
     func pause(at date: Date = .now) { session.pause(at: date); persist(at: date) }
     func resume(at date: Date = .now) {

@@ -601,6 +601,88 @@ final class PracticeCoreE2ETests: XCTestCase {
     }
     private var start: Date { Date(timeIntervalSince1970: 1_790_467_200) }
 
+    func testIndependentSavedHistoryAppearsInTrendWithoutChangingCurrentAnalysis() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, division) = try makeDivision(context, handMode: .left)
+        let planned = CoreSessionRuntime(defaults: defaults())
+        try planned.begin(piece: piece, division: division, initialHand: .left, at: start, calendar: calendar)
+        planned.synchronizePlayback(isPlaying: true, at: start)
+        planned.record(preset: preset(80), at: start.addingTimeInterval(2))
+        planned.finish(at: start.addingTimeInterval(10))
+        _ = try planned.save(division: division, in: context)
+        let goalBefore = division.coreDefinitionData
+        let independent = CoreSessionRuntime(defaults: defaults(), restore: false)
+        independent.selectIndependentHand(.left)
+        XCTAssertTrue(independent.startIndependentPlayback(at: start.addingTimeInterval(5), using: { true }))
+        independent.recordIndependent(preset: preset(120, .eighth), at: start.addingTimeInterval(7))
+        let saved = try independent.saveIndependent(piece: piece, division: division, in: context,
+                                                    at: start.addingTimeInterval(15))
+        XCTAssertNil(saved.coreContext)
+        XCTAssertEqual(saved.independentGeoBeatContext?.pieceID, piece.id)
+        XCTAssertEqual(saved.independentGeoBeatContext?.divisionID, division.id)
+        XCTAssertEqual(division.coreDefinitionData, goalBefore)
+        let attempts = try context.fetch(FetchDescriptor<PracticeAttempt>())
+        let current = CoreAnalysis.planned(attempts, division: division.id)
+        XCTAssertEqual(current.count, 1)
+        XCTAssertEqual(CoreAnalysis.stable(current, hand: .left), 80)
+        XCTAssertEqual(CoreAnalysis.count(current, hand: .left, cycleStart: calendar.startOfDay(for: start)), 1)
+        let points = PracticeStatisticsEngine.historicalSpeedPoints(
+            records: attempts.map(\.statisticsSnapshot), divisionID: division.id, applicableHands: [.left])
+        XCTAssertEqual(points.count, 2)
+        XCTAssertEqual(points.map(\.recordSource), [.planned, .independentGeoBeat])
+        XCTAssertEqual(points.map(\.bpm), [80, 120])
+        XCTAssertEqual(points.last?.noteUnit, .eighth)
+        XCTAssertEqual(points.last?.hand, .left)
+        XCTAssertEqual(points.last?.completedAt, start.addingTimeInterval(7))
+        XCTAssertEqual(points.last?.quarterEquivalentBPM, 60)
+        let backup = try PracticeLibraryStore(modelContext: context).makeBackupData()
+        let restored = try container()
+        try PracticeLibraryStore(modelContext: restored.mainContext).restoreBackup(from: backup)
+        let restoredAttempts = try restored.mainContext.fetch(FetchDescriptor<PracticeAttempt>())
+        XCTAssertEqual(restoredAttempts.first { $0.id == saved.id }?.independentGeoBeatContext,
+                       saved.independentGeoBeatContext)
+        XCTAssertEqual(PracticeStatisticsEngine.historicalSpeedPoints(
+            records: restoredAttempts.map(\.statisticsSnapshot), divisionID: division.id,
+            applicableHands: [.left]).count, 2)
+    }
+
+    func testPersistedCrossSourceDurationDeduplicatesGlobalAndKeepsPieceOwnership() throws {
+        let store = try container(), context = store.mainContext
+        let (pieceA, divisionA) = try makeDivision(context, handMode: .left)
+        let (pieceB, divisionB) = try makeDivision(context, handMode: .left)
+        let planned = CoreSessionRuntime(defaults: defaults())
+        try planned.begin(piece: pieceA, division: divisionA, initialHand: .left, at: start, calendar: calendar)
+        planned.synchronizePlayback(isPlaying: true, at: start)
+        planned.record(preset: preset(80), at: start.addingTimeInterval(2))
+        planned.finish(at: start.addingTimeInterval(10))
+        _ = try planned.save(division: divisionA, in: context)
+        let independent = CoreSessionRuntime(defaults: defaults(), restore: false)
+        independent.selectIndependentHand(.left)
+        XCTAssertTrue(independent.startIndependentPlayback(at: start.addingTimeInterval(5), using: { true }))
+        independent.recordIndependent(preset: preset(90), at: start.addingTimeInterval(7))
+        _ = try independent.saveIndependent(piece: pieceB, division: divisionB, in: context,
+                                            at: start.addingTimeInterval(15))
+        let records = try context.fetch(FetchDescriptor<PracticeAttempt>()).map(\.statisticsSnapshot)
+        XCTAssertEqual(PracticeStatisticsEngine.globalDuration(records: records).exactMilliseconds, 15_000)
+        XCTAssertEqual(PracticeStatisticsEngine.globalDuration(records: records).removedOverlapMilliseconds, 5_000)
+        XCTAssertEqual(PracticeStatisticsEngine.pieceDuration(records: records.filter { $0.sourceEventID == divisionA.id }).exactMilliseconds, 10_000)
+        XCTAssertEqual(PracticeStatisticsEngine.pieceDuration(records: records.filter { $0.sourceEventID == divisionB.id }).exactMilliseconds, 10_000)
+    }
+
+    func testIndependentDiscardAndInvalidHandDoNotSave() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, division) = try makeDivision(context, handMode: .left)
+        let independent = CoreSessionRuntime(defaults: defaults(), restore: false)
+        XCTAssertTrue(independent.startIndependentPlayback(at: start, using: { true }))
+        independent.selectIndependentHand(.right, at: start.addingTimeInterval(1))
+        independent.recordIndependent(preset: preset(90), at: start.addingTimeInterval(2))
+        XCTAssertThrowsError(try independent.saveIndependent(piece: piece, division: division, in: context,
+                                                               at: start.addingTimeInterval(3)))
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+        independent.discardIndependent()
+        XCTAssertEqual(try context.fetchCount(FetchDescriptor<PracticeAttempt>()), 0)
+    }
+
     func testFirstPlayPreservesLongTitleScrollPositionAcrossPracticeAppearances() async throws {
         for focus in [false, true] {
             for dark in [false, true] {

@@ -1089,24 +1089,104 @@ private struct CoreTempoControls: View {
     }
 }
 
+enum AnalyzePreset: String, CaseIterable, Identifiable {
+    case today, sevenDays, thirtyDays, all, custom
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .today: "今天"
+        case .sevenDays: "7 天"
+        case .thirtyDays: "30 天"
+        case .all: "所有"
+        case .custom: "自定义"
+        }
+    }
+}
+
+struct AnalyzeSelection {
+    var preset: AnalyzePreset = .sevenDays
+    var start: Date = .now
+    var end: Date = .now
+    func interval(now: Date, calendar: Calendar) -> DateInterval? {
+        let today = calendar.startOfDay(for: now)
+        let endOfToday = calendar.date(byAdding: .day, value: 1, to: today) ?? now
+        switch preset {
+        case .today: return DateInterval(start: today, end: endOfToday)
+        case .sevenDays: return DateInterval(start: calendar.date(byAdding: .day, value: -6, to: today) ?? today, end: endOfToday)
+        case .thirtyDays: return DateInterval(start: calendar.date(byAdding: .day, value: -29, to: today) ?? today, end: endOfToday)
+        case .all: return nil
+        case .custom:
+            let lower = calendar.startOfDay(for: min(start, end))
+            let upper = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: max(start, end))) ?? endOfToday
+            return DateInterval(start: lower, end: upper)
+        }
+    }
+}
+
+enum AnalyzeFocus {
+    static func duration(attempts: [PracticeAttempt], interval: DateInterval?) -> Int64? {
+        let relevant = attempts.filter { attempt in
+            guard let interval else { return true }
+            return attempt.startedAt < interval.end && attempt.finishedAt > interval.start
+        }
+        guard !relevant.isEmpty,
+              relevant.allSatisfy({ $0.independentGeoBeatContext != nil || $0.coreContext?.focusEnabled != nil })
+        else { return nil }
+        let focused = relevant.filter { $0.coreContext?.focusEnabled == true }
+        guard !focused.isEmpty else { return 0 }
+        return PracticeStatisticsEngine.duration(records: focused.map(\.statisticsSnapshot),
+                                                 interval: interval, deduplicate: true).exactMilliseconds
+    }
+}
+
 struct CoreAnalyzeView: View {
     @Environment(\.calendar) private var environmentCalendar
+    @EnvironmentObject private var subscription: SubscriptionStore
     @Query private var events: [PracticeEvent]
     @Query private var songs: [PracticeSong]
     @Query private var attempts: [PracticeAttempt]
+    @State private var localSelection = AnalyzeSelection()
     let scope: CoreAnalyzeContext
+    private var sharedSelection: Binding<AnalyzeSelection>? = nil
+    private var selection: Binding<AnalyzeSelection> { sharedSelection ?? $localSelection }
+    init(scope: CoreAnalyzeContext, sharedSelection: Binding<AnalyzeSelection>? = nil) {
+        self.scope = scope
+        self.sharedSelection = sharedSelection
+    }
     var body: some View {
+        let selected = selection.wrappedValue
+        let interval = selected.interval(now: .now, calendar: analysisCalendar)
         let days = PracticeStatisticsEngine.practiceDays(
-            records: scopedAttempts.map(\.statisticsSnapshot),
-            calendar: analysisCalendar
+            records: scopedAttempts.map(\.statisticsSnapshot), calendar: analysisCalendar,
+            interval: interval
         )
         let durationRecords = scopedAttempts.map(\.statisticsSnapshot)
+        let focusedMilliseconds = AnalyzeFocus.duration(attempts: scopedAttempts, interval: interval)
         let duration = switch scope {
-        case .overall: PracticeStatisticsEngine.globalDuration(records: durationRecords)
-        case .piece: PracticeStatisticsEngine.pieceDuration(records: durationRecords)
-        case .division: PracticeStatisticsEngine.pieceDuration(records: durationRecords)
+        case .overall: PracticeStatisticsEngine.duration(records: durationRecords, interval: interval, deduplicate: true)
+        case .piece, .division: PracticeStatisticsEngine.duration(records: durationRecords, interval: interval, deduplicate: false)
         }
         List {
+            Section("历史时间范围") {
+                if case .overall = scope {
+                    Picker("时间范围", selection: selection.preset) {
+                        ForEach([AnalyzePreset.today, .sevenDays, .thirtyDays, .all]) { value in
+                            Text(value.title).tag(value)
+                        }
+                    }.pickerStyle(.segmented).accessibilityIdentifier("analyze.range.primary")
+                } else {
+                    Text("当前范围：\(selected.preset.title)").foregroundStyle(.secondary)
+                }
+                Menu("选择历史范围") {
+                    ForEach(AnalyzePreset.allCases) { value in
+                        Button(value.title) { selection.wrappedValue.preset = value }
+                    }
+                }.accessibilityIdentifier("analyze.range.secondary")
+                if selected.preset == .custom {
+                    DatePicker("开始日期", selection: selection.start, displayedComponents: .date)
+                    DatePicker("结束日期", selection: selection.end, displayedComponents: .date)
+                }
+            }
             Section("历史练习") {
                 if case .overall = scope {
                     LabeledContent("全局练习时长", value: durationValue(duration))
@@ -1114,6 +1194,9 @@ struct CoreAnalyzeView: View {
                 } else if case .piece = scope {
                     LabeledContent("曲目练习时长", value: durationValue(duration))
                         .accessibilityIdentifier("analyze.history.pieceDuration")
+                } else if case .division = scope {
+                    LabeledContent("划分练习时长", value: durationValue(duration))
+                        .accessibilityIdentifier("analyze.history.divisionDuration")
                 }
                 if case .overall = scope, duration.removedOverlapMilliseconds > 0 {
                     Text("全局时长已对重叠时间去重；各曲目时长按实际练习归属统计，因此两者合计可能不同。")
@@ -1128,12 +1211,24 @@ struct CoreAnalyzeView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 if duration.state == .incomplete || duration.state == .unverifiable {
-                    Text("数据不完整 · 时长仅显示可核实部分")
+                    Text("练习时长数据不完整 · 仅显示可核实部分")
                         .font(.caption).foregroundStyle(.secondary)
                         .accessibilityIdentifier("analyze.history.durationIntegrity")
                 }
                 LabeledContent("练习天数", value: practiceDaysValue(days))
                     .accessibilityIdentifier("analyze.history.practiceDays")
+                if subscription.isPro {
+                    LabeledContent("专注时长", value: focusValue(scopedAttempts, interval: interval))
+                        .accessibilityIdentifier("analyze.history.focusDuration")
+                    if case .overall = scope {
+                        let rate = duration.exactMilliseconds.flatMap { practice -> Double? in
+                            guard practice > 0, let focusedMilliseconds else { return nil }
+                            return min(1, Double(focusedMilliseconds) / Double(practice))
+                        }
+                        LabeledContent("专注占比", value: rate.map { $0.formatted(.percent.precision(.fractionLength(0))) } ?? "N/A")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
                 if let disclosure = practiceDaysDisclosure(days) {
                     Text(disclosure)
                         .font(.caption)
@@ -1141,16 +1236,65 @@ struct CoreAnalyzeView: View {
                         .accessibilityIdentifier("analyze.history.integrity")
                 }
             }
+            if case .overall = scope {
+                Section("当前状态") {
+                    LabeledContent("需要关注的练习划分", value: "\(attentionCount)")
+                    if insufficientCount > 0 {
+                        Text("\(insufficientCount) 个练习划分诊断数据不足")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Text("当前诊断依据现行目标与已保存计划练习，不随历史时间范围改变。")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Section {
+                    NavigationLink("练习趋势") { CorePracticeTrendView(attempts: scopedAttempts, selection: selection) }
+                    NavigationLink("作曲家与曲目") {
+                        CoreAnalyzeRankingView(songs: songs, events: events, attempts: attempts, selection: selection)
+                    }
+                }
+                if !subscription.isPro {
+                    Text("专注趋势 · 多手比较 · 深度弱项分析 · Pro")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
             if case .piece(let id) = scope, let piece = songs.first(where: { $0.id == id }) {
                 let result = CoreTargetCompletion.piece(piece, events: events, attempts: attempts)
-                Section("当前目标状态") {
+                if !piece.isArchived { Section("当前目标状态") {
                     Text("整曲目标完成度：\(CoreTargetCompletion.percentage(result.combined))")
                         .accessibilityIdentifier("analyze.target.piece")
                     Text("\(result.divisionCount) 个练习划分 / \(result.achievedCount) 个已达到当前目标 / \(result.inProgressCount) 个进行中 / \(result.unavailableCount) 个暂无法计算")
                         .font(.caption)
+                } }
+                if !piece.isArchived { Section("当前状态") {
+                    Text("\(pieceAttentionCount(id)) 个练习划分需要关注")
+                    let insufficient = events.filter { $0.songID == id && $0.coreDefinition != nil && diagnosis($0) == nil }.count
+                    if insufficient > 0 { Text("\(insufficient) 个练习划分诊断数据不足") }
+                } }
+                Section {
+                    NavigationLink("练习趋势") { CorePracticeTrendView(attempts: scopedAttempts, selection: selection) }
+                    NavigationLink("练习划分") {
+                        List(filteredEvents) { event in
+                            NavigationLink {
+                                CoreAnalyzeView(scope: .division(piece: id, division: event.id), sharedSelection: selection)
+                            } label: {
+                                VStack(alignment: .leading) {
+                                    Text(event.name)
+                                    Text(diagnosis(event).map { $0 <= 0.8 ? "这个划分需要关注" : "当前无需要关注项" } ?? "诊断数据不足")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                        }.navigationTitle("练习划分")
+                    }
+                    NavigationLink("练习记录") {
+                        List(visibleAttempts.sorted { $0.startedAt > $1.startedAt }) { attempt in
+                            NavigationLink(attempt.startedAt.formatted(date: .abbreviated, time: .shortened)) {
+                                CoreSavedSessionView(attempt: attempt)
+                            }
+                        }.navigationTitle("练习记录")
+                    }
                 }
             }
-            ForEach(filteredEvents) { event in
+            if case .division = scope { ForEach(filteredEvents) { event in
                 if let definition = event.coreDefinition {
                     Section("《\(songs.first { $0.id == event.songID }?.name ?? "曲目")》 · \(event.name)") {
                         CoreDivisionAnalysis(
@@ -1158,6 +1302,7 @@ struct CoreAnalyzeView: View {
                             attempts: CoreAnalysis.planned(attempts, division: event.id),
                             divisionID: event.id,
                             historicalAttempts: attempts.filter { $0.eventID == event.id },
+                            historicalRange: interval,
                             isCurrent: songs.contains { $0.id == event.songID && !$0.isArchived && $0.deletedAt == nil }
                         )
                         if let latest = CoreAnalysis.planned(attempts, division: event.id).first {
@@ -1165,15 +1310,52 @@ struct CoreAnalyzeView: View {
                         }
                     }
                 }
+            } }
+            if filteredEvents.isEmpty { Text("暂无练习划分") }
+        }.navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                if case .overall = scope {
+                    ToolbarItem(placement: .topBarTrailing) {
+                        NavigationLink("分享") { CoreAnalyzeShareView() }
+                            .accessibilityIdentifier("analyze.share")
+                    }
+                }
             }
-            if filteredEvents.isEmpty { Text("暂无练习数据") }
-        }.navigationTitle("分析").navigationBarTitleDisplayMode(.inline)
+    }
+    private var title: String {
+        switch scope {
+        case .overall: "分析"
+        case .piece(let id): songs.first { $0.id == id }?.name ?? "曲目分析"
+        case .division(_, let id): events.first { $0.id == id }?.name ?? "划分分析"
+        }
+    }
+    private var currentEvents: [PracticeEvent] {
+        filteredEvents.filter { event in
+            event.coreDefinition != nil && songs.contains {
+                $0.id == event.songID && !$0.isArchived && $0.deletedAt == nil
+            }
+        }
+    }
+    private var attentionCount: Int { currentEvents.filter { needsAttention($0) }.count }
+    private var insufficientCount: Int { currentEvents.filter { diagnosis($0) == nil }.count }
+    private func pieceAttentionCount(_ id: UUID) -> Int {
+        events.filter { $0.songID == id && needsAttention($0) }.count
+    }
+    private func needsAttention(_ event: PracticeEvent) -> Bool {
+        diagnosis(event).map { $0 <= 0.8 } ?? false
+    }
+    private func diagnosis(_ event: PracticeEvent) -> Double? {
+        guard let definition = event.coreDefinition else { return nil }
+        return CoreAnalysis.divisionMastery(CoreAnalysis.planned(attempts, division: event.id), definition: definition)
+    }
+    private func focusValue(_ attempts: [PracticeAttempt], interval: DateInterval?) -> String {
+        AnalyzeFocus.duration(attempts: attempts, interval: interval).map { "\($0 / 1_000) 秒" } ?? "N/A"
     }
     private var filteredEvents: [PracticeEvent] {
         events.filter { event in
             guard songs.contains(where: { $0.id == event.songID && $0.deletedAt == nil }) else { return false }
             switch scope {
-            case .overall: return event.coreDefinition != nil
+            case .overall: return true
             case .piece(let piece): return event.songID == piece
             case .division(let piece, let division): return event.songID == piece && event.id == division
             }
@@ -1182,6 +1364,12 @@ struct CoreAnalyzeView: View {
     private var scopedAttempts: [PracticeAttempt] {
         let eventIDs = Set(filteredEvents.map(\.id))
         return attempts.filter { eventIDs.contains($0.eventID) }
+    }
+    private var visibleAttempts: [PracticeAttempt] {
+        guard let interval = selection.wrappedValue.interval(now: .now, calendar: analysisCalendar) else {
+            return scopedAttempts
+        }
+        return scopedAttempts.filter { $0.startedAt < interval.end && $0.finishedAt > interval.start }
     }
     private var analysisCalendar: Calendar {
         var calendar = environmentCalendar
@@ -1219,38 +1407,303 @@ struct CoreAnalyzeView: View {
     }
 }
 
+struct CoreAnalyzeShareView: View {
+    @Environment(\.calendar) private var calendar
+    @EnvironmentObject private var subscription: SubscriptionStore
+    @Query private var songs: [PracticeSong]
+    @Query private var events: [PracticeEvent]
+    @Query private var attempts: [PracticeAttempt]
+    @State private var showsMap = false
+    @State private var period: StatisticsPeriod = .day
+    @State private var date = Date()
+    private var interval: DateInterval {
+        PracticeStatisticsEngine.periodInterval(for: period, anchorDate: date, calendar: calendar)
+    }
+    private var savedRecords: [PracticeAttempt] {
+        let validPieces = Set(songs.filter { $0.deletedAt == nil }.map(\.id))
+        let validEvents = Set(events.filter { $0.songID.map(validPieces.contains) == true }.map(\.id))
+        return attempts.filter { validEvents.contains($0.eventID) }
+    }
+    private var duration: PracticeDurationResult {
+        PracticeStatisticsEngine.duration(records: savedRecords.map(\.statisticsSnapshot),
+                                          interval: interval, deduplicate: true)
+    }
+    private var durationLabel: String {
+        if duration.state == .noRecords { return "无记录" }
+        return duration.exactMilliseconds.map { "\($0 / 1_000) 秒" } ?? "N/A"
+    }
+    private var days: PracticeDaysResult {
+        PracticeStatisticsEngine.practiceDays(records: savedRecords.map(\.statisticsSnapshot),
+                                              calendar: calendar, interval: interval)
+    }
+    private var practicedPieces: [PracticeSong] {
+        let ids = Set(events.filter { event in
+            savedRecords.contains { $0.eventID == event.id && $0.startedAt < interval.end && $0.finishedAt > interval.start }
+        }.map(\.songID))
+        return songs.filter { ids.contains($0.id) && $0.deletedAt == nil }.sorted { $0.name < $1.name }
+    }
+    private var receiptCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("练习小票").font(.title2.bold())
+            Text("\(interval.start.formatted(date: .abbreviated, time: .omitted)) – \(interval.end.addingTimeInterval(-1).formatted(date: .abbreviated, time: .omitted))")
+                .foregroundStyle(.secondary)
+            Divider()
+            Text("练习时长").font(.caption).foregroundStyle(.secondary)
+            Text(durationLabel)
+                .font(.largeTitle.monospacedDigit())
+            if duration.state == .incomplete || duration.state == .unverifiable {
+                Text("数据不完整 · 不显示未经核验的精确总时长").font(.caption)
+            }
+            Text("练习天数：\(days.state == .noRecords ? "无记录" : days.exactDayCount.map { "\($0) 天" } ?? "N/A")")
+            if subscription.isPro {
+                let focused = AnalyzeFocus.duration(attempts: savedRecords, interval: interval)
+                Text("专注时长：\(focused.map { "\($0 / 1_000) 秒" } ?? "N/A")")
+            }
+            Divider()
+            ForEach(practicedPieces) { piece in Text(piece.name).font(.callout) }
+            Text("ROVIA").font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(24).frame(width: 360, alignment: .leading)
+        .background(Color(uiColor: .systemBackground))
+    }
+    private var shareImage: Image? {
+        let renderer = ImageRenderer(content: receiptCard)
+        renderer.scale = 2
+        return renderer.uiImage.map(Image.init(uiImage:))
+    }
+    var body: some View {
+        List {
+            Picker("分享内容", selection: $showsMap) {
+                Text("练习小票").tag(false)
+                Text("作曲家地图").tag(true)
+            }.pickerStyle(.segmented)
+            if showsMap {
+                Text("暂无可核验的作曲家资料，无法生成作曲家地图。")
+                    .foregroundStyle(.secondary)
+            } else {
+                Picker("小票周期", selection: $period) {
+                    Text("日").tag(StatisticsPeriod.day)
+                    Text("周").tag(StatisticsPeriod.week)
+                    Text("月").tag(StatisticsPeriod.month)
+                }.pickerStyle(.segmented)
+                DatePicker("选择日期", selection: $date, displayedComponents: .date)
+                receiptCard
+                    .frame(maxWidth: .infinity)
+                    .accessibilityIdentifier("analyze.share.receiptPreview")
+                if duration.state == .noRecords {
+                    Text("所选周期没有可分享的已保存练习记录。")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else if let shareImage {
+                    ShareLink(item: shareImage, preview: SharePreview("Rovia 练习小票", image: shareImage)) {
+                        Text("分享图片")
+                    }.accessibilityIdentifier("analyze.share.image")
+                } else {
+                    Text("图片暂无法生成")
+                }
+            }
+        }.navigationTitle("分享")
+    }
+}
+
+private struct AnalyzeBucket: Identifiable {
+    let date: Date
+    let practice: PracticeDurationResult
+    let focus: Int64?
+    var id: Date { date }
+}
+
+struct CorePracticeTrendView: View {
+    @Environment(\.calendar) private var calendar
+    @EnvironmentObject private var subscription: SubscriptionStore
+    let attempts: [PracticeAttempt]
+    @Binding var selection: AnalyzeSelection
+    @State private var selectedBucket: Date?
+    @State private var showDays = false
+    private var interval: DateInterval? { selection.interval(now: .now, calendar: calendar) }
+    private var component: Calendar.Component {
+        if selection.preset == .today { return .hour }
+        if selection.preset == .thirtyDays && !showDays { return .weekOfYear }
+        if selection.preset == .all {
+            let earliest = attempts.map(\.startedAt).min() ?? .now
+            let span = Date().timeIntervalSince(earliest)
+            if span > 730 * 86_400 { return .year }
+            if span > 90 * 86_400 { return .month }
+            if span > 30 * 86_400 { return .weekOfYear }
+            return .day
+        }
+        return .day
+    }
+    private var buckets: [AnalyzeBucket] {
+        let records = attempts.map(\.statisticsSnapshot)
+        let lower = interval?.start ?? attempts.map(\.startedAt).min() ?? .now
+        let upper = min(interval?.end ?? .now, .now.addingTimeInterval(1))
+        guard upper > lower else { return [] }
+        var date = calendar.dateInterval(of: component, for: lower)?.start ?? lower
+        var result: [AnalyzeBucket] = []
+        while date < upper && result.count < 370 {
+            guard let next = calendar.date(byAdding: component, value: 1, to: date), next > date else { break }
+            let slice = DateInterval(start: max(date, lower), end: min(next, upper))
+            let duration = PracticeStatisticsEngine.duration(records: records, interval: slice, deduplicate: true)
+            result.append(AnalyzeBucket(date: date, practice: duration,
+                                        focus: AnalyzeFocus.duration(attempts: attempts, interval: slice)))
+            date = next
+        }
+        return result
+    }
+    var body: some View {
+        let values = buckets
+        List {
+            Text("历史范围：\(selection.preset.title)").font(.caption).foregroundStyle(.secondary)
+            if selection.preset == .thirtyDays {
+                Button(showDays ? "按周查看" : "查看每日") { showDays.toggle() }
+            }
+            if values.allSatisfy({ $0.practice.state == .noRecords }) {
+                Text("所选范围无历史练习记录")
+            } else {
+                Chart(values) { bucket in
+                    BarMark(x: .value("时间", bucket.date),
+                            y: .value("练习秒数", Double(bucket.practice.verifiedMilliseconds) / 1_000))
+                    .foregroundStyle(by: .value("系列", "练习时长"))
+                    if subscription.isPro, let focus = bucket.focus {
+                        BarMark(x: .value("时间", bucket.date), y: .value("专注秒数", Double(focus) / 1_000))
+                            .foregroundStyle(by: .value("系列", "专注时长"))
+                    }
+                }
+                .frame(height: 230)
+                .chartLegend(subscription.isPro && values.contains { $0.focus != nil } ? .visible : .hidden)
+                .accessibilityIdentifier("analyze.trend.chart")
+                ForEach(values.filter { $0.practice.state != .noRecords }) { bucket in
+                    Button {
+                        selectedBucket = bucket.date
+                    } label: {
+                        LabeledContent(bucket.date.formatted(date: .abbreviated, time: component == .hour ? .shortened : .omitted),
+                                       value: "\(bucket.practice.verifiedMilliseconds / 1_000) 秒")
+                    }
+                }
+                if let selected = values.first(where: { $0.date == selectedBucket }) {
+                    Text("练习时长：\(selected.practice.exactMilliseconds == nil ? "至少 " : "")\(selected.practice.verifiedMilliseconds / 1_000) 秒")
+                    if subscription.isPro { Text("专注时长：\(selected.focus.map { "\($0 / 1_000) 秒" } ?? "N/A")") }
+                    if selected.practice.state == .incomplete || selected.practice.state == .unverifiable {
+                        Text("数据不完整 · 仅展示可核验部分")
+                    }
+                }
+            }
+        }.navigationTitle("练习趋势")
+    }
+}
+
+struct CoreAnalyzeRankingView: View {
+    @Environment(\.calendar) private var calendar
+    @EnvironmentObject private var subscription: SubscriptionStore
+    let songs: [PracticeSong]
+    let events: [PracticeEvent]
+    let attempts: [PracticeAttempt]
+    @Binding var selection: AnalyzeSelection
+    @State private var showsComposers = false
+    @State private var sortByFocus = true
+    private var interval: DateInterval? { selection.interval(now: .now, calendar: calendar) }
+    private func records(for piece: PracticeSong) -> [PracticeAttempt] {
+        let ids = Set(events.filter { $0.songID == piece.id }.map(\.id))
+        return attempts.filter { ids.contains($0.eventID) }
+    }
+    private func duration(_ piece: PracticeSong) -> PracticeDurationResult {
+        PracticeStatisticsEngine.duration(records: records(for: piece).map(\.statisticsSnapshot),
+                                          interval: interval, deduplicate: false)
+    }
+    private func focus(_ piece: PracticeSong) -> Int64? {
+        AnalyzeFocus.duration(attempts: records(for: piece), interval: interval)
+    }
+    private var orderedPieces: [PracticeSong] {
+        songs.filter { $0.deletedAt == nil && duration($0).state != .noRecords }.sorted { left, right in
+            let a = subscription.isPro && sortByFocus ? focus(left) : duration(left).exactMilliseconds
+            let b = subscription.isPro && sortByFocus ? focus(right) : duration(right).exactMilliseconds
+            if a != b { return (a ?? -1) > (b ?? -1) }
+            return left.name < right.name
+        }
+    }
+    private func rowDetail(_ piece: PracticeSong) -> String {
+        let result = duration(piece)
+        let practice = result.exactMilliseconds.map { "\($0 / 1_000) 秒" } ?? "N/A"
+        let integrity = result.state == .incomplete || result.state == .unverifiable ? " · 练习时长数据不完整" : ""
+        guard subscription.isPro else { return "练习：\(practice)\(integrity)" }
+        let focused = focus(piece).map { "\($0 / 1_000) 秒" } ?? "N/A"
+        return "练习：\(practice) · 专注：\(focused)\(integrity)"
+    }
+    var body: some View {
+        List {
+            Text("历史范围：\(selection.preset.title)").font(.caption).foregroundStyle(.secondary)
+            Picker("排行对象", selection: $showsComposers) {
+                Text("作曲家").tag(true)
+                Text("曲目").tag(false)
+            }.pickerStyle(.segmented)
+            if subscription.isPro {
+                Picker("排序", selection: $sortByFocus) {
+                    Text("按专注时长").tag(true)
+                    Text("按练习时长").tag(false)
+                }
+            }
+            if showsComposers {
+                Text("未填写作曲家")
+                Text("当前曲目资料没有可核验的作曲家身份，无法生成作曲家排行。")
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ForEach(orderedPieces) { piece in
+                    NavigationLink {
+                        CoreAnalyzeView(scope: .piece(piece.id), sharedSelection: $selection)
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(piece.name)
+                            Text(rowDetail(piece))
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
+            }
+        }.navigationTitle("作曲家与曲目")
+    }
+}
+
 struct CoreDivisionAnalysis: View {
     @State private var previewPro = false
     @State private var historicalHand: PracticeHand?
+    @State private var didInitializeHand = false
     @EnvironmentObject private var subscription: SubscriptionStore
     let definition: CoreDivisionDefinition
     let attempts: [PracticeAttempt]
     var divisionID: UUID? = nil
     var historicalAttempts: [PracticeAttempt] = []
+    var historicalRange: DateInterval? = nil
     var comparison: [PracticeHand: Double] = [:]
     var isCurrent = true
     var body: some View {
         let completion = CoreTargetCompletion.division(definition: definition, attempts: attempts, isCurrent: isCurrent)
-        let historicalPoints = divisionID.map { PracticeStatisticsEngine.historicalSpeedPoints(
+        let allHistoricalPoints = divisionID.map { PracticeStatisticsEngine.historicalSpeedPoints(
             records: historicalAttempts.map(\.statisticsSnapshot),
             divisionID: $0,
             applicableHands: definition.handMode.hands
         ) } ?? []
+        let historicalPoints = allHistoricalPoints.filter { historicalRange?.contains($0.completedAt) ?? true }
+        let selectedHand = historicalHand ?? (didInitializeHand && (subscription.isPro || previewPro)
+            ? nil : definition.handMode.hands.first)
         let visiblePoints = historicalPoints.filter { point in
-            point.hand == ((subscription.isPro || previewPro)
-                ? historicalHand : definition.handMode.hands.first) ||
-                ((subscription.isPro || previewPro) && historicalHand == nil)
+            selectedHand == nil || point.hand == selectedHand
         }
         Text("历史速度趋势")
             .font(.headline)
-        if subscription.isPro || previewPro, definition.handMode.hands.count > 1 {
+        if definition.handMode.hands.count > 1 {
             Picker("历史手型", selection: $historicalHand) {
-                Text("所有").tag(Optional<PracticeHand>.none)
+                if subscription.isPro || previewPro { Text("所有").tag(Optional<PracticeHand>.none) }
                 ForEach(definition.handMode.hands) { hand in
                     Text(hand.title).tag(Optional(hand))
                 }
             }
             .accessibilityIdentifier("analyze.speed.handFilter")
+            .onAppear {
+                if !didInitializeHand {
+                    historicalHand = definition.handMode.hands.first
+                    didInitializeHand = true
+                }
+            }
         }
         if visiblePoints.isEmpty {
             Text("暂无可核验的历史速度点")
@@ -1279,9 +1732,9 @@ struct CoreDivisionAnalysis: View {
         }
         Text("历史速度点仅表示已保存的实际记录，不改变当前目标或稳定速度。")
             .font(.caption).foregroundStyle(.secondary)
+        if isCurrent {
         Text("当前目标完成度仅表示已达到当前配置的目标，不代表演奏质量。")
             .font(.caption).foregroundStyle(.secondary)
-        if !isCurrent { Text("此曲目不参与当前目标完成度计算。") }
         if attempts.isEmpty { Text("暂无已保存的计划练习") }
         ForEach(definition.handMode.hands) { hand in
             VStack(alignment: .leading, spacing: 8) {
@@ -1332,7 +1785,10 @@ struct CoreDivisionAnalysis: View {
             if previewPro { Text("仅此 Debug 界面的验收预览；不代表购买或解锁 Pro。").font(.caption).foregroundStyle(.secondary) }
 #endif
         }
-        Text("已保存练习：\(attempts.count)").font(.caption)
+        } else {
+            Text("此曲目已归档；仅显示合法历史记录，不生成当前目标或弱项诊断。")
+                .font(.caption).foregroundStyle(.secondary)
+        }
     }
     private func format(_ value: Double) -> String { value.formatted(.number.precision(.fractionLength(0...1))) }
 }

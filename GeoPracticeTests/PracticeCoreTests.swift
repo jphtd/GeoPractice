@@ -669,6 +669,232 @@ final class PracticeCoreE2ETests: XCTestCase {
         XCTAssertEqual(PracticeStatisticsEngine.pieceDuration(records: records.filter { $0.sourceEventID == divisionB.id }).exactMilliseconds, 10_000)
     }
 
+    func testAnalyzeRangeClipsVerifiedCrossSourceIntervalsAndKeepsPieceAttribution() throws {
+        let store = try container(), context = store.mainContext
+        let (pieceA, divisionA) = try makeDivision(context, handMode: .left)
+        let (pieceB, divisionB) = try makeDivision(context, handMode: .left)
+        let planned = CoreSessionRuntime(defaults: defaults())
+        try planned.begin(piece: pieceA, division: divisionA, initialHand: .left, at: start, calendar: calendar)
+        planned.synchronizePlayback(isPlaying: true, at: start)
+        planned.record(preset: preset(80), at: start.addingTimeInterval(2))
+        planned.finish(at: start.addingTimeInterval(10))
+        _ = try planned.save(division: divisionA, in: context)
+        let independent = CoreSessionRuntime(defaults: defaults(), restore: false)
+        independent.selectIndependentHand(.left)
+        XCTAssertTrue(independent.startIndependentPlayback(at: start.addingTimeInterval(5), using: { true }))
+        independent.recordIndependent(preset: preset(90), at: start.addingTimeInterval(7))
+        _ = try independent.saveIndependent(piece: pieceB, division: divisionB, in: context,
+                                            at: start.addingTimeInterval(15))
+        let records = try context.fetch(FetchDescriptor<PracticeAttempt>()).map(\.statisticsSnapshot)
+        let range = DateInterval(start: start.addingTimeInterval(5), end: start.addingTimeInterval(12))
+        let global = PracticeStatisticsEngine.duration(records: records, interval: range, deduplicate: true)
+        XCTAssertEqual(global.exactMilliseconds, 7_000)
+        XCTAssertEqual(global.removedOverlapMilliseconds, 5_000)
+        XCTAssertEqual(PracticeStatisticsEngine.duration(records: records.filter { $0.sourceEventID == divisionA.id },
+                                                        interval: range, deduplicate: false).exactMilliseconds, 5_000)
+        XCTAssertEqual(PracticeStatisticsEngine.duration(records: records.filter { $0.sourceEventID == divisionB.id },
+                                                        interval: range, deduplicate: false).exactMilliseconds, 7_000)
+        XCTAssertEqual(CoreAnalysis.planned(try context.fetch(FetchDescriptor<PracticeAttempt>()), division: divisionA.id).count, 1)
+    }
+
+    func testAnalyzeRangeDistinguishesNoRecordsFromUnverifiableLegacyTime() {
+        let legacy = PracticeHistoryRecordSnapshot(id: UUID(), sourceEventID: UUID(), eventNameSnapshot: "旧记录",
+            startedAt: start, finishedAt: start.addingTimeInterval(10), leftCount: 1, rightCount: 0,
+            bothCount: 0, leftDurationMilliseconds: 5_000, rightDurationMilliseconds: 0,
+            bothDurationMilliseconds: 0)
+        let overlapping = DateInterval(start: start, end: start.addingTimeInterval(10))
+        XCTAssertEqual(PracticeStatisticsEngine.duration(records: [legacy], interval: overlapping,
+                                                        deduplicate: true).state, .unverifiable)
+        let empty = DateInterval(start: start.addingTimeInterval(20), end: start.addingTimeInterval(30))
+        XCTAssertEqual(PracticeStatisticsEngine.duration(records: [legacy], interval: empty,
+                                                        deduplicate: true).state, .noRecords)
+    }
+
+    func testAnalyzePresetUsesLocalCalendarBoundaries() {
+        var selection = AnalyzeSelection()
+        selection.preset = .sevenDays
+        let interval = selection.interval(now: start, calendar: calendar)
+        XCTAssertEqual(interval?.duration, 7 * 86_400)
+        selection.preset = .custom
+        selection.start = start.addingTimeInterval(4 * 86_400)
+        selection.end = start
+        XCTAssertEqual(selection.interval(now: start, calendar: calendar)?.duration, 5 * 86_400)
+        selection.preset = .all
+        XCTAssertNil(selection.interval(now: start, calendar: calendar))
+    }
+
+    func testAnalyzeFocusClipsVerifiedTimeAndKeepsLegacyUnknown() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, division) = try makeDivision(context, handMode: .left)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: start,
+                          calendar: calendar, focusEnabled: true)
+        runtime.synchronizePlayback(isPlaying: true, at: start)
+        runtime.record(preset: preset(90), at: start.addingTimeInterval(2))
+        runtime.finish(at: start.addingTimeInterval(10))
+        let saved = try runtime.save(division: division, in: context)
+        let range = DateInterval(start: start.addingTimeInterval(5), end: start.addingTimeInterval(8))
+        XCTAssertEqual(AnalyzeFocus.duration(attempts: [saved], interval: range), 3_000)
+        var legacy = PracticeSession()
+        legacy.begin(sourceEventID: division.id, at: start)
+        legacy.recordCompletion(for: .left, preset: preset(80), at: start.addingTimeInterval(1))
+        let unknown = PracticeAttempt(eventID: division.id, summary: try XCTUnwrap(legacy.finish(at: start.addingTimeInterval(10))))
+        XCTAssertNil(AnalyzeFocus.duration(attempts: [saved, unknown], interval: range))
+    }
+
+    func testAnalyzeGlobalAndDivisionRenderForFreeProAndLargeType() async throws {
+        let store = try container(), context = store.mainContext
+        let (piece, division) = try makeDivision(context, handMode: .left)
+        for (name, pro, large, scope) in [
+            ("Free-Global", false, false, CoreAnalyzeContext.overall),
+            ("Pro-Global", true, false, CoreAnalyzeContext.overall),
+            ("Free-Large-Division", false, true, CoreAnalyzeContext.division(piece: piece.id, division: division.id))
+        ] {
+            let defaults = defaults()
+            defaults.set(pro, forKey: "rovia.debug.testProEnabled")
+            let subscription = SubscriptionStore(observesTransactions: false, defaults: defaults)
+            let host = UIHostingController(rootView: NavigationStack {
+                CoreAnalyzeView(scope: scope)
+            }.modelContainer(store).environmentObject(subscription)
+                .environment(\.dynamicTypeSize, large ? .accessibility3 : .large))
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: large ? 320 : 390, height: 900))
+            window.rootViewController = host; window.makeKeyAndVisible()
+            try await Task.sleep(for: .milliseconds(180))
+            host.view.layoutIfNeeded()
+            let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+                host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "Phase02E-Analyze-\(name)"; attachment.lifetime = .keepAlways
+            add(attachment)
+            XCTAssertGreaterThan(image.size.width, 0)
+            window.isHidden = true
+        }
+    }
+
+    func testAnalyzeDurationDisclosureWhenPracticeDaysAreVerified() async throws {
+        let store = try container(), context = store.mainContext
+        let (piece, division) = try makeDivision(context, handMode: .left)
+        let began = Calendar.current.startOfDay(for: .now).addingTimeInterval(12 * 3_600)
+        let legacy = PracticeAttempt(eventID: division.id, summary: PracticeSessionSummary(
+            startedAt: began, finishedAt: began.addingTimeInterval(10),
+            left: HandPracticeStats(count: 1, durationMilliseconds: 5_000)))
+        context.insert(legacy)
+        try context.save()
+        let records = [legacy.statisticsSnapshot]
+        XCTAssertEqual(PracticeStatisticsEngine.practiceDays(records: records).state, .verified)
+        XCTAssertEqual(PracticeStatisticsEngine.duration(records: records, interval: nil, deduplicate: true).state, .unverifiable)
+        let subscription = SubscriptionStore(observesTransactions: false, defaults: defaults())
+        var selection = AnalyzeSelection(); selection.preset = .all
+        for (name, view) in [
+            ("Global", AnyView(CoreAnalyzeView(scope: .overall))),
+            ("Piece", AnyView(CoreAnalyzeView(scope: .piece(piece.id)))),
+            ("Division", AnyView(CoreAnalyzeView(scope: .division(piece: piece.id, division: division.id)))),
+            ("Piece-Ranking", AnyView(CoreAnalyzeRankingView(songs: [piece], events: [division],
+                                                        attempts: [legacy], selection: .constant(selection))))
+        ] {
+            let host = UIHostingController(rootView: NavigationStack { view }
+                .modelContainer(store).environmentObject(subscription))
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 1100))
+            window.rootViewController = host; window.makeKeyAndVisible()
+            try await Task.sleep(for: .milliseconds(180))
+            host.view.layoutIfNeeded()
+            let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+                host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "BUG-ANA-02E-01-\(name)"; attachment.lifetime = .keepAlways
+            add(attachment)
+            XCTAssertGreaterThan(image.size.width, 0)
+            window.isHidden = true
+        }
+    }
+
+    func testAnalyzeShareReceiptRendersWithoutInventingComposerMap() async throws {
+        let store = try container()
+        let defaults = defaults()
+        defaults.set(true, forKey: "rovia.debug.testProEnabled")
+        let subscription = SubscriptionStore(observesTransactions: false, defaults: defaults)
+        let host = UIHostingController(rootView: NavigationStack { CoreAnalyzeShareView() }
+            .modelContainer(store).environmentObject(subscription))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 900))
+        window.rootViewController = host; window.makeKeyAndVisible()
+        try await Task.sleep(for: .milliseconds(180))
+        host.view.layoutIfNeeded()
+        let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+            host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "Phase02E-Share-Receipt"; attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertGreaterThan(image.size.width, 0)
+        window.isHidden = true
+    }
+
+    func testAnalyzeShareReceiptRendersSavedRecordAndImageAction() async throws {
+        let store = try container(), context = store.mainContext
+        let (piece, division) = try makeDivision(context, handMode: .left)
+        let now = Date().addingTimeInterval(-30)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: now,
+                          calendar: .current)
+        runtime.synchronizePlayback(isPlaying: true, at: now)
+        runtime.record(preset: preset(90), at: now.addingTimeInterval(2))
+        runtime.finish(at: now.addingTimeInterval(10))
+        _ = try runtime.save(division: division, in: context)
+        let subscription = SubscriptionStore(observesTransactions: false, defaults: defaults())
+        let host = UIHostingController(rootView: NavigationStack { CoreAnalyzeShareView() }
+            .modelContainer(store).environmentObject(subscription))
+        let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 900))
+        window.rootViewController = host; window.makeKeyAndVisible()
+        try await Task.sleep(for: .milliseconds(180))
+        host.view.layoutIfNeeded()
+        let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+            host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+        }
+        let attachment = XCTAttachment(image: image)
+        attachment.name = "Phase02E-Share-Saved-Receipt"; attachment.lifetime = .keepAlways
+        add(attachment)
+        XCTAssertGreaterThan(image.size.width, 0)
+        window.isHidden = true
+    }
+
+    func testAnalyzeTrendAndPieceRankingRenderSavedHistory() async throws {
+        let store = try container(), context = store.mainContext
+        let (piece, division) = try makeDivision(context, handMode: .left)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: start,
+                          calendar: calendar)
+        runtime.synchronizePlayback(isPlaying: true, at: start)
+        runtime.record(preset: preset(90), at: start.addingTimeInterval(2))
+        runtime.finish(at: start.addingTimeInterval(10))
+        _ = try runtime.save(division: division, in: context)
+        let attempts = try context.fetch(FetchDescriptor<PracticeAttempt>())
+        var selection = AnalyzeSelection()
+        selection.preset = .all
+        let subscription = SubscriptionStore(observesTransactions: false, defaults: defaults())
+        for (name, view) in [
+            ("Trend", AnyView(CorePracticeTrendView(attempts: attempts, selection: .constant(selection)))),
+            ("Ranking", AnyView(CoreAnalyzeRankingView(songs: [piece], events: [division],
+                                                       attempts: attempts, selection: .constant(selection))))
+        ] {
+            let host = UIHostingController(rootView: NavigationStack { view }
+                .modelContainer(store).environmentObject(subscription))
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 900))
+            window.rootViewController = host; window.makeKeyAndVisible()
+            try await Task.sleep(for: .milliseconds(180))
+            host.view.layoutIfNeeded()
+            let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+                host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "Phase02E-\(name)"; attachment.lifetime = .keepAlways
+            add(attachment)
+            XCTAssertGreaterThan(image.size.width, 0)
+            window.isHidden = true
+        }
+    }
+
     func testIndependentDiscardAndInvalidHandDoNotSave() throws {
         let store = try container(), context = store.mainContext
         let (piece, division) = try makeDivision(context, handMode: .left)

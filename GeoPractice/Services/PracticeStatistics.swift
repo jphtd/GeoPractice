@@ -1800,6 +1800,58 @@ enum StatisticsTimelineOrder: Sendable {
 }
 
 enum PracticeStatisticsEngine {
+    /// Historical range projection. Verify each saved clock before clipping it;
+    /// an old aggregate with unknown pauses cannot be treated as exact time.
+    static func duration(
+        records: [PracticeHistoryRecordSnapshot],
+        interval: DateInterval?,
+        deduplicate: Bool
+    ) -> PracticeDurationResult {
+        let relevant = records.filter { record in
+            guard let interval else { return true }
+            return record.startedAt < interval.end && record.finishedAt > interval.start
+                || (record.startedAt == record.finishedAt && interval.contains(record.startedAt))
+        }
+        guard !relevant.isEmpty else { return .noRecords }
+        var segments: [DateInterval] = []
+        var raw: Int64 = 0
+        var incomplete = 0
+        for record in relevant {
+            guard case .success(let verified) = verifiedPracticeIntervals(for: record, calendar: .current),
+                  record.activeIntervals != nil || abs(record.finishedAt.timeIntervalSince(record.startedAt) * 1_000 - Double(record.totalDurationMilliseconds)) <= 5
+            else { incomplete += 1; continue }
+            for value in verified {
+                let start = max(value.start, interval?.start ?? value.start)
+                let end = min(value.end, interval?.end ?? value.end)
+                guard end > start else { continue }
+                let clipped = DateInterval(start: start, end: end)
+                segments.append(clipped)
+                raw = StatisticsMath.saturatedSum([raw, Int64((end.timeIntervalSince(start) * 1_000).rounded())])
+            }
+        }
+        let exact: Int64
+        if deduplicate {
+            var end: Date?
+            var total: Int64 = 0
+            for value in segments.sorted(by: { $0.start < $1.start }) {
+                let newStart = max(value.start, end ?? value.start)
+                if value.end > newStart {
+                    total = StatisticsMath.saturatedSum([total, Int64((value.end.timeIntervalSince(newStart) * 1_000).rounded())])
+                }
+                end = max(end ?? value.end, value.end)
+            }
+            exact = total
+        } else { exact = raw }
+        return PracticeDurationResult(
+            state: incomplete > 0 ? (incomplete == relevant.count ? .unverifiable : .incomplete)
+                : (exact == 0 ? .verifiedZero : .verified),
+            verifiedMilliseconds: exact,
+            exactMilliseconds: incomplete == 0 ? exact : nil,
+            incompleteRecordCount: incomplete,
+            removedOverlapMilliseconds: deduplicate ? max(0, raw - exact) : 0
+        )
+    }
+
     static func historicalSpeedPoints(
         records: [PracticeHistoryRecordSnapshot],
         divisionID: UUID,

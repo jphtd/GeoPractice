@@ -91,7 +91,8 @@ struct PracticeCoreRootView: View {
         }
         .safeAreaInset(edge: .top, spacing: 0) {
             if fixture != nil && !focusSurfaceVisible { Text("Debug 场景 · 数据不持久保存。真实流程测试请关闭启动参数。")
-                .font(.caption).padding(8).frame(maxWidth: .infinity).background(.yellow.opacity(0.15)) }
+                .font(.caption).padding(8).frame(maxWidth: .infinity).background(.yellow.opacity(0.15))
+                .allowsHitTesting(false) }
         }
         .sheet(isPresented: Binding(get: { sheetRoute != nil }, set: { if !$0 { sheetRoute = nil; navigation.cancel() } }), onDismiss: {
             if let route = queuedRoute { queuedRoute = nil; request(route) }

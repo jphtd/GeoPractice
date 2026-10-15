@@ -1,4 +1,5 @@
 import Charts
+import Observation
 import SwiftData
 import SwiftUI
 import UIKit
@@ -1126,6 +1127,10 @@ struct AnalyzeSelection {
     }
 }
 
+@Observable final class AnalyzeRangeStore {
+    var selection = AnalyzeSelection()
+}
+
 enum AnalyzeFocus {
     static func duration(attempts: [PracticeAttempt], interval: DateInterval?) -> Int64? {
         let relevant = attempts.filter { attempt in
@@ -1148,13 +1153,16 @@ struct CoreAnalyzeView: View {
     @Query private var events: [PracticeEvent]
     @Query private var songs: [PracticeSong]
     @Query private var attempts: [PracticeAttempt]
-    @State private var localSelection = AnalyzeSelection()
+    @State private var localRangeStore = AnalyzeRangeStore()
     let scope: CoreAnalyzeContext
-    private var sharedSelection: Binding<AnalyzeSelection>? = nil
-    private var selection: Binding<AnalyzeSelection> { sharedSelection ?? $localSelection }
-    init(scope: CoreAnalyzeContext, sharedSelection: Binding<AnalyzeSelection>? = nil) {
+    private let sharedRangeStore: AnalyzeRangeStore?
+    init(scope: CoreAnalyzeContext, sharedRangeStore: AnalyzeRangeStore? = nil) {
         self.scope = scope
-        self.sharedSelection = sharedSelection
+        self.sharedRangeStore = sharedRangeStore
+    }
+    private var selection: Binding<AnalyzeSelection> {
+        let store = sharedRangeStore ?? localRangeStore
+        return Binding(get: { store.selection }, set: { store.selection = $0 })
     }
     var body: some View {
         let selected = selection.wrappedValue
@@ -1252,7 +1260,8 @@ struct CoreAnalyzeView: View {
                 Section {
                     NavigationLink("练习趋势") { CorePracticeTrendView(attempts: scopedAttempts, selection: selection) }
                     NavigationLink("作曲家与曲目") {
-                        CoreAnalyzeRankingView(songs: songs, events: events, attempts: attempts, selection: selection)
+                        CoreAnalyzeRankingView(songs: songs, events: events, attempts: attempts,
+                                               selection: selection, rangeStore: sharedRangeStore ?? localRangeStore)
                     }
                 }
                 if !subscription.isPro {
@@ -1278,7 +1287,8 @@ struct CoreAnalyzeView: View {
                     NavigationLink("练习划分") {
                         List(filteredEvents) { event in
                             NavigationLink {
-                                CoreAnalyzeView(scope: .division(piece: id, division: event.id), sharedSelection: selection)
+                                CoreAnalyzeView(scope: .division(piece: id, division: event.id),
+                                                sharedRangeStore: sharedRangeStore ?? localRangeStore)
                             } label: {
                                 VStack(alignment: .leading) {
                                     Text(event.name)
@@ -1765,14 +1775,17 @@ struct CoreAnalyzeRankingView: View {
     let events: [PracticeEvent]
     let attempts: [PracticeAttempt]
     @Binding var selection: AnalyzeSelection
+    private let rangeStore: AnalyzeRangeStore?
     @State private var showsComposers = false
     @State private var sortByFocus = true
     init(songs: [PracticeSong], events: [PracticeEvent], attempts: [PracticeAttempt],
-         selection: Binding<AnalyzeSelection>, initiallyShowsComposers: Bool = false) {
+         selection: Binding<AnalyzeSelection>, initiallyShowsComposers: Bool = false,
+         rangeStore: AnalyzeRangeStore? = nil) {
         self.songs = songs
         self.events = events
         self.attempts = attempts
         self._selection = selection
+        self.rangeStore = rangeStore
         self._showsComposers = State(initialValue: initiallyShowsComposers)
     }
     private var interval: DateInterval? { selection.interval(now: .now, calendar: calendar) }
@@ -1838,7 +1851,7 @@ struct CoreAnalyzeRankingView: View {
                     NavigationLink {
                         List(node.pieces.sorted { $0.name < $1.name }) { piece in
                             NavigationLink(piece.name) {
-                                CoreAnalyzeView(scope: .piece(piece.id), sharedSelection: $selection)
+                                CoreAnalyzeView(scope: .piece(piece.id), sharedRangeStore: rangeStore)
                             }
                         }.navigationTitle(node.name)
                     } label: {
@@ -1851,7 +1864,7 @@ struct CoreAnalyzeRankingView: View {
             } else {
                 ForEach(orderedPieces) { piece in
                     NavigationLink {
-                        CoreAnalyzeView(scope: .piece(piece.id), sharedSelection: $selection)
+                        CoreAnalyzeView(scope: .piece(piece.id), sharedRangeStore: rangeStore)
                     } label: {
                         VStack(alignment: .leading) {
                             Text(piece.name)

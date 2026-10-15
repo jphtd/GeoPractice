@@ -113,12 +113,12 @@ struct CoreFixture {
             })
             event.coreDefinitionData = try JSONEncoder().encode(definition)
         }
-        if name == "ladder-history" {
+        if name == "ladder-history" || name == "analyze-integration" {
             // Explicit isolated QA facts, never inferred from ordinary recordings.
             let goal = CoreGoal(hands: [.both: CoreHandGoal(speed: CoreTargetSpeed(bpm: 108),
                 ladder: CoreLadderConfiguration(startBPM: 100, stepBPM: 3, repsPerLevel: 2))],
                 ladderEnabled: true, reset: CoreResetConfiguration())
-            let date = Date.now.addingTimeInterval(-60)
+            let date = Date.now.addingTimeInterval(name == "analyze-integration" ? -10 * 86_400 : -60)
             let state = CoreLadderState(cycleStart: Calendar.current.startOfDay(for: date), cycleStartBPM: 100,
                 currentBPM: 103, repsCompleted: 1, noteUnit: .quarter, firstValidRecordAt: date, previousValidBPM: 103)
             event.coreDefinitionData = try JSONEncoder().encode(CoreDivisionDefinition(first: 3, last: 3, handMode: .both,
@@ -144,7 +144,7 @@ struct CoreFixture {
         try context.save()
         switch name {
         case "piece", "global-ladder": return CoreFixture(path: [.piece(piece.id)])
-        case "no-goal", "valid-goal", "long", "only-left", "only-right", "only-together", "ladder-history", "ladder-execution", "ladder-open", "ladder-short", "ladder-cycle", "node4-exit":
+        case "no-goal", "valid-goal", "long", "only-left", "only-right", "only-together", "ladder-history", "analyze-integration", "ladder-execution", "ladder-open", "ladder-short", "ladder-cycle", "node4-exit":
             return CoreFixture(path: [.piece(piece.id)])
         case "recovery":
             return CoreFixture(recovery: CoreRecovery(sessionID: UUID(), divisionID: event.id, pieceName: piece.name, divisionName: event.name))

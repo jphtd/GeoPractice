@@ -8,6 +8,8 @@ struct PracticeCoreRootView: View {
     @StateObject private var settings: CorePracticeSettings
     @StateObject private var navigation = CoreNavigation()
     @State private var boundaryMessage: String?
+    @State private var editingComposerID: UUID?
+    @State private var composerDraft = ""
     @State private var recovery: CoreRecovery?
     @State private var pendingLegacySession = false
     @EnvironmentObject private var subscription: SubscriptionStore
@@ -295,6 +297,10 @@ struct PracticeCoreRootView: View {
             HStack(spacing: 0) {
                 CorePageHeader(title: "曲目详情", back: back)
                 Menu {
+                    Button("编辑作曲家") {
+                        composerDraft = piece.composerText ?? ""
+                        editingComposerID = piece.id
+                    }
                     CorePieceActions(piece: piece, onRoute: request)
                 } label: {
                     Image(systemName: "ellipsis").frame(width: 44, height: 44)
@@ -303,6 +309,10 @@ struct PracticeCoreRootView: View {
             VStack(alignment: .leading, spacing: 0) {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(piece.name).coreType(.titleLarge).accessibilityAddTraits(.isHeader)
+                    Text(piece.composerText.flatMap {
+                        $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0
+                    } ?? "未填写作曲家")
+                        .coreType(.caption).foregroundStyle(CorePalette.secondary)
                     Text(structure.label).coreType(.body).foregroundStyle(CorePalette.secondary)
                 }
                 if let saved = savedFocusSummary, saved.piece == piece.id {
@@ -327,6 +337,17 @@ struct PracticeCoreRootView: View {
                     }
                 }.padding(.top, 32)
             }.padding(.top, 20)
+        }.alert("作曲家", isPresented: Binding(get: { editingComposerID == piece.id },
+                                            set: { if !$0 { editingComposerID = nil } })) {
+            TextField("作曲家（可选）", text: $composerDraft)
+            Button("保存") {
+                do { try CoreContracts.updateComposer(piece: piece, text: composerDraft, context: modelContext) }
+                catch { boundaryMessage = error.localizedDescription }
+                editingComposerID = nil
+            }
+            Button("取消", role: .cancel) { editingComposerID = nil }
+        } message: {
+            Text("保留输入原文；只有唯一匹配的目录名称或别名才会关联规范身份。")
         }
     }
 

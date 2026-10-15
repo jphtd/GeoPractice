@@ -504,15 +504,34 @@ enum CoreContracts {
         }
     }
     static func savePiece(name: String, structure: CorePieceStructure, context: ModelContext,
-                          activeSessionID: UUID?) throws -> PracticeSong {
+                          activeSessionID: UUID?, composer: String = "") throws -> PracticeSong {
         guard activeSessionID == nil else { throw CoreIntegrationError.activeSession }
         let name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !name.isEmpty, structure.isValid else { throw CoreFlowError.invalidInput("请填写曲目名称，并检查总数是否为正整数。") }
         let piece = PracticeSong(name: name, endDate: .distantFuture)
+        let rawComposer = composer.trimmingCharacters(in: .whitespacesAndNewlines)
+        piece.composerText = rawComposer.isEmpty ? nil : composer
+        piece.composerCanonicalID = LocalComposerCatalog.match(piece.composerText)?.id
         piece.coreStructureData = try JSONEncoder().encode(structure)
         context.insert(piece)
         do { try context.save() } catch { context.rollback(); throw error }
         return piece
+    }
+
+    static func updateComposer(piece: PracticeSong, text: String, context: ModelContext,
+                               at date: Date = .now) throws {
+        let oldText = piece.composerText, oldID = piece.composerCanonicalID, oldDate = piece.updatedAt
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        piece.composerText = trimmed.isEmpty ? nil : text
+        piece.composerCanonicalID = LocalComposerCatalog.match(piece.composerText)?.id
+        piece.updatedAt = date
+        do { try context.save() }
+        catch {
+            piece.composerText = oldText
+            piece.composerCanonicalID = oldID
+            piece.updatedAt = oldDate
+            throw error
+        }
     }
 
     static func saveGoal(piece: UUID, division: PracticeEvent, goal: CoreGoal,

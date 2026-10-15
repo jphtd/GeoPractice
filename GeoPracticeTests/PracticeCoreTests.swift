@@ -200,6 +200,8 @@ final class PracticeCoreTests: XCTestCase {
     func testBackupRoundTripPreservesExplicitMetadata() throws {
         let db = try container()
         let piece = PracticeSong(name: "A", endDate: .distantFuture)
+        piece.composerText = "德彪西"
+        piece.composerCanonicalID = LocalComposerCatalog.match(piece.composerText)?.id
         piece.coreStructureData = try JSONEncoder().encode(CorePieceStructure(mode: .measures, total: 48))
         let event = PracticeEvent(songID: piece.id, name: "第 1 小节")
         event.coreDefinitionData = try JSONEncoder().encode(CoreDivisionDefinition(first: 1, last: 1, handMode: .left))
@@ -214,7 +216,38 @@ final class PracticeCoreTests: XCTestCase {
         // Restore uses its own context; read a fresh context to avoid stale cache.
         let context = ModelContext(restored)
         XCTAssertEqual(try context.fetch(FetchDescriptor<PracticeSong>()).first?.coreStructureData, piece.coreStructureData)
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PracticeSong>()).first?.composerText, "德彪西")
+        XCTAssertEqual(try context.fetch(FetchDescriptor<PracticeSong>()).first?.composerCanonicalID, "Q4700")
         XCTAssertEqual(try context.fetch(FetchDescriptor<PracticeEvent>()).first?.coreDefinitionData, event.coreDefinitionData)
+        var older = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        var songs = try XCTUnwrap(older["songs"] as? [[String: Any]])
+        for index in songs.indices {
+            songs[index].removeValue(forKey: "composerText")
+            songs[index].removeValue(forKey: "composerCanonicalID")
+        }
+        older["songs"] = songs
+        let legacy = try JSONSerialization.data(withJSONObject: older)
+        let olderStore = try container()
+        try PracticeLibraryStore(modelContext: olderStore.mainContext).restoreBackup(from: legacy)
+        XCTAssertNil(try ModelContext(olderStore).fetch(FetchDescriptor<PracticeSong>()).first?.composerText)
+    }
+
+    func testComposerInputPreservesRawTextAndNeverGuessesUnknown() throws {
+        let db = try container()
+        let known = try CoreContracts.savePiece(name: "已识别", structure: CorePieceStructure(mode: .measures, total: 8),
+            context: db.mainContext, activeSessionID: nil, composer: "  德彪西  ")
+        XCTAssertEqual(known.composerText, "  德彪西  ")
+        XCTAssertEqual(known.composerCanonicalID, "Q4700")
+        let unknown = try CoreContracts.savePiece(name: "未识别", structure: CorePieceStructure(mode: .measures, total: 8),
+            context: db.mainContext, activeSessionID: nil, composer: "Bach")
+        XCTAssertEqual(unknown.composerText, "Bach")
+        XCTAssertNil(unknown.composerCanonicalID)
+        XCTAssertNil(LocalComposerCatalog.resolve(unknown))
+        let editedAt = Date.now.addingTimeInterval(1)
+        try CoreContracts.updateComposer(piece: unknown, text: "Claude Debussy", context: db.mainContext, at: editedAt)
+        XCTAssertEqual(unknown.composerText, "Claude Debussy")
+        XCTAssertEqual(unknown.composerCanonicalID, "Q4700")
+        XCTAssertEqual(unknown.updatedAt, editedAt)
     }
 
     func testCreationAllowsParagraphAndMeasureRangesWithUnassignedGaps() throws {
@@ -893,6 +926,108 @@ final class PracticeCoreE2ETests: XCTestCase {
             XCTAssertGreaterThan(image.size.width, 0)
             window.isHidden = true
         }
+    }
+
+    func testComposerCatalogRankingMapAndUnknownIdentity() async throws {
+        XCTAssertEqual(LocalComposerCatalog.match("Claude Debussy")?.id, "Q4700")
+        XCTAssertEqual(LocalComposerCatalog.match("德彪西")?.id, "Q4700")
+        XCTAssertEqual(LocalComposerCatalog.match("Debussy")?.id, "Q4700")
+        XCTAssertNil(LocalComposerCatalog.match("Bach"))
+        XCTAssertNil(LocalComposerCatalog.match("未知作曲家"))
+        let store = try container(), context = store.mainContext
+        let (first, firstDivision) = try makeDivision(context, handMode: .left)
+        let (second, secondDivision) = try makeDivision(context, handMode: .left)
+        first.composerText = "Claude Debussy"; first.composerCanonicalID = "Q4700"
+        second.composerText = "德彪西"; second.composerCanonicalID = "Q4700"
+        let now = Date().addingTimeInterval(-40)
+        for (piece, division, offset) in [(first, firstDivision, 0.0), (second, secondDivision, 15.0)] {
+            let began = now.addingTimeInterval(offset)
+            let interval = try XCTUnwrap(PracticeDurationInterval(startedAt: began,
+                finishedAt: began.addingTimeInterval(10)))
+            let summary = PracticeSessionSummary(startedAt: began, finishedAt: began.addingTimeInterval(10),
+                left: HandPracticeStats(count: 1, durationMilliseconds: 10_000), activeIntervals: [interval])
+            context.insert(PracticeAttempt(eventID: division.id, summary: summary))
+            XCTAssertNotNil(piece.composerText)
+        }
+        try context.save()
+        let records = try context.fetch(FetchDescriptor<PracticeAttempt>())
+        let nodes = ComposerPracticeAnalysis.nodes(songs: [first, second], events: [firstDivision, secondDivision],
+            attempts: records, interval: nil)
+        XCTAssertEqual(nodes.count, 1)
+        XCTAssertEqual(nodes.first?.id, "Q4700")
+        XCTAssertEqual(nodes.first?.pieceCount, 2)
+        XCTAssertEqual(nodes.first?.practice.exactMilliseconds, 20_000)
+        XCTAssertEqual(nodes.first?.period, "印象主义")
+        let unknown = PracticeSong(name: "未知来源")
+        unknown.composerText = "Bach"
+        let unknownEvent = PracticeEvent(songID: unknown.id, name: "片段")
+        let unknownInterval = try XCTUnwrap(PracticeDurationInterval(startedAt: now,
+            finishedAt: now.addingTimeInterval(5)))
+        context.insert(unknown); context.insert(unknownEvent)
+        context.insert(PracticeAttempt(eventID: unknownEvent.id, summary: PracticeSessionSummary(
+            startedAt: now, finishedAt: now.addingTimeInterval(5),
+            left: HandPracticeStats(durationMilliseconds: 5_000), activeIntervals: [unknownInterval])))
+        let deleted = PracticeSong(name: "已删除")
+        deleted.composerText = "Claude Debussy"; deleted.deletedAt = .now
+        let deletedEvent = PracticeEvent(songID: deleted.id, name: "片段")
+        context.insert(deleted); context.insert(deletedEvent)
+        context.insert(PracticeAttempt(eventID: deletedEvent.id, summary: PracticeSessionSummary(
+            startedAt: now, finishedAt: now.addingTimeInterval(5),
+            left: HandPracticeStats(durationMilliseconds: 5_000), activeIntervals: [unknownInterval])))
+        try context.save()
+        let expanded = ComposerPracticeAnalysis.nodes(songs: [first, second, unknown, deleted],
+            events: [firstDivision, secondDivision, unknownEvent, deletedEvent],
+            attempts: try context.fetch(FetchDescriptor<PracticeAttempt>()), interval: nil)
+        XCTAssertEqual(expanded.count, 2)
+        XCTAssertEqual(expanded.first { $0.id == "Q4700" }?.pieceCount, 2)
+        XCTAssertEqual(expanded.first { $0.name == "Bach" }?.period, "其他 / 未分类")
+        var selection = AnalyzeSelection(); selection.preset = .all
+        for (name, pro, view) in [
+            ("Ranking", true, AnyView(CoreAnalyzeRankingView(songs: [first, second], events: [firstDivision, secondDivision],
+                attempts: records, selection: .constant(selection), initiallyShowsComposers: true))),
+            ("Map-Free", false, AnyView(CoreAnalyzeShareView(initiallyShowsMap: true))),
+            ("Map-Pro", true, AnyView(CoreAnalyzeShareView(initiallyShowsMap: true)))
+        ] {
+            let access = defaults(); access.set(pro, forKey: "rovia.debug.testProEnabled")
+            let subscription = SubscriptionStore(observesTransactions: false, defaults: access)
+            let host = UIHostingController(rootView: NavigationStack { view }
+                .modelContainer(store).environmentObject(subscription))
+            let window = UIWindow(frame: CGRect(x: 0, y: 0, width: 390, height: 950))
+            window.rootViewController = host; window.makeKeyAndVisible()
+            try await Task.sleep(for: .milliseconds(180))
+            host.view.layoutIfNeeded()
+            let image = UIGraphicsImageRenderer(bounds: host.view.bounds).image { _ in
+                host.view.drawHierarchy(in: host.view.bounds, afterScreenUpdates: true)
+            }
+            let attachment = XCTAttachment(image: image)
+            attachment.name = "Phase02F-Composer-\(name)"; attachment.lifetime = .keepAlways
+            add(attachment)
+            XCTAssertGreaterThan(image.size.width, 0)
+            window.isHidden = true
+        }
+    }
+
+    func testComposerMapKeepsRealZeroFocusWithoutPracticeFallback() throws {
+        let store = try container(), context = store.mainContext
+        let (piece, division) = try makeDivision(context, handMode: .left)
+        piece.composerText = "Debussy"; piece.composerCanonicalID = "Q4700"
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: start,
+                          calendar: calendar, focusEnabled: false)
+        runtime.synchronizePlayback(isPlaying: true, at: start)
+        runtime.record(preset: preset(90), at: start.addingTimeInterval(2))
+        runtime.finish(at: start.addingTimeInterval(10))
+        _ = try runtime.save(division: division, in: context)
+        let nodes = ComposerPracticeAnalysis.nodes(songs: [piece], events: [division],
+            attempts: try context.fetch(FetchDescriptor<PracticeAttempt>()), interval: nil)
+        XCTAssertEqual(nodes.first?.practice.exactMilliseconds, 10_000)
+        XCTAssertEqual(nodes.first?.focus, 0)
+        piece.isArchived = true
+        XCTAssertEqual(ComposerPracticeAnalysis.nodes(songs: [piece], events: [division],
+            attempts: try context.fetch(FetchDescriptor<PracticeAttempt>()), interval: nil).count, 1)
+        piece.deletedAt = .now
+        XCTAssertTrue(ComposerPracticeAnalysis.nodes(songs: [piece], events: [division],
+            attempts: try context.fetch(FetchDescriptor<PracticeAttempt>()), interval: nil).isEmpty)
     }
 
     func testIndependentDiscardAndInvalidHandDoNotSave() throws {

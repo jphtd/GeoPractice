@@ -8,6 +8,9 @@ import SwiftData
 final class PracticeSong {
     @Attribute(.unique) var id: UUID
     var name: String
+    /// User input is preserved even when a catalog identity is recognized.
+    var composerText: String?
+    var composerCanonicalID: String?
     /// Explicit v1.1 metadata; nil means unmapped legacy data (SG-04).
     var coreStructureData: Data?
     var group: String
@@ -35,6 +38,8 @@ final class PracticeSong {
     ) {
         self.id = id
         self.name = Self.cleanName(name)
+        self.composerText = nil
+        self.composerCanonicalID = nil
         self.group = Self.cleanGroup(group)
         self.isArchived = isArchived
         // Kept in the persisted schema for compatibility with builds that
@@ -75,6 +80,60 @@ final class PracticeSong {
     private static func cleanGroup(_ value: String) -> String {
         let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
         return cleaned.isEmpty ? "未分组" : cleaned
+    }
+}
+
+/// Small, versioned local catalog. Each identity and period has a cited source;
+/// a missing or ambiguous name never acquires an inferred canonical ID.
+struct LocalComposer: Identifiable, Equatable {
+    let id: String
+    let name: String
+    let localizedName: String
+    let aliases: [String]
+    let birthYear: Int
+    let deathYear: Int
+    let region: String
+    let primaryPeriod: String
+    let periodOrder: Int
+    let periodTags: [String]
+    let sourceURL: String
+}
+
+enum LocalComposerCatalog {
+    static let entries: [LocalComposer] = [
+        LocalComposer(id: "Q1339", name: "Johann Sebastian Bach", localizedName: "约翰·塞巴斯蒂安·巴赫",
+                      aliases: ["J. S. Bach", "JS Bach"], birthYear: 1685, deathYear: 1750,
+                      region: "神圣罗马帝国", primaryPeriod: "巴洛克", periodOrder: 1, periodTags: [],
+                      sourceURL: "https://www.wikidata.org/wiki/Q1339"),
+        LocalComposer(id: "Q254", name: "Wolfgang Amadeus Mozart", localizedName: "沃尔夫冈·阿玛多伊斯·莫扎特",
+                      aliases: [], birthYear: 1756, deathYear: 1791,
+                      region: "萨尔茨堡 / 维也纳", primaryPeriod: "古典主义", periodOrder: 2, periodTags: [],
+                      sourceURL: "https://www.wikidata.org/wiki/Q254"),
+        LocalComposer(id: "Q4700", name: "Claude Debussy", localizedName: "克洛德·德彪西",
+                      aliases: ["Debussy", "德彪西", "Claude-Achille Debussy"], birthYear: 1862, deathYear: 1918,
+                      region: "法国", primaryPeriod: "印象主义", periodOrder: 3, periodTags: [],
+                      sourceURL: "https://www.wikidata.org/wiki/Q4700")
+    ]
+
+    static func match(_ text: String?) -> LocalComposer? {
+        guard let text, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+        let key = normalized(text)
+        let matches = entries.filter { entry in
+            ([entry.name, entry.localizedName] + entry.aliases).contains { normalized($0) == key }
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
+    static func resolve(_ piece: PracticeSong) -> LocalComposer? {
+        guard let matched = match(piece.composerText) else { return nil }
+        return piece.composerCanonicalID == nil || piece.composerCanonicalID == matched.id ? matched : nil
+    }
+
+    private static func normalized(_ text: String) -> String {
+        text.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive], locale: Locale(identifier: "en_US_POSIX"))
+            .replacingOccurrences(of: ".", with: "")
+            .replacingOccurrences(of: " ", with: "")
     }
 }
 
@@ -1820,6 +1879,8 @@ private struct PracticeLibraryBackupDocument: Codable {
     struct Song: Codable {
         let id: UUID
         let name: String
+        let composerText: String?
+        let composerCanonicalID: String?
         let coreStructureData: Data?
         let group: String
         let isArchived: Bool
@@ -1834,6 +1895,8 @@ private struct PracticeLibraryBackupDocument: Codable {
         init(_ value: PracticeSong) {
             id = value.id
             name = value.name
+            composerText = value.composerText
+            composerCanonicalID = value.composerCanonicalID
             coreStructureData = value.coreStructureData
             group = value.group
             isArchived = value.isArchived
@@ -1861,6 +1924,8 @@ private struct PracticeLibraryBackupDocument: Codable {
             )
             value.deletedAt = deletedAt
             value.coreStructureData = coreStructureData
+            value.composerText = composerText
+            value.composerCanonicalID = composerCanonicalID
             return value
         }
 
@@ -1869,6 +1934,8 @@ private struct PracticeLibraryBackupDocument: Codable {
             value.coreStructureData = coreStructureData
             value.id = id
             value.name = name
+            value.composerText = composerText
+            value.composerCanonicalID = composerCanonicalID
             value.group = group
             value.isArchived = isArchived
             value.multiplier = 1

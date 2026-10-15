@@ -16,6 +16,7 @@ struct CoreEditorView: View {
     let onSaved: (CorePage) -> Void
     var onRoute: (CoreRoute) -> Void = { _ in }
     @State private var name = ""
+    @State private var composer = ""
     @State private var mode = CoreDivisionMode.measures
     @State private var total = ""
     @State private var first = ""
@@ -83,6 +84,7 @@ struct CoreEditorView: View {
                 case .addPiece:
                     Section("曲目") {
                         TextField("曲目名称", text: $name).accessibilityIdentifier("core.piece.name")
+                        TextField("作曲家（可选）", text: $composer).accessibilityIdentifier("core.piece.composer")
                         Picker("划分方式", selection: $mode) {
                             ForEach(CoreDivisionMode.allCases, id: \.self) { Text($0.label).tag($0) }
                         }
@@ -451,7 +453,8 @@ struct CoreEditorView: View {
             switch route {
             case .addPiece:
                 let structure = CorePieceStructure(mode: mode, total: try optionalPositive(total, label: "总数"))
-                let song = try CoreContracts.savePiece(name: name, structure: structure, context: modelContext, activeSessionID: activeSessionID)
+                let song = try CoreContracts.savePiece(name: name, structure: structure, context: modelContext,
+                                                       activeSessionID: activeSessionID, composer: composer)
                 onSaved(.piece(song.id))
             case .createDivision:
                 guard let piece, let first = try optionalPositive(first, label: "起始位置"),
@@ -1316,7 +1319,7 @@ struct CoreAnalyzeView: View {
             .toolbar {
                 if case .overall = scope {
                     ToolbarItem(placement: .topBarTrailing) {
-                        NavigationLink("分享") { CoreAnalyzeShareView() }
+                        NavigationLink("分享") { CoreAnalyzeShareView(initialMapSelection: selection.wrappedValue) }
                             .accessibilityIdentifier("analyze.share")
                     }
                 }
@@ -1407,6 +1410,112 @@ struct CoreAnalyzeView: View {
     }
 }
 
+struct ComposerPracticeNode: Identifiable {
+    let id: String
+    let name: String
+    let composer: LocalComposer?
+    let pieces: [PracticeSong]
+    let practice: PracticeDurationResult
+    let focus: Int64?
+    var period: String { composer?.primaryPeriod ?? "其他 / 未分类" }
+    var periodOrder: Int { composer?.periodOrder ?? 999 }
+    var pieceCount: Int { pieces.count }
+}
+
+enum ComposerPracticeAnalysis {
+    static func nodes(songs: [PracticeSong], events: [PracticeEvent], attempts: [PracticeAttempt],
+                      interval: DateInterval?) -> [ComposerPracticeNode] {
+        let valid = songs.filter { $0.deletedAt == nil }
+        let eventIDs = Dictionary(uniqueKeysWithValues: events.compactMap { event -> (UUID, UUID)? in
+            guard let pieceID = event.songID, valid.contains(where: { $0.id == pieceID }) else { return nil }
+            return (event.id, pieceID)
+        })
+        let relevant = attempts.filter { attempt in
+            eventIDs[attempt.eventID] != nil && (interval.map {
+                attempt.startedAt < $0.end && attempt.finishedAt > $0.start
+                    || (attempt.startedAt == attempt.finishedAt && $0.contains(attempt.startedAt))
+            } ?? true)
+        }
+        let practicedIDs = Set(relevant.compactMap { eventIDs[$0.eventID] })
+        let practiced = valid.filter { practicedIDs.contains($0.id) }
+        let groups = Dictionary(grouping: practiced) { piece -> String in
+            if let composer = LocalComposerCatalog.resolve(piece) { return composer.id }
+            guard let raw = piece.composerText?.trimmingCharacters(in: .whitespacesAndNewlines), !raw.isEmpty else {
+                return "missing"
+            }
+            return "user:\(raw)"
+        }
+        return groups.map { key, pieces in
+            let composer = pieces.first.flatMap(LocalComposerCatalog.resolve)
+            let name = composer?.localizedName ?? (key == "missing" ? "未填写作曲家" : String(key.dropFirst(5)))
+            let IDs = Set(pieces.map(\.id))
+            let records = relevant.filter { eventIDs[$0.eventID].map(IDs.contains) == true }
+            return ComposerPracticeNode(id: key, name: name, composer: composer, pieces: pieces,
+                practice: PracticeStatisticsEngine.duration(records: records.map(\.statisticsSnapshot),
+                                                            interval: interval, deduplicate: false),
+                focus: AnalyzeFocus.duration(attempts: records, interval: interval))
+        }.sorted { left, right in
+            left.periodOrder == right.periodOrder ? left.name < right.name : left.periodOrder < right.periodOrder
+        }
+    }
+}
+
+private struct ComposerMapCard: View {
+    let nodes: [ComposerPracticeNode]
+    let range: String
+    let byFocus: Bool
+    let interactive: Bool
+    let selected: (ComposerPracticeNode) -> Void
+    private var maxWeight: Int64 {
+        max(1, nodes.compactMap { byFocus ? $0.focus : $0.practice.exactMilliseconds }.max() ?? 1)
+    }
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("作曲家地图").font(.title2.bold())
+            Text("\(range) · \(byFocus ? "专注时长" : "练习时长")").font(.caption).foregroundStyle(.secondary)
+            Text("\(nodes.count) 位作曲家 / \(Set(nodes.flatMap { $0.pieces.map(\.id) }).count) 首曲目")
+                .font(.caption).foregroundStyle(.secondary)
+            if interactive {
+                Text("横向：0 – \(maxWeight / 1_000) 秒")
+                    .font(.caption2).foregroundStyle(.secondary)
+            }
+            ForEach(Array(Dictionary(grouping: nodes, by: \.period).keys).sorted { left, right in
+                let a = nodes.first { $0.period == left }?.periodOrder ?? 999
+                let b = nodes.first { $0.period == right }?.periodOrder ?? 999
+                return a == b ? left < right : a < b
+            }, id: \.self) { period in
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(period).font(.caption.bold()).foregroundStyle(.secondary)
+                    ForEach(nodes.filter { $0.period == period }) { node in
+                        GeometryReader { geometry in
+                            let weight = byFocus ? node.focus : node.practice.exactMilliseconds
+                            let x = CGFloat(weight ?? 0) / CGFloat(maxWeight) * max(0, geometry.size.width - 115)
+                            HStack(spacing: 6) {
+                                if weight != nil {
+                                    Circle().fill(.tint).frame(width: CGFloat(12 + min(16, node.pieceCount * 4)),
+                                                               height: CGFloat(12 + min(16, node.pieceCount * 4)))
+                                }
+                                Text(node.name).font(.caption).lineLimit(2)
+                                if weight == nil { Text("N/A").font(.caption2).foregroundStyle(.secondary) }
+                            }
+                            .offset(x: weight == nil ? 0 : x)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .contentShape(Rectangle())
+                            .onTapGesture { if interactive { selected(node) } }
+                            .accessibilityLabel("\(node.name)，\(node.pieceCount) 首曲目，\(weight.map { "\($0 / 1_000) 秒" } ?? "数据不完整")")
+                        }.frame(height: 38)
+                    }
+                }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+            }
+            Text("节点大小表示曲目数；横向位置表示投入时长。")
+                .font(.caption2).foregroundStyle(.secondary)
+        }.padding(20).frame(width: 360, alignment: .leading)
+            .background(Color(uiColor: .systemBackground))
+            .accessibilityElement(children: .contain)
+    }
+}
+
 struct CoreAnalyzeShareView: View {
     @Environment(\.calendar) private var calendar
     @EnvironmentObject private var subscription: SubscriptionStore
@@ -1414,8 +1523,15 @@ struct CoreAnalyzeShareView: View {
     @Query private var events: [PracticeEvent]
     @Query private var attempts: [PracticeAttempt]
     @State private var showsMap = false
+    @State private var mapSelection = AnalyzeSelection()
+    @State private var mapByFocus = true
+    @State private var selectedComposer: ComposerPracticeNode?
     @State private var period: StatisticsPeriod = .day
     @State private var date = Date()
+    init(initiallyShowsMap: Bool = false, initialMapSelection: AnalyzeSelection = AnalyzeSelection()) {
+        _showsMap = State(initialValue: initiallyShowsMap)
+        _mapSelection = State(initialValue: initialMapSelection)
+    }
     private var interval: DateInterval {
         PracticeStatisticsEngine.periodInterval(for: period, anchorDate: date, calendar: calendar)
     }
@@ -1441,6 +1557,22 @@ struct CoreAnalyzeShareView: View {
             savedRecords.contains { $0.eventID == event.id && $0.startedAt < interval.end && $0.finishedAt > interval.start }
         }.map(\.songID))
         return songs.filter { ids.contains($0.id) && $0.deletedAt == nil }.sorted { $0.name < $1.name }
+    }
+    private var mapNodes: [ComposerPracticeNode] {
+        ComposerPracticeAnalysis.nodes(songs: songs, events: events, attempts: attempts,
+            interval: mapSelection.interval(now: .now, calendar: calendar))
+    }
+    private var mapCard: some View {
+        ComposerMapCard(nodes: mapNodes, range: mapSelection.preset.title,
+                        byFocus: subscription.isPro && mapByFocus, interactive: true,
+                        selected: { selectedComposer = $0 })
+    }
+    private var mapImage: Image? {
+        let renderer = ImageRenderer(content: ComposerMapCard(nodes: mapNodes,
+            range: mapSelection.preset.title, byFocus: subscription.isPro && mapByFocus,
+            interactive: false, selected: { _ in }))
+        renderer.scale = 2
+        return renderer.uiImage.map(Image.init(uiImage:))
     }
     private var receiptCard: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1478,8 +1610,28 @@ struct CoreAnalyzeShareView: View {
                 Text("作曲家地图").tag(true)
             }.pickerStyle(.segmented)
             if showsMap {
-                Text("暂无可核验的作曲家资料，无法生成作曲家地图。")
-                    .foregroundStyle(.secondary)
+                Picker("地图范围", selection: $mapSelection.preset) {
+                    ForEach([AnalyzePreset.today, .sevenDays, .thirtyDays, .all]) { value in
+                        Text(value.title).tag(value)
+                    }
+                }.pickerStyle(.segmented)
+                if subscription.isPro {
+                    Picker("地图时长", selection: $mapByFocus) {
+                        Text("专注时长").tag(true)
+                        Text("练习时长").tag(false)
+                    }.pickerStyle(.segmented)
+                }
+                if mapNodes.isEmpty {
+                    Text("所选范围没有可用于地图的已保存练习记录。")
+                        .foregroundStyle(.secondary)
+                } else {
+                    mapCard.accessibilityIdentifier("analyze.map.preview")
+                    if let mapImage {
+                        ShareLink(item: mapImage, preview: SharePreview("Rovia 作曲家地图", image: mapImage)) {
+                            Text("分享图片")
+                        }.accessibilityIdentifier("analyze.map.share")
+                    }
+                }
             } else {
                 Picker("小票周期", selection: $period) {
                     Text("日").tag(StatisticsPeriod.day)
@@ -1502,6 +1654,20 @@ struct CoreAnalyzeShareView: View {
                 }
             }
         }.navigationTitle("分享")
+            .sheet(item: $selectedComposer) { node in
+                NavigationStack {
+                    List {
+                        LabeledContent("时期", value: node.period)
+                        LabeledContent("练习曲目", value: "\(node.pieceCount) 首")
+                        LabeledContent("练习时长", value: node.practice.exactMilliseconds.map { "\($0 / 1_000) 秒" } ?? "N/A")
+                        if subscription.isPro {
+                            LabeledContent("专注时长", value: node.focus.map { "\($0 / 1_000) 秒" } ?? "N/A")
+                        }
+                        ForEach(node.pieces.sorted { $0.name < $1.name }) { piece in Text(piece.name) }
+                    }.navigationTitle(node.name)
+                        .toolbar { Button("完成") { selectedComposer = nil } }
+                }
+            }
     }
 }
 
@@ -1601,6 +1767,14 @@ struct CoreAnalyzeRankingView: View {
     @Binding var selection: AnalyzeSelection
     @State private var showsComposers = false
     @State private var sortByFocus = true
+    init(songs: [PracticeSong], events: [PracticeEvent], attempts: [PracticeAttempt],
+         selection: Binding<AnalyzeSelection>, initiallyShowsComposers: Bool = false) {
+        self.songs = songs
+        self.events = events
+        self.attempts = attempts
+        self._selection = selection
+        self._showsComposers = State(initialValue: initiallyShowsComposers)
+    }
     private var interval: DateInterval? { selection.interval(now: .now, calendar: calendar) }
     private func records(for piece: PracticeSong) -> [PracticeAttempt] {
         let ids = Set(events.filter { $0.songID == piece.id }.map(\.id))
@@ -1620,6 +1794,22 @@ struct CoreAnalyzeRankingView: View {
             if a != b { return (a ?? -1) > (b ?? -1) }
             return left.name < right.name
         }
+    }
+    private var orderedComposers: [ComposerPracticeNode] {
+        ComposerPracticeAnalysis.nodes(songs: songs, events: events, attempts: attempts, interval: interval)
+            .sorted { left, right in
+                let a = subscription.isPro && sortByFocus ? left.focus : left.practice.exactMilliseconds
+                let b = subscription.isPro && sortByFocus ? right.focus : right.practice.exactMilliseconds
+                if a != b { return (a ?? -1) > (b ?? -1) }
+                return left.name < right.name
+            }
+    }
+    private func composerDetail(_ node: ComposerPracticeNode) -> String {
+        let practice = node.practice.exactMilliseconds.map { "\($0 / 1_000) 秒" } ?? "N/A"
+        let incomplete = node.practice.state == .incomplete || node.practice.state == .unverifiable
+            ? " · 练习时长数据不完整" : ""
+        guard subscription.isPro else { return "练习：\(practice) · \(node.pieceCount) 首曲目\(incomplete)" }
+        return "练习：\(practice) · 专注：\(node.focus.map { "\($0 / 1_000) 秒" } ?? "N/A") · \(node.pieceCount) 首曲目\(incomplete)"
     }
     private func rowDetail(_ piece: PracticeSong) -> String {
         let result = duration(piece)
@@ -1643,9 +1833,21 @@ struct CoreAnalyzeRankingView: View {
                 }
             }
             if showsComposers {
-                Text("未填写作曲家")
-                Text("当前曲目资料没有可核验的作曲家身份，无法生成作曲家排行。")
-                    .font(.caption).foregroundStyle(.secondary)
+                if orderedComposers.isEmpty { Text("所选范围无历史练习记录") }
+                ForEach(orderedComposers) { node in
+                    NavigationLink {
+                        List(node.pieces.sorted { $0.name < $1.name }) { piece in
+                            NavigationLink(piece.name) {
+                                CoreAnalyzeView(scope: .piece(piece.id), sharedSelection: $selection)
+                            }
+                        }.navigationTitle(node.name)
+                    } label: {
+                        VStack(alignment: .leading) {
+                            Text(node.name)
+                            Text(composerDetail(node)).font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                }
             } else {
                 ForEach(orderedPieces) { piece in
                     NavigationLink {

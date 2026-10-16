@@ -3902,7 +3902,7 @@ private struct PrototypeAppearanceSettingsView: View {
     }
 }
 
-private struct PrototypeBackupRestoreView: View {
+struct PrototypeBackupRestoreView: View {
     let practiceStore: PracticeLibraryStore?
 
     @State private var exportDocument: GeoBeatBackupFile?
@@ -3926,6 +3926,7 @@ private struct PrototypeBackupRestoreView: View {
                     PrototypeDisclosureRow(title: "导出备份", symbol: "square.and.arrow.up")
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("settings.backup.export")
                 .disabled(practiceStore == nil)
                 .opacity(practiceStore == nil ? 0.45 : 1)
 
@@ -3935,6 +3936,7 @@ private struct PrototypeBackupRestoreView: View {
                     PrototypeDisclosureRow(title: "从备份恢复", symbol: "square.and.arrow.down")
                 }
                 .buttonStyle(.plain)
+                .accessibilityIdentifier("settings.backup.import")
                 .disabled(practiceStore == nil)
                 .opacity(practiceStore == nil ? 0.45 : 1)
             }
@@ -3965,6 +3967,7 @@ private struct PrototypeBackupRestoreView: View {
             titleVisibility: .visible
         ) {
             Button("覆盖当前练习资料", role: .destructive, action: restorePendingBackup)
+                .accessibilityIdentifier("settings.backup.confirmRestore")
             Button("取消", role: .cancel) {
                 pendingRestoreData = nil
             }

@@ -2589,8 +2589,11 @@ struct CoreExitHandoffView: View {
 struct CoreGlobalSettingsView: View {
     @EnvironmentObject private var settings: CorePracticeSettings
     @EnvironmentObject private var subscription: SubscriptionStore
+    @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
-    let activeSession: Bool
+    @StateObject private var practiceStore = PracticeLibraryStore()
+    @State private var storeError: String?
+    let activeSessionID: UUID?
     var body: some View {
         NavigationStack {
             Form {
@@ -2611,12 +2614,39 @@ struct CoreGlobalSettingsView: View {
                         Toggle("速度阶梯", isOn: Binding(get: { settings.ladderEnabled }, set: {
                             settings.setLadderEnabled($0, isPro: subscription.isPro)
                         })).accessibilityIdentifier("core.settings.globalLadder")
-                        if activeSession { Text("下一次练习生效").font(.caption) }
+                        if activeSessionID != nil { Text("下一次练习生效").font(.caption) }
                     }
                     NavigationLink("Rovia Pro 权益") { PrototypeProView() }
                 }
+                Section("数据管理") {
+                    NavigationLink {
+                        PrototypeBackupRestoreView(practiceStore: storeError == nil ? practiceStore : nil)
+                    } label: {
+                        Label("备份与恢复", systemImage: "arrow.triangle.2.circlepath")
+                    }
+                    .accessibilityIdentifier("core.settings.backupRestore")
+                    if let storeError {
+                        Text("练习资料暂不可用：\(storeError)")
+                            .font(.caption)
+                            .foregroundStyle(.red)
+                    }
+                }
             }.navigationTitle("设置").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("返回") { dismiss() } } }
+                .onAppear(perform: configurePracticeStore)
+                .onChange(of: activeSessionID) { _, value in
+                    practiceStore.protectedEventID = value
+                }
+        }
+    }
+
+    private func configurePracticeStore() {
+        do {
+            try practiceStore.configure(modelContext: modelContext)
+            practiceStore.protectedEventID = activeSessionID
+            storeError = nil
+        } catch {
+            storeError = error.localizedDescription
         }
     }
 }

@@ -104,7 +104,7 @@ struct PracticeCoreRootView: View {
             if let sheetRoute {
                 switch sheetRoute {
                 case .settings:
-                    CoreGlobalSettingsView(activeSession: runtime.activeID != nil)
+                    CoreGlobalSettingsView(activeSessionID: runtime.activeID ?? recovery?.sessionID)
                         .environmentObject(settings)
 
                 case .archivedPieces:

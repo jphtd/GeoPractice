@@ -610,8 +610,12 @@ struct CoreSessionView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 12) {
                 if runtime.context == nil {
-                    Text("GeoBeat").coreType(.titleMedium)
-                        .frame(maxWidth: .infinity, alignment: .center)
+                    HStack(spacing: 8) {
+                        Color.clear.frame(width: 44, height: 44).accessibilityHidden(true)
+                        Text("GeoBeat").coreType(.titleMedium)
+                            .multilineTextAlignment(.center).frame(maxWidth: .infinity)
+                        independentCompletionMenu
+                    }
                 }
                 if let context = runtime.context {
                     if showDetails {
@@ -693,7 +697,6 @@ struct CoreSessionView: View {
                         if runtime.hasStartedPlayback {
                             Text("已记录 \(runtime.count) 次。独立记录不会更新当前目标、稳定速度、阶梯或弱项。")
                                 .font(.caption).foregroundStyle(.secondary)
-                            independentSaveActions
                         }
                     }
                 }
@@ -824,8 +827,7 @@ struct CoreSessionView: View {
         ), identifier: "geobeat.independent.hand")
     }
 
-    private var independentSaveMenu: some View {
-        Menu("保存独立练习") {
+    @ViewBuilder private var independentSaveDestinations: some View {
             ForEach(songs.filter { $0.deletedAt == nil && !$0.isArchived }) { piece in
                 Menu(piece.name) {
                     ForEach(events.filter { $0.songID == piece.id && $0.coreDefinition != nil }) { event in
@@ -841,19 +843,23 @@ struct CoreSessionView: View {
             if songs.allSatisfy({ $0.deletedAt != nil || $0.isArchived }) {
                 Button("先添加曲目") { onRoute(.addPiece) }
             }
-        }
-        .buttonStyle(CorePressStyle()).foregroundStyle(CorePalette.accent)
-        .frame(minHeight: 44)
-        .accessibilityIdentifier("geobeat.independent.save")
     }
 
-    private var independentSaveActions: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            independentSaveMenu
-            Button("不保存并清空", role: .destructive) { confirmsIndependentDiscard = true }
-                .frame(minHeight: 44)
-                .accessibilityIdentifier("geobeat.independent.discard")
+    private var independentCompletionMenu: some View {
+        Menu("完成") {
+            Menu("保存独立练习") {
+                independentSaveDestinations
+            }
+            .disabled(!runtime.hasStartedPlayback)
+            Button("不保存并清空", role: .destructive) {
+                confirmsIndependentDiscard = true
+            }
+            .disabled(!runtime.hasStartedPlayback)
+            Button("取消", role: .cancel) {}
         }
+        .buttonStyle(.plain).foregroundStyle(CorePalette.accent)
+        .frame(minWidth: 44, minHeight: 44)
+        .accessibilityIdentifier("geobeat.independent.complete")
     }
 
     private func handPicker(hands: [PracticeHand], selection: Binding<PracticeHand>, identifier: String,
@@ -901,7 +907,10 @@ struct CoreSessionView: View {
                             Text(context?.pieceName ?? "GeoBeat").font(.headline)
                                 .multilineTextAlignment(.center).frame(maxWidth: .infinity)
                                 .fixedSize(horizontal: false, vertical: true)
-                            provisionalBack.hidden().accessibilityHidden(true)
+                            Group {
+                                if context == nil { independentCompletionMenu }
+                                else { provisionalBack.hidden().accessibilityHidden(true) }
+                            }
                         }
                         let actual = context.map {
                             CoreAnalysis.count(CoreAnalysis.planned(attempts, division: $0.divisionID),
@@ -977,9 +986,7 @@ struct CoreSessionView: View {
                     }.disabled((context != nil && !runtime.session.isRunning) || !engine.isPlaying)
                         .accessibilityIdentifier(context == nil ? "geobeat.independent.record" : "core.session.record")
                 }
-                if context == nil {
-                    if runtime.hasStartedPlayback { independentSaveActions }
-                } else {
+                if context != nil {
                     Button("结束练习", action: finish)
                         .frame(minHeight: 44)
                         .opacity(runtime.hasStartedPlayback && !showsTargetActions ? 1 : 0)

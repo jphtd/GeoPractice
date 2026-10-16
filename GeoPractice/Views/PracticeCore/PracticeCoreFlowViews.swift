@@ -561,6 +561,8 @@ struct CoreSessionView: View {
     @State private var continueAfterTargets = false
     @State private var playbackError: String?
     @State private var confirmsIndependentDiscard = false
+    @State private var showsIndependentFirstUseReminder = false
+    private static let independentFirstUseAcknowledgedKey = "practiceCore.independentGeoBeat.firstUseAcknowledged"
     private func allTargetCountsReached(in context: CoreSessionContext) -> Bool {
         context.handMode.hands.allSatisfy { hand in
             guard let targetCount = context.goal.hands[hand]?.count else {
@@ -595,6 +597,15 @@ struct CoreSessionView: View {
                 runtime.discardIndependent()
             }
         }
+        .onAppear {
+            guard runtime.context == nil else { return }
+#if DEBUG
+            if ProcessInfo.processInfo.arguments.contains("-reset-independent-first-use-reminder") {
+                UserDefaults.standard.removeObject(forKey: Self.independentFirstUseAcknowledgedKey)
+            }
+#endif
+            showsIndependentFirstUseReminder = !UserDefaults.standard.bool(forKey: Self.independentFirstUseAcknowledgedKey)
+        }
         .task(id: revealRequest) {
             guard contextRevealed else { return }
             try? await Task.sleep(for: .seconds(5))
@@ -604,6 +615,20 @@ struct CoreSessionView: View {
         .onChange(of: voiceOverEnabled) { _, _ in
             if contextRevealed { revealRequest = UUID() }
         }
+    }
+
+    private var independentFirstUseReminder: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("独立练习记录不会影响当前目标、稳定速度、速度阶梯或弱项分析。")
+                .coreType(.body).foregroundStyle(CorePalette.primary)
+            CoreButton(title: "知道了", kind: .tertiary) {
+                UserDefaults.standard.set(true, forKey: Self.independentFirstUseAcknowledgedKey)
+                showsIndependentFirstUseReminder = false
+            }
+        }
+        .coreCard()
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("geobeat.independent.firstUseReminder")
     }
 
     private var ordinaryLayout: some View {
@@ -616,6 +641,7 @@ struct CoreSessionView: View {
                             .multilineTextAlignment(.center).frame(maxWidth: .infinity)
                         independentCompletionMenu
                     }
+                    if showsIndependentFirstUseReminder { independentFirstUseReminder }
                 }
                 if let context = runtime.context {
                     if showDetails {
@@ -691,14 +717,6 @@ struct CoreSessionView: View {
                 }
                 if runtime.context != nil || isGeoBeat {
                     beatControl.frame(maxWidth: .infinity, alignment: .center)
-                }
-                if runtime.context == nil {
-                    if isIndependentGeoBeat {
-                        if runtime.hasStartedPlayback {
-                            Text("已记录 \(runtime.count) 次。独立记录不会更新当前目标、稳定速度、阶梯或弱项。")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                    }
                 }
                 if let message = playbackError ?? engine.errorMessage { Text(message).foregroundStyle(.red) }
                 if showsFocus {
@@ -895,6 +913,7 @@ struct CoreSessionView: View {
         GeometryReader { geometry in
             ScrollView {
                 VStack(spacing: 12) {
+                    if context == nil, showsIndependentFirstUseReminder { independentFirstUseReminder }
                     VStack(spacing: 6) {
                         HStack(alignment: .center, spacing: 8) {
                             Group {

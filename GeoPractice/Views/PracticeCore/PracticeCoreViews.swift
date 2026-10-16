@@ -50,8 +50,10 @@ struct PracticeCoreRootView: View {
         independentGeoBeat || runtime.context == nil
     }
     private var focusSurfaceVisible: Bool {
-        runtime.isFocusEnabled && !runtime.needsRecovery &&
-            (selectedTab == "Practice" || (selectedTab == "GeoBeat" && !independentGeoBeat))
+        (selectedTab == "Practice" && runtime.isFocusEnabled && !runtime.needsRecovery) ||
+            (selectedTab == "GeoBeat" && (isIndependentGeoBeat
+                ? settings.focusActivation(isPro: subscription.isPro)
+                : runtime.isFocusEnabled && !runtime.needsRecovery))
     }
     var body: some View {
         Group {
@@ -62,10 +64,12 @@ struct PracticeCoreRootView: View {
                         engine: engine,
                         isGeoBeat: true,
                         isIndependentGeoBeat: isIndependentGeoBeat,
+                        independentFocusPresentation: isIndependentGeoBeat && settings.focusActivation(isPro: subscription.isPro),
                         openGeoBeat: {},
                         finish: finishSession,
                         onRoute: request, detach: detachGeoBeat,
-                        saveIndependent: saveIndependent
+                        saveIndependent: saveIndependent,
+                        leaveIndependent: reconnectPractice
                     )
                 }
             } else if selectedTab == "Analyze" {

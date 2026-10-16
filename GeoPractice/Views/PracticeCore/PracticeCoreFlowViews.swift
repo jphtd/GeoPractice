@@ -544,16 +544,19 @@ struct CoreSessionView: View {
     @ObservedObject var engine: MetronomeEngine
     var isGeoBeat: Bool
     var isIndependentGeoBeat = false
+    var independentFocusPresentation = false
     let openGeoBeat: () -> Void
     let finish: () -> Void
     var onRoute: (CoreRoute) -> Void = { _ in }
     var detach: () -> Void = {}
     var saveIndependent: (PracticeSong, PracticeEvent) -> Void = { _, _ in }
+    var leaveIndependent: () -> Void = {}
     @Environment(\.accessibilityVoiceOverEnabled) private var voiceOverEnabled
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var contextRevealed = false
     @State private var revealRequest = UUID()
-    private var showDetails: Bool { !runtime.isFocusEnabled || contextRevealed }
+    private var showsFocus: Bool { runtime.isFocusEnabled || independentFocusPresentation }
+    private var showDetails: Bool { !showsFocus || contextRevealed }
     private var sessionCanvas: Color { CorePalette.canvas }
     @State private var continueAfterTargets = false
     @State private var playbackError: String?
@@ -578,14 +581,20 @@ struct CoreSessionView: View {
     }
     var body: some View {
         Group {
-            if runtime.isFocusEnabled, let context = runtime.context {
-                focusLayout(context)
+            if showsFocus {
+                focusLayout(runtime.context)
             } else {
                 ordinaryLayout
             }
         }
         .background(sessionCanvas)
         .toolbar(.hidden, for: .navigationBar)
+        .confirmationDialog("清空未保存的独立练习？", isPresented: $confirmsIndependentDiscard) {
+            Button("清空", role: .destructive) {
+                engine.stop()
+                runtime.discardIndependent()
+            }
+        }
         .task(id: revealRequest) {
             guard contextRevealed else { return }
             try? await Task.sleep(for: .seconds(5))
@@ -599,8 +608,11 @@ struct CoreSessionView: View {
 
     private var ordinaryLayout: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: runtime.context == nil ? 20 : 12) {
-                if runtime.context == nil { Text("GeoBeat").font(.largeTitle.bold()) }
+            VStack(alignment: .leading, spacing: 12) {
+                if runtime.context == nil {
+                    Text("GeoBeat").coreType(.titleMedium)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                }
                 if let context = runtime.context {
                     if showDetails {
                         HStack(alignment: .center, spacing: 8) {
@@ -638,30 +650,14 @@ struct CoreSessionView: View {
                                 for: runtime.currentHand
                             ).count
 
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("练习次数")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-
-                            if let targetCount = goal.count {
-                                Text("\(actualCount)/\(targetCount)")
-                                    .font(.system(size: 32, weight: .black, design: .rounded))
-                                    .monospacedDigit()
-                                    .contentTransition(.numericText())
-                                    .animation(.easeOut(duration: 0.20), value: actualCount)
-                            } else {
-                                Text("\(actualCount)")
-                                    .font(.system(size: 32, weight: .black, design: .rounded))
-                                    .monospacedDigit()
-                                    .contentTransition(.numericText())
-                                    .animation(.easeOut(duration: 0.20), value: actualCount)
-                            }
-                        }
-                        .accessibilityIdentifier("core.session.count")
+                        countSummary(actual: actualCount, target: goal.count)
                         if let target = goal.speed { Text("目标：\(target.noteUnit.title) = \(target.bpm) BPM").foregroundStyle(.secondary) }
                     }
                 } else {
-                    Text("独立 GeoBeat · 未关联计划练习").font(.headline)
+                    Text("独立 GeoBeat · 未关联计划练习").coreType(.titleSmall)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    independentHandControl
+                    countSummary(actual: runtime.count, target: nil, emphasized: true)
                 }
                 if showDetails, let context = runtime.context, context.goal.ladderEnabled == true,
                    let config = context.goal.hands[runtime.currentHand]?.ladder,
@@ -689,60 +685,20 @@ struct CoreSessionView: View {
                     Text("建议起始速度：\(suggested.formatted(.number.precision(.fractionLength(0...1)))) BPM（\(engine.preset.referenceNote.title)）。可自行修改。")
                         .font(.caption).foregroundStyle(.secondary)
                 }
-                if runtime.context != nil {
+                if runtime.context != nil || isGeoBeat {
                     beatControl.frame(maxWidth: .infinity, alignment: .center)
-                } else if isGeoBeat {
-                    beatControl
                 }
                 if runtime.context == nil {
-                    CoreTempoControls(engine: engine, showsBeats: true, independentGeoBeat: true)
                     if isIndependentGeoBeat {
-                        Picker("历史手型", selection: Binding(
-                            get: { runtime.independentHand },
-                            set: { runtime.selectIndependentHand($0) }
-                        )) {
-                            ForEach(PracticeHand.allCases) { hand in
-                                Text(hand.title).tag(hand)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .accessibilityIdentifier("geobeat.independent.hand")
                         if runtime.hasStartedPlayback {
-                            Button("记录一次 · \(runtime.independentHand.title)") {
-                                runtime.recordIndependent(preset: engine.effectivePlaybackPreset)
-                            }
-                            .disabled(!engine.isPlaying)
-                            .accessibilityIdentifier("geobeat.independent.record")
                             Text("已记录 \(runtime.count) 次。独立记录不会更新当前目标、稳定速度、阶梯或弱项。")
                                 .font(.caption).foregroundStyle(.secondary)
-                            Menu("保存独立练习") {
-                                ForEach(songs.filter { $0.deletedAt == nil && !$0.isArchived }) { piece in
-                                    Menu(piece.name) {
-                                        ForEach(events.filter { event in
-                                            event.songID == piece.id && event.coreDefinition != nil
-                                        }) { event in
-                                            Button(event.name) { saveIndependent(piece, event) }
-                                        }
-                                        if let mode = piece.coreStructure?.mode {
-                                            Button("新建练习划分后保存") {
-                                                onRoute(.createDivision(piece: piece.id, mode: mode))
-                                            }
-                                        }
-                                    }
-                                }
-                                if songs.allSatisfy({ $0.deletedAt != nil || $0.isArchived }) {
-                                    Button("先添加曲目") { onRoute(.addPiece) }
-                                }
-                            }
-                            .accessibilityIdentifier("geobeat.independent.save")
-                            Button("不保存并清空", role: .destructive) {
-                                confirmsIndependentDiscard = true
-                            }
+                            independentSaveActions
                         }
                     }
                 }
                 if let message = playbackError ?? engine.errorMessage { Text(message).foregroundStyle(.red) }
-                if runtime.isFocusEnabled {
+                if showsFocus {
                     Color.clear.frame(height: 56).contentShape(Rectangle())
                         .onTapGesture { revealContext() }
                         .accessibilityLabel("显示练习信息")
@@ -752,18 +708,12 @@ struct CoreSessionView: View {
                 }
             }.padding().frame(maxWidth: 720).frame(maxWidth: .infinity)
                 .background {
-                    if runtime.isFocusEnabled {
+                    if showsFocus {
                         sessionCanvas.contentShape(Rectangle()).onTapGesture { revealContext() }
                     }
                 }
         }
         .background(sessionCanvas)
-        .confirmationDialog("清空未保存的独立练习？", isPresented: $confirmsIndependentDiscard) {
-            Button("清空", role: .destructive) {
-                engine.stop()
-                runtime.discardIndependent()
-            }
-        }
         .safeAreaInset(edge: .bottom, spacing: 0) {
             if let context = runtime.context {
                 let showsTargetActions = runtime.hasStartedPlayback && allTargetCountsReached(in: context) && !continueAfterTargets
@@ -794,6 +744,19 @@ struct CoreSessionView: View {
                         .allowsHitTesting(runtime.hasStartedPlayback && !showsTargetActions)
                         .accessibilityHidden(!runtime.hasStartedPlayback || showsTargetActions)
                         .accessibilityIdentifier("core.session.finish")
+                }
+                .padding(.horizontal).padding(.vertical, 8)
+                .frame(maxWidth: 720).frame(maxWidth: .infinity)
+                .background(sessionCanvas)
+            } else if isIndependentGeoBeat {
+                VStack(spacing: 8) {
+                    CoreTempoControls(engine: engine, showsBeats: true)
+                    CoreButton(title: runtime.hasStartedPlayback
+                        ? "记录一次 · \(runtime.independentHand.title)" : "开始播放后可记录") {
+                        runtime.recordIndependent(preset: engine.effectivePlaybackPreset)
+                    }
+                    .disabled(!engine.isPlaying)
+                    .accessibilityIdentifier("geobeat.independent.record")
                 }
                 .padding(.horizontal).padding(.vertical, 8)
                 .frame(maxWidth: 720).frame(maxWidth: .infinity)
@@ -833,7 +796,7 @@ struct CoreSessionView: View {
                         pulse: engine.lastPulse,
                         isPlaying: engine.isPlaying
                     )
-                    .frame(height: runtime.context == nil || runtime.isFocusEnabled ? 240 : 180)
+                    .frame(height: showsFocus ? 240 : isIndependentGeoBeat ? 210 : 180)
                     .contentShape(Rectangle())
                     .onTapGesture { togglePlayback() }
                     .accessibilityAddTraits(.isButton)
@@ -843,26 +806,78 @@ struct CoreSessionView: View {
                     .accessibilityHint("轻点切换运行状态")
     }
 
+    private func countSummary(actual: Int, target: Int?, centered: Bool = false, emphasized: Bool = false) -> some View {
+        VStack(alignment: centered ? .center : .leading, spacing: 4) {
+            Text("练习次数").font(.caption).foregroundStyle(.secondary)
+            Text(target.map { "\(actual)/\($0)" } ?? "\(actual)")
+                .font(.system(size: centered || emphasized ? 40 : 32, weight: .black, design: .rounded))
+                .monospacedDigit().contentTransition(.numericText())
+                .animation(.easeOut(duration: 0.20), value: actual)
+        }.frame(maxWidth: centered ? .infinity : nil, alignment: centered ? .center : .leading)
+            .accessibilityIdentifier("core.session.count")
+    }
+
+    private var independentHandControl: some View {
+        handPicker(hands: PracticeHand.allCases, selection: Binding(
+            get: { runtime.independentHand },
+            set: { runtime.selectIndependentHand($0) }
+        ), identifier: "geobeat.independent.hand")
+    }
+
+    private var independentSaveMenu: some View {
+        Menu("保存独立练习") {
+            ForEach(songs.filter { $0.deletedAt == nil && !$0.isArchived }) { piece in
+                Menu(piece.name) {
+                    ForEach(events.filter { $0.songID == piece.id && $0.coreDefinition != nil }) { event in
+                        Button(event.name) { saveIndependent(piece, event) }
+                    }
+                    if let mode = piece.coreStructure?.mode {
+                        Button("新建练习划分后保存") {
+                            onRoute(.createDivision(piece: piece.id, mode: mode))
+                        }
+                    }
+                }
+            }
+            if songs.allSatisfy({ $0.deletedAt != nil || $0.isArchived }) {
+                Button("先添加曲目") { onRoute(.addPiece) }
+            }
+        }
+        .buttonStyle(CorePressStyle()).foregroundStyle(CorePalette.accent)
+        .frame(minHeight: 44)
+        .accessibilityIdentifier("geobeat.independent.save")
+    }
+
+    private var independentSaveActions: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            independentSaveMenu
+            Button("不保存并清空", role: .destructive) { confirmsIndependentDiscard = true }
+                .frame(minHeight: 44)
+                .accessibilityIdentifier("geobeat.independent.discard")
+        }
+    }
+
+    private func handPicker(hands: [PracticeHand], selection: Binding<PracticeHand>, identifier: String,
+                            buttonIdentifierPrefix: String? = nil) -> some View {
+        Picker("当前手型", selection: selection) {
+            ForEach(hands) { hand in Text(hand.title).tag(hand) }
+        }.pickerStyle(.segmented).accessibilityIdentifier(identifier)
+            .accessibilityRepresentation {
+                HStack {
+                    ForEach(hands) { hand in
+                        Button(hand.title) { selection.wrappedValue = hand }
+                            .accessibilityAddTraits(selection.wrappedValue == hand ? .isSelected : [])
+                            .accessibilityIdentifier("\(buttonIdentifierPrefix ?? identifier).\(hand.rawValue)")
+                    }
+                }
+            }
+    }
+
     @ViewBuilder private func handControl(_ context: CoreSessionContext) -> some View {
                     if context.handMode.allowsHandSwitching {
-                        Picker("当前手型", selection: Binding(get: { runtime.currentHand }, set: {
+                        handPicker(hands: context.handMode.hands, selection: Binding(get: { runtime.currentHand }, set: {
                             runtime.switchHand($0)
                             engine.apply(runtime.preset)
-                        })) {
-                            ForEach(context.handMode.hands) { Text($0.title).tag($0) }
-                        }.pickerStyle(.segmented).accessibilityIdentifier("core.session.handSwitcher")
-                        .accessibilityRepresentation {
-                            HStack {
-                                ForEach(context.handMode.hands) { hand in
-                                    Button(hand.title) {
-                                        runtime.switchHand(hand)
-                                        engine.apply(runtime.preset)
-                                    }
-                                        .accessibilityAddTraits(runtime.currentHand == hand ? .isSelected : [])
-                                        .accessibilityIdentifier("core.session.hand.\(hand.rawValue)")
-                                }
-                            }
-                        }
+                        }), identifier: "core.session.handSwitcher", buttonIdentifierPrefix: "core.session.hand")
                     } else {
                         Text("当前手型 · \(runtime.currentHand.title)").coreType(.body)
                             .accessibilityIdentifier("core.session.currentHand")
@@ -870,27 +885,33 @@ struct CoreSessionView: View {
 
     }
 
-    private func focusLayout(_ context: CoreSessionContext) -> some View {
+    private func focusLayout(_ context: CoreSessionContext?) -> some View {
         GeometryReader { geometry in
             ScrollView {
                 VStack(spacing: 12) {
                     VStack(spacing: 6) {
                         HStack(alignment: .center, spacing: 8) {
-                            provisionalBack
-                                .opacity(runtime.hasStartedPlayback ? 0 : 1)
-                                .allowsHitTesting(!runtime.hasStartedPlayback)
-                                .accessibilityHidden(runtime.hasStartedPlayback)
-                            Text(context.pieceName).font(.headline)
+                            Group {
+                                if context != nil { provisionalBack }
+                                else { Color.clear.frame(width: 44, height: 44).accessibilityHidden(true) }
+                            }
+                                .opacity(context != nil && runtime.hasStartedPlayback ? 0 : 1)
+                                .allowsHitTesting(context == nil || !runtime.hasStartedPlayback)
+                                .accessibilityHidden(context != nil && runtime.hasStartedPlayback)
+                            Text(context?.pieceName ?? "GeoBeat").font(.headline)
                                 .multilineTextAlignment(.center).frame(maxWidth: .infinity)
                                 .fixedSize(horizontal: false, vertical: true)
                             provisionalBack.hidden().accessibilityHidden(true)
                         }
-                        let actual = CoreAnalysis.count(CoreAnalysis.planned(attempts, division: context.divisionID), hand: runtime.currentHand, cycleStart: context.cycleStart)
-                            + runtime.session.completionSamples(for: runtime.currentHand).count
-                        let target = context.goal.hands[runtime.currentHand]?.count
+                        let actual = context.map {
+                            CoreAnalysis.count(CoreAnalysis.planned(attempts, division: $0.divisionID),
+                                               hand: runtime.currentHand, cycleStart: $0.cycleStart)
+                                + runtime.session.completionSamples(for: runtime.currentHand).count
+                        } ?? runtime.count
+                        let target = context?.goal.hands[runtime.currentHand]?.count
                         Text(target.map { "\(actual) / \($0)" } ?? "\(actual)")
                             .monospacedDigit().font(.title2)
-                            .accessibilityLabel("\(runtime.currentHand.title)，已练习 \(actual) 次" + (target.map { "，目标 \($0) 次" } ?? ""))
+                            .accessibilityLabel("\(context == nil ? runtime.independentHand.title : runtime.currentHand.title)，已练习 \(actual) 次" + (target.map { "，目标 \($0) 次" } ?? ""))
                             .accessibilityIdentifier("core.focus.count")
                     }.frame(maxWidth: .infinity, alignment: .center)
                     Spacer(minLength: 0)
@@ -898,16 +919,16 @@ struct CoreSessionView: View {
                     Spacer(minLength: 0)
                     if contextRevealed {
                         VStack(spacing: 4) {
-                            Text(context.divisionName)
+                            Text(context?.divisionName ?? "独立 GeoBeat · 未关联计划练习")
                             TimelineView(.periodic(from: .now, by: 1)) { timeline in
                                 Text("有效时间 \(runtime.practiceDurationMilliseconds(at: timeline.date) / 1000) 秒")
                             }
-                            sessionActions(context)
-                            if let target = context.goal.hands[runtime.currentHand]?.speed {
+                            if let context { sessionActions(context) }
+                            if let target = context?.goal.hands[runtime.currentHand]?.speed {
                                 Text("目标：\(target.noteUnit.title) = \(target.bpm) BPM")
                             }
-                            if let state = runtime.execution?.ladderStates?[runtime.currentHand],
-                               let ladder = context.goal.hands[runtime.currentHand]?.ladder {
+                            if context != nil, let state = runtime.execution?.ladderStates?[runtime.currentHand],
+                               let ladder = context?.goal.hands[runtime.currentHand]?.ladder {
                                 Text("当前档 \(state.currentBPM) BPM · \(state.repsCompleted) / \(ladder.repsPerLevel)")
                             }
                         }.font(.caption).foregroundStyle(.secondary)
@@ -929,30 +950,53 @@ struct CoreSessionView: View {
             }
         }
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            let showsTargetActions = runtime.hasStartedPlayback && allTargetCountsReached(in: context) && !continueAfterTargets
+            let showsTargetActions = context.map {
+                runtime.hasStartedPlayback && allTargetCountsReached(in: $0) && !continueAfterTargets
+            } ?? false
             VStack(spacing: 12) {
-                handControl(context).frame(minHeight: 44)
-                CoreTempoControls(engine: engine)
+                Group {
+                    if let context { handControl(context) }
+                    else { independentHandControl }
+                }.frame(minHeight: 44)
+                CoreTempoControls(engine: engine, showsBeats: context == nil)
                 if showsTargetActions {
                     HStack {
                         CoreButton(title: "继续练习") { continueAfterTargets = true }
                         CoreButton(title: "结束练习", action: finish)
                     }
                 } else {
-                    CoreButton(title: runtime.hasStartedPlayback ? "完成一次" : "开始播放后可记录") {
-                        runtime.record(preset: engine.effectivePlaybackPreset)
-                        engine.apply(runtime.preset)
-                        UIImpactFeedbackGenerator(style: .light).impactOccurred()
-                    }.disabled(!runtime.session.isRunning || !engine.isPlaying)
-                        .accessibilityIdentifier("core.session.record")
+                    CoreButton(title: runtime.hasStartedPlayback
+                        ? (context == nil ? "记录一次 · \(runtime.independentHand.title)" : "完成一次")
+                        : "开始播放后可记录") {
+                        if context == nil { runtime.recordIndependent(preset: engine.effectivePlaybackPreset) }
+                        else {
+                            runtime.record(preset: engine.effectivePlaybackPreset)
+                            engine.apply(runtime.preset)
+                            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                        }
+                    }.disabled((context != nil && !runtime.session.isRunning) || !engine.isPlaying)
+                        .accessibilityIdentifier(context == nil ? "geobeat.independent.record" : "core.session.record")
                 }
-                Button("结束练习", action: finish)
-                    .frame(minHeight: 44)
-                    .opacity(runtime.hasStartedPlayback && !showsTargetActions ? 1 : 0)
-                    .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: runtime.hasStartedPlayback)
-                    .allowsHitTesting(runtime.hasStartedPlayback && !showsTargetActions)
-                    .accessibilityHidden(!runtime.hasStartedPlayback || showsTargetActions)
-                    .accessibilityIdentifier("core.session.finish")
+                if context == nil {
+                    if runtime.hasStartedPlayback { independentSaveActions }
+                } else {
+                    Button("结束练习", action: finish)
+                        .frame(minHeight: 44)
+                        .opacity(runtime.hasStartedPlayback && !showsTargetActions ? 1 : 0)
+                        .animation(reduceMotion ? nil : .easeOut(duration: 0.16), value: runtime.hasStartedPlayback)
+                        .allowsHitTesting(runtime.hasStartedPlayback && !showsTargetActions)
+                        .accessibilityHidden(!runtime.hasStartedPlayback || showsTargetActions)
+                        .accessibilityIdentifier("core.session.finish")
+                }
+                if context == nil {
+                    CoreBottomNavigation(
+                        selectedTab: "GeoBeat",
+                        onPractice: leaveIndependent,
+                        onRoute: onRoute
+                    )
+                    .padding(.horizontal, -16)
+                    .padding(.bottom, -12)
+                }
             }.padding(.horizontal).padding(.bottom, 12)
                 .frame(maxWidth: 720).frame(maxWidth: .infinity).background(sessionCanvas)
         }
@@ -967,7 +1011,7 @@ struct CoreSessionView: View {
     }
 
     private func revealContext() {
-        guard runtime.isFocusEnabled else { return }
+        guard showsFocus else { return }
         withAnimation(reduceMotion ? nil : .easeOut(duration: 0.20)) { contextRevealed = true }
         revealRequest = UUID()
     }
@@ -998,37 +1042,9 @@ struct CoreSessionView: View {
 private struct CoreTempoControls: View {
     @ObservedObject var engine: MetronomeEngine
     var showsBeats = false
-    var independentGeoBeat = false
     @State private var dragStartBPM: Int?
     @State private var dragStartBeats: Int?
-    @State private var enteredBPM = ""
-    @State private var inputError: String?
-    @FocusState private var bpmFocused: Bool
     var body: some View {
-        Group {
-        if independentGeoBeat {
-            VStack(alignment: .leading, spacing: 16) {
-                Stepper("实际速度：\(engine.preset.bpm) BPM", value: Binding(get: { engine.preset.bpm }, set: { engine.setBPM($0) }), in: 20...300)
-                    .accessibilityIdentifier("core.tempo.bpm")
-                HStack {
-                    TextField("输入 BPM（20–300）", text: $enteredBPM).keyboardType(.numberPad).textFieldStyle(.roundedBorder).focused($bpmFocused)
-                        .accessibilityIdentifier("core.tempo.input")
-                    Button("应用") {
-                        guard let value = TempoScrubModel.validatedBPMInput(enteredBPM) else {
-                            inputError = "实际速度须为 20–300 的整数。"; return
-                        }
-                        engine.setBPM(value); enteredBPM = ""; inputError = nil; bpmFocused = false
-                    }.accessibilityIdentifier("core.tempo.apply")
-                }
-                if let inputError { Text(inputError).font(.caption).foregroundStyle(.red) }
-                Picker("实际音符单位", selection: Binding(get: { engine.preset.referenceNote }, set: {
-                    var value = engine.preset; value.referenceNote = $0; engine.apply(value)
-                })) {
-                    ForEach(TempoReferenceNote.allCases) { Text($0.title).tag($0) }
-                }
-                Stepper("每小节 \(engine.preset.beats) 拍", value: Binding(get: { engine.preset.beats }, set: { engine.setBeats($0) }), in: 1...9)
-            }
-        } else {
         VStack(spacing: 8) {
             HStack(spacing: 12) {
                 if dragStartBPM != nil && engine.preset.bpm > 20 {
@@ -1087,8 +1103,6 @@ private struct CoreTempoControls: View {
                         .accessibilityIdentifier("core.tempo.beats")
                 }
             }
-        }
-        }
         }
     }
 }
@@ -1325,7 +1339,8 @@ struct CoreAnalyzeView: View {
                 }
             } }
             if filteredEvents.isEmpty { Text("暂无练习划分") }
-        }.navigationTitle(title).navigationBarTitleDisplayMode(.inline)
+        }.contentMargins(.bottom, 64, for: .scrollContent)
+            .navigationTitle(title).navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 if case .overall = scope {
                     ToolbarItem(placement: .topBarTrailing) {
@@ -1764,7 +1779,8 @@ struct CorePracticeTrendView: View {
                     }
                 }
             }
-        }.navigationTitle("练习趋势")
+        }.contentMargins(.bottom, 64, for: .scrollContent)
+            .navigationTitle("练习趋势")
     }
 }
 
@@ -1874,7 +1890,8 @@ struct CoreAnalyzeRankingView: View {
                     }
                 }
             }
-        }.navigationTitle("作曲家与曲目")
+        }.contentMargins(.bottom, 64, for: .scrollContent)
+            .navigationTitle("作曲家与曲目")
     }
 }
 

@@ -1625,29 +1625,84 @@ struct CoreAnalyzeShareView: View {
         renderer.scale = 2
         return renderer.uiImage.map(Image.init(uiImage:))
     }
-    private var receiptCard: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            Text("练习小票").font(.title2.bold())
-            Text("\(interval.start.formatted(date: .abbreviated, time: .omitted)) – \(interval.end.addingTimeInterval(-1).formatted(date: .abbreviated, time: .omitted))")
-                .foregroundStyle(.secondary)
-            Divider()
-            Text("练习时长").font(.caption).foregroundStyle(.secondary)
-            Text(durationLabel)
-                .font(.largeTitle.monospacedDigit())
-            if duration.state == .incomplete || duration.state == .unverifiable {
-                Text("数据不完整 · 不显示未经核验的精确总时长").font(.caption)
-            }
-            Text("练习天数：\(days.state == .noRecords ? "无记录" : days.exactDayCount.map { "\($0) 天" } ?? "N/A")")
-            if subscription.isPro {
-                let focused = AnalyzeFocus.duration(attempts: savedRecords, interval: interval)
-                Text("专注时长：\(focused.map { "\($0 / 1_000) 秒" } ?? "N/A")")
-            }
-            Divider()
-            ForEach(practicedPieces) { piece in Text(piece.name).font(.callout) }
-            Text("ROVIA").font(.caption).foregroundStyle(.secondary)
+    private func pieceDurationLabel(_ piece: PracticeSong) -> String {
+        let eventIDs = Set(events.filter { $0.songID == piece.id }.map(\.id))
+        let result = PracticeStatisticsEngine.duration(
+            records: savedRecords.filter { eventIDs.contains($0.eventID) }.map(\.statisticsSnapshot),
+            interval: interval,
+            deduplicate: false
+        )
+        if result.state == .noRecords { return "无记录" }
+        return result.exactMilliseconds.map { "\($0 / 1_000) 秒" } ?? "N/A"
+    }
+    private var receiptRule: some View {
+        Rectangle().fill(Color.black.opacity(0.72)).frame(height: 1)
+            .accessibilityHidden(true)
+    }
+    private func receiptRow(_ title: String, _ value: String, identifier: String? = nil) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 12) {
+            Text(title).frame(maxWidth: .infinity, alignment: .leading)
+            Text(value).monospacedDigit().fixedSize(horizontal: true, vertical: false)
         }
-        .padding(24).frame(width: 360, alignment: .leading)
-        .background(Color(uiColor: .systemBackground))
+        .font(.system(size: 14, weight: .regular, design: .monospaced))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier(identifier ?? "")
+    }
+    private var receiptCard: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(spacing: 6) {
+                Text("R O V I A")
+                    .font(.system(size: 22, weight: .bold, design: .monospaced))
+                    .tracking(3)
+                Text("PRACTICE RECEIPT")
+                    .font(.system(size: 13, weight: .medium, design: .monospaced))
+                    .tracking(1)
+            }.frame(maxWidth: .infinity)
+            receiptRule.padding(.vertical, 18)
+            Text("DATE").font(.system(size: 12, weight: .medium, design: .monospaced))
+            Text("\(interval.start.formatted(date: .numeric, time: .omitted)) – \(interval.end.addingTimeInterval(-1).formatted(date: .numeric, time: .omitted))")
+                .font(.system(size: 13, weight: .regular, design: .monospaced))
+                .monospacedDigit().padding(.top, 4)
+            receiptRule.padding(.vertical, 18)
+            Text("练习曲目")
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .padding(.bottom, 10)
+            if practicedPieces.isEmpty {
+                receiptRow("无记录", "—")
+            } else {
+                VStack(spacing: 8) {
+                    ForEach(practicedPieces) { piece in
+                        receiptRow(piece.name, pieceDurationLabel(piece),
+                                   identifier: "analyze.receipt.piece.\(piece.id.uuidString)")
+                    }
+                }
+            }
+            receiptRule.padding(.vertical, 18)
+            VStack(spacing: 8) {
+                receiptRow("练习总时长", durationLabel, identifier: "analyze.receipt.totalDuration")
+                receiptRow("练习天数", days.state == .noRecords ? "无记录" : days.exactDayCount.map { "\($0) 天" } ?? "N/A",
+                           identifier: "analyze.receipt.practiceDays")
+                if subscription.isPro {
+                    let focused = AnalyzeFocus.duration(attempts: savedRecords, interval: interval)
+                    receiptRow("专注时长", focused.map { "\($0 / 1_000) 秒" } ?? "N/A",
+                               identifier: "analyze.receipt.focusDuration")
+                }
+            }
+            if duration.state == .incomplete || duration.state == .unverifiable {
+                Text("数据不完整 · 不显示未经核验的精确总时长")
+                    .font(.system(size: 11, weight: .regular, design: .monospaced))
+                    .padding(.top, 10)
+            }
+            receiptRule.padding(.vertical, 18)
+            Text("ROVIA")
+                .font(.system(size: 12, weight: .medium, design: .monospaced))
+                .tracking(2).frame(maxWidth: .infinity)
+        }
+        .padding(.horizontal, 22).padding(.vertical, 28)
+        .frame(width: 320, alignment: .leading)
+        .foregroundStyle(Color.black)
+        .background(Color.white)
+        .accessibilityElement(children: .contain)
     }
     private var shareImage: Image? {
         let renderer = ImageRenderer(content: receiptCard)

@@ -2589,10 +2589,10 @@ struct CoreExitHandoffView: View {
 struct CoreGlobalSettingsView: View {
     @EnvironmentObject private var settings: CorePracticeSettings
     @EnvironmentObject private var subscription: SubscriptionStore
-    @Environment(\.modelContext) private var modelContext
     @Environment(\.dismiss) private var dismiss
-    @StateObject private var practiceStore = PracticeLibraryStore()
-    @State private var storeError: String?
+    @ObservedObject private var cloudSync = ICloudSyncService.shared
+    @ObservedObject var practiceStore: PracticeLibraryStore
+    let storeError: String?
     let activeSessionID: UUID?
     var body: some View {
         NavigationStack {
@@ -2619,6 +2619,23 @@ struct CoreGlobalSettingsView: View {
                     NavigationLink("Rovia Pro 权益") { PrototypeProView() }
                 }
                 Section("数据管理") {
+                    Button(action: cloudSync.retryNow) {
+                        HStack {
+                            Label("iCloud 同步", systemImage: "icloud")
+                            Spacer()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text(cloudSync.status.badgeTitle)
+                                    .font(.caption.weight(.semibold))
+                                Text(cloudSync.status.detail)
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.trailing)
+                            }
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("core.settings.iCloudRetry")
+                    .accessibilityHint("轻点立即重试同步")
                     NavigationLink {
                         PrototypeBackupRestoreView(practiceStore: storeError == nil ? practiceStore : nil)
                     } label: {
@@ -2633,20 +2650,9 @@ struct CoreGlobalSettingsView: View {
                 }
             }.navigationTitle("设置").navigationBarTitleDisplayMode(.inline)
                 .toolbar { ToolbarItem(placement: .cancellationAction) { Button("返回") { dismiss() } } }
-                .onAppear(perform: configurePracticeStore)
                 .onChange(of: activeSessionID) { _, value in
                     practiceStore.protectedEventID = value
                 }
-        }
-    }
-
-    private func configurePracticeStore() {
-        do {
-            try practiceStore.configure(modelContext: modelContext)
-            practiceStore.protectedEventID = activeSessionID
-            storeError = nil
-        } catch {
-            storeError = error.localizedDescription
         }
     }
 }

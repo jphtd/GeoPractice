@@ -422,6 +422,176 @@ final class ICloudSyncMergeTests: XCTestCase {
         )
     }
 
+    @MainActor
+    func testUnavailableICloudPreservesLocalDataAndReconnectUploadsIt() async throws {
+        let (container, store) = try makeLibraryStore(named: "Local survives unavailable iCloud")
+        _ = container
+        let before = try store.makeBackupData()
+        let backend = ICloudSyncBackendStub(availability: .unavailable)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = ICloudSyncService(
+            backend: backend,
+            localState: ICloudSyncLocalStateStore(rootDirectory: directory)
+        )
+        service.start(store: store, scheduleImmediately: false)
+
+        await service.synchronizeNow()
+        XCTAssertEqual(service.status, .unavailable("请登录 iCloud 并开启 iCloud Drive"))
+        XCTAssertEqual(
+            ICloudBackupMerger.digest(before),
+            ICloudBackupMerger.digest(try store.makeBackupData())
+        )
+
+        await backend.setAvailability(.available)
+        await service.synchronizeNow()
+        guard case .synced = service.status else {
+            return XCTFail("Expected a successful sync after iCloud reconnects")
+        }
+        let reconnectedUpload = await backend.lastSavedEnvelope()
+        XCTAssertNotNil(reconnectedUpload)
+        XCTAssertEqual(
+            ICloudBackupMerger.digest(before),
+            ICloudBackupMerger.digest(try store.makeBackupData())
+        )
+    }
+
+    @MainActor
+    func testOfflineFetchFailurePreservesLocalDataAndManualRetryRecovers() async throws {
+        let (container, store) = try makeLibraryStore(named: "Local survives offline sync")
+        _ = container
+        let before = try store.makeBackupData()
+        let backend = ICloudSyncBackendStub(availability: .available, isOffline: true)
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let service = ICloudSyncService(
+            backend: backend,
+            localState: ICloudSyncLocalStateStore(rootDirectory: directory)
+        )
+        service.start(store: store, scheduleImmediately: false)
+
+        await service.synchronizeNow()
+        XCTAssertEqual(service.status, .failed("iCloud 暂时不可用，稍后自动重试"))
+        XCTAssertEqual(
+            ICloudBackupMerger.digest(before),
+            ICloudBackupMerger.digest(try store.makeBackupData())
+        )
+
+        await backend.setOffline(false)
+        await service.synchronizeNow()
+        guard case .synced = service.status else {
+            return XCTFail("Expected manual retry to sync after reconnecting")
+        }
+        let retriedUpload = await backend.lastSavedEnvelope()
+        XCTAssertNotNil(retriedUpload)
+    }
+
+    @MainActor
+    func testActiveSessionDefersCloudAccessWithoutChangingLocalData() async throws {
+        let (container, store) = try makeLibraryStore(named: "Protected active session")
+        _ = container
+        let before = try store.makeBackupData()
+        store.protectedEventID = UUID()
+        let backend = ICloudSyncBackendStub(availability: .available)
+        let service = ICloudSyncService(backend: backend)
+        service.start(store: store, scheduleImmediately: false)
+
+        await service.synchronizeNow()
+
+        XCTAssertEqual(service.status, .waitingForPracticeToFinish)
+        let accessCount = await backend.accessCount()
+        XCTAssertEqual(accessCount, 0)
+        XCTAssertEqual(
+            ICloudBackupMerger.digest(before),
+            ICloudBackupMerger.digest(try store.makeBackupData())
+        )
+    }
+
+    @MainActor
+    func testIndependentGeoBeatEntryActivatesProductionCloudProtection() async throws {
+        let planned = CoreSessionRuntime(
+            defaults: UserDefaults(suiteName: "P0B.Planned.\(UUID())")!,
+            restore: false
+        )
+        let independent = CoreSessionRuntime(
+            defaults: UserDefaults(suiteName: "P0B.Independent.\(UUID())")!,
+            restore: false
+        )
+        XCTAssertTrue(independent.startIndependentPlayback(using: { true }))
+        let (container, store) = try makeLibraryStore(named: "Independent protected entry")
+        defer { withExtendedLifetime(container) {} }
+        store.protectedEventID = CoreSyncProtection.activeEventID(
+            planned: planned,
+            independent: independent,
+            recoveryID: nil
+        )
+        let backend = ICloudSyncBackendStub(availability: .available)
+        let service = ICloudSyncService(backend: backend)
+        service.start(store: store, scheduleImmediately: false)
+
+        await service.synchronizeNow()
+
+        XCTAssertEqual(store.protectedEventID, independent.independentActiveID)
+        XCTAssertNotNil(store.protectedEventID)
+        XCTAssertEqual(service.status, .waitingForPracticeToFinish)
+        let accessCount = await backend.accessCount()
+        XCTAssertEqual(accessCount, 0)
+    }
+
+    @MainActor
+    func testConsecutiveFailuresHonorBackoffThenRecover() async throws {
+        let (container, store) = try makeLibraryStore(named: "Backoff survives failures")
+        defer { withExtendedLifetime(container) {} }
+        let backend = ICloudSyncBackendStub(
+            availability: .available,
+            failuresBeforeSuccess: 2
+        )
+        let service = ICloudSyncService(
+            backend: backend,
+            failureRetryDelay: .milliseconds(250)
+        )
+        XCTAssertEqual(ICloudSyncService(backend: backend).failureRetryDelay, .seconds(30))
+        service.start(store: store, scheduleImmediately: false)
+
+        await service.synchronizeNow()
+        var fetchCount = await backend.fetchCount()
+        XCTAssertEqual(fetchCount, 1)
+        try await Task.sleep(for: .milliseconds(120))
+        fetchCount = await backend.fetchCount()
+        XCTAssertEqual(fetchCount, 1, "Failure must remain in its configured backoff window")
+
+        try await Task.sleep(for: .milliseconds(180))
+        fetchCount = await backend.fetchCount()
+        XCTAssertEqual(fetchCount, 2)
+        guard case .failed = service.status else {
+            return XCTFail("Second consecutive failure should remain failed during backoff")
+        }
+
+        try await Task.sleep(for: .milliseconds(300))
+        fetchCount = await backend.fetchCount()
+        XCTAssertEqual(fetchCount, 3)
+        guard case .synced = service.status else {
+            return XCTFail("Service should recover after the backend becomes available")
+        }
+    }
+
+    @MainActor
+    private func makeLibraryStore(named name: String) throws -> (ModelContainer, PracticeLibraryStore) {
+        let container = try ModelContainer(
+            for: PracticeSong.self,
+            PracticeEvent.self,
+            PracticeAttempt.self,
+            PracticeFolder.self,
+            PracticeDailyGoal.self,
+            configurations: ModelConfiguration(isStoredInMemoryOnly: true, cloudKitDatabase: .none)
+        )
+        container.mainContext.insert(PracticeSong(name: name, endDate: .distantFuture))
+        try container.mainContext.save()
+        return (container, try PracticeLibraryStore(modelContext: container.mainContext))
+    }
+
     private func envelope(
         songs: [[String: Any]],
         modifiedAt: Date,
@@ -472,5 +642,65 @@ final class ICloudSyncMergeTests: XCTestCase {
             "name": name,
             "updatedAt": updatedAt.timeIntervalSinceReferenceDate
         ]
+    }
+}
+
+private actor ICloudSyncBackendStub: ICloudSyncBackendProtocol {
+    private var availabilityValue: ICloudContainerAvailability
+    private var offline: Bool
+    private var savedEnvelope: ICloudSyncEnvelope?
+    private var accesses = 0
+    private var remainingFailures: Int
+    private var fetches = 0
+
+    init(
+        availability: ICloudContainerAvailability,
+        isOffline: Bool = false,
+        failuresBeforeSuccess: Int = 0
+    ) {
+        availabilityValue = availability
+        offline = isOffline
+        remainingFailures = failuresBeforeSuccess
+    }
+
+    func availability() -> ICloudContainerAvailability {
+        accesses += 1
+        return availabilityValue
+    }
+
+    func fetchSnapshot() throws -> ICloudRemoteSnapshot? {
+        accesses += 1
+        fetches += 1
+        if remainingFailures > 0 {
+            remainingFailures -= 1
+            throw CocoaError(.ubiquitousFileUnavailable)
+        }
+        if offline { throw CocoaError(.ubiquitousFileUnavailable) }
+        return nil
+    }
+
+    func saveSnapshot(_ envelope: ICloudSyncEnvelope) {
+        accesses += 1
+        savedEnvelope = envelope
+    }
+
+    func setAvailability(_ value: ICloudContainerAvailability) {
+        availabilityValue = value
+    }
+
+    func setOffline(_ value: Bool) {
+        offline = value
+    }
+
+    func lastSavedEnvelope() -> ICloudSyncEnvelope? {
+        savedEnvelope
+    }
+
+    func accessCount() -> Int {
+        accesses
+    }
+
+    func fetchCount() -> Int {
+        fetches
     }
 }

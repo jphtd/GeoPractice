@@ -74,16 +74,19 @@ final class ICloudSyncService: ObservableObject {
     private var isSynchronizing = false
     private var needsAnotherSync = false
 
-    private let backend: ICloudSyncBackend
+    private let backend: any ICloudSyncBackendProtocol
     private let localState: ICloudSyncLocalStateStore
     private let deviceID: String
+    let failureRetryDelay: Duration
 
     init(
-        backend: ICloudSyncBackend = ICloudSyncBackend(),
-        localState: ICloudSyncLocalStateStore = ICloudSyncLocalStateStore()
+        backend: any ICloudSyncBackendProtocol = ICloudSyncBackend(),
+        localState: ICloudSyncLocalStateStore = ICloudSyncLocalStateStore(),
+        failureRetryDelay: Duration = .seconds(30)
     ) {
         self.backend = backend
         self.localState = localState
+        self.failureRetryDelay = failureRetryDelay
         let key = "practice.icloudSync.deviceID.v1"
         if let persisted = UserDefaults.standard.string(forKey: key),
            UUID(uuidString: persisted) != nil {
@@ -95,9 +98,9 @@ final class ICloudSyncService: ObservableObject {
         }
     }
 
-    func start(store: PracticeLibraryStore) {
+    func start(store: PracticeLibraryStore, scheduleImmediately: Bool = true) {
         guard self.store !== store else {
-            scheduleSync(after: .zero)
+            if scheduleImmediately { scheduleSync(after: .zero) }
             return
         }
         self.store = store
@@ -106,7 +109,7 @@ final class ICloudSyncService: ObservableObject {
             .sink { [weak self] _ in
                 self?.scheduleSync(after: .zero)
             }
-        scheduleSync(after: .zero)
+        if scheduleImmediately { scheduleSync(after: .zero) }
         startPollingIfNeeded()
     }
 
@@ -120,6 +123,15 @@ final class ICloudSyncService: ObservableObject {
 
     func retryNow() {
         scheduleSync(after: .zero)
+    }
+
+    /// Runs one pass immediately. The shipping UI uses the debounced retry
+    /// entry point; this deterministic entry point verifies lifecycle and
+    /// reconnect behavior without waiting for timers.
+    func synchronizeNow() async {
+        scheduledSyncTask?.cancel()
+        scheduledSyncTask = nil
+        await synchronize()
     }
 
     private func startPollingIfNeeded() {
@@ -171,9 +183,13 @@ final class ICloudSyncService: ObservableObject {
 
         isSynchronizing = true
         status = .syncing
+        var failureDelay: Duration?
         defer {
             isSynchronizing = false
-            if needsAnotherSync {
+            if let failureDelay {
+                needsAnotherSync = false
+                scheduleSync(after: failureDelay)
+            } else if needsAnotherSync {
                 needsAnotherSync = false
                 scheduleSync(after: .seconds(1))
             }
@@ -266,10 +282,10 @@ final class ICloudSyncService: ObservableObject {
             return
         } catch let error as CocoaError {
             status = Self.status(for: error)
-            scheduleSync(after: .seconds(30))
+            failureDelay = failureRetryDelay
         } catch {
             status = .failed("同步暂未完成，本机数据已保留")
-            scheduleSync(after: .seconds(30))
+            failureDelay = failureRetryDelay
         }
     }
 
@@ -845,7 +861,13 @@ enum ICloudContainerAvailability: Equatable, Sendable {
     }
 }
 
-actor ICloudSyncBackend {
+protocol ICloudSyncBackendProtocol: Sendable {
+    func availability() async -> ICloudContainerAvailability
+    func fetchSnapshot() async throws -> ICloudRemoteSnapshot?
+    func saveSnapshot(_ envelope: ICloudSyncEnvelope) async throws
+}
+
+actor ICloudSyncBackend: ICloudSyncBackendProtocol {
     static let containerIdentifier = "iCloud.com.kuoxiyu.GeoPractice"
     static let relativeDocumentPath = "Documents/GeoPractice/library-sync-v1.plist"
 

@@ -7,6 +7,9 @@ struct PracticeCoreRootView: View {
     @Query private var events: [PracticeEvent]
     @StateObject private var settings: CorePracticeSettings
     @StateObject private var navigation = CoreNavigation()
+    @StateObject private var practiceStore = PracticeLibraryStore()
+    @ObservedObject private var cloudSync = ICloudSyncService.shared
+    @State private var practiceStoreError: String?
     @State private var boundaryMessage: String?
     @State private var editingComposerID: UUID?
     @State private var composerDraft = ""
@@ -104,7 +107,11 @@ struct PracticeCoreRootView: View {
             if let sheetRoute {
                 switch sheetRoute {
                 case .settings:
-                    CoreGlobalSettingsView(activeSessionID: runtime.activeID ?? recovery?.sessionID)
+                    CoreGlobalSettingsView(
+                        practiceStore: practiceStore,
+                        storeError: practiceStoreError,
+                        activeSessionID: protectedSyncEventID
+                    )
                         .environmentObject(settings)
 
                 case .archivedPieces:
@@ -200,7 +207,11 @@ struct PracticeCoreRootView: View {
             if canDeferLegacyRecovery { Button("暂不恢复", action: deferLegacyRecovery) }
             Button("返回", role: .cancel) { boundaryMessage = nil; navigation.cancel() }
         } message: { Text(boundaryMessage ?? "") }
-        .onAppear { expireDeletedPieces(); loadInitialContext() }
+        .onAppear {
+            configurePracticeStore()
+            expireDeletedPieces()
+            loadInitialContext()
+        }
         .onReceive(checkpoint) { _ in runtime.persist(); expireDeletedPieces() }
         .onChange(of: engine.preset) { _, value in
             if !independentGeoBeat { runtime.updatePreset(value) }
@@ -213,6 +224,35 @@ struct PracticeCoreRootView: View {
         .onChange(of: scenePhase) { _, phase in
             if phase != .active { engine.pause(); runtime.pause(); independentRuntime.pause() }
             else { expireDeletedPieces() }
+            guard fixture == nil else { return }
+            if phase == .active {
+                cloudSync.syncWhenAppBecomesActive()
+            } else {
+                cloudSync.syncBeforeBackgrounding()
+            }
+        }
+        .onChange(of: protectedSyncEventID) { _, eventID in
+            practiceStore.protectedEventID = eventID
+            if fixture == nil { cloudSync.retryNow() }
+        }
+    }
+
+    private var protectedSyncEventID: UUID? {
+        CoreSyncProtection.activeEventID(
+            planned: runtime,
+            independent: independentRuntime,
+            recoveryID: recovery?.sessionID
+        )
+    }
+
+    private func configurePracticeStore() {
+        do {
+            try practiceStore.configure(modelContext: modelContext)
+            practiceStore.protectedEventID = protectedSyncEventID
+            practiceStoreError = nil
+            if fixture == nil { cloudSync.start(store: practiceStore) }
+        } catch {
+            practiceStoreError = error.localizedDescription
         }
     }
 

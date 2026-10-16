@@ -94,6 +94,9 @@ final class CoreSessionRuntime: ObservableObject {
         var hasStartedPlayback: Bool?
     }
     var activeID: UUID? { hasStartedPlayback && context != nil ? session.sessionID : nil }
+    var independentActiveID: UUID? {
+        hasStartedPlayback && context == nil ? session.sessionID : nil
+    }
     var currentHand: PracticeHand { hasStartedPlayback ? session.currentHand : provisionalHand }
     var count: Int { PracticeHand.allCases.reduce(0) { $0 + session.completionSamples(for: $1).count } }
 
@@ -500,6 +503,17 @@ final class CoreSessionRuntime: ObservableObject {
         defaults.removeObject(forKey: Self.draftKey)
         session.reset(); hasStartedPlayback = false; context = nil; execution = nil; needsRecovery = false; exitRequest = nil
         provisionalSource = nil
+    }
+}
+
+@MainActor
+enum CoreSyncProtection {
+    static func activeEventID(
+        planned: CoreSessionRuntime,
+        independent: CoreSessionRuntime,
+        recoveryID: UUID?
+    ) -> UUID? {
+        planned.activeID ?? independent.independentActiveID ?? recoveryID
     }
 }
 

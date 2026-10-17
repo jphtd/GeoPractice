@@ -536,6 +536,48 @@ private struct CoreGoalInputRow<LadderContent: View>: View {
     }
 }
 
+@MainActor
+final class GeoBeatPlaybackStartGate: ObservableObject {
+    @Published private(set) var isStarting = false
+    private let delay: Duration
+    private var task: Task<Void, Never>?
+
+    init(delay: Duration = .milliseconds(1_100)) {
+        self.delay = delay
+    }
+
+    func request(requiresMorph: Bool = true, _ start: @escaping @MainActor () -> Void) {
+        cancel()
+        guard requiresMorph else {
+            start()
+            return
+        }
+        isStarting = true
+        task = Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await Task.sleep(for: delay)
+            } catch {
+                return
+            }
+            guard !Task.isCancelled, isStarting else { return }
+            isStarting = false
+            task = nil
+            start()
+        }
+    }
+
+    func cancel() {
+        task?.cancel()
+        task = nil
+        isStarting = false
+    }
+
+    deinit {
+        task?.cancel()
+    }
+}
+
 struct CoreSessionView: View {
     @Query private var songs: [PracticeSong]
     @Query private var events: [PracticeEvent]
@@ -560,6 +602,7 @@ struct CoreSessionView: View {
     private var sessionCanvas: Color { CorePalette.canvas }
     @State private var continueAfterTargets = false
     @State private var playbackError: String?
+    @StateObject private var playbackStartGate = GeoBeatPlaybackStartGate()
     @State private var confirmsIndependentDiscard = false
     @State private var showsIndependentFirstUseReminder = false
     private static let independentFirstUseAcknowledgedKey = "practiceCore.independentGeoBeat.firstUseAcknowledged"
@@ -614,6 +657,9 @@ struct CoreSessionView: View {
         }
         .onChange(of: voiceOverEnabled) { _, _ in
             if contextRevealed { revealRequest = UUID() }
+        }
+        .onDisappear {
+            playbackStartGate.cancel()
         }
     }
 
@@ -815,7 +861,8 @@ struct CoreSessionView: View {
                     PrototypePulseStage(
                         preset: engine.preset,
                         pulse: engine.lastPulse,
-                        isPlaying: engine.isPlaying
+                        isPlaying: engine.isPlaying,
+                        isStarting: playbackStartGate.isStarting
                     )
                     .frame(height: showsFocus ? 240 : isIndependentGeoBeat ? 210 : 180)
                     .contentShape(Rectangle())
@@ -1042,25 +1089,38 @@ struct CoreSessionView: View {
         revealRequest = UUID()
     }
     private func togglePlayback() {
+        if playbackStartGate.isStarting {
+            playbackStartGate.cancel()
+            return
+        }
         if engine.isPlaying {
             engine.pause()
             if isIndependentGeoBeat { runtime.pause() }
             else { runtime.synchronizePlayback(isPlaying: false) }
         } else {
-            do {
-                if isIndependentGeoBeat {
-                    runtime.startIndependentPlayback {
-                        engine.start()
-                        return engine.isPlaying
-                    }
-                } else {
-                    try runtime.startPlayback {
-                        engine.start()
-                        return engine.isPlaying
-                    }
+            playbackStartGate.request(
+                requiresMorph: !runtime.hasStartedPlayback,
+                startPlayback
+            )
+        }
+    }
+
+    private func startPlayback() {
+        do {
+            if isIndependentGeoBeat {
+                runtime.startIndependentPlayback {
+                    engine.start()
+                    return engine.isPlaying
                 }
-                playbackError = nil
-            } catch { playbackError = error.localizedDescription }
+            } else {
+                try runtime.startPlayback {
+                    engine.start()
+                    return engine.isPlaying
+                }
+            }
+            playbackError = nil
+        } catch {
+            playbackError = error.localizedDescription
         }
     }
 }

@@ -13,6 +13,75 @@ final class PracticeCoreTests: XCTestCase {
         return try ModelContainer(for: schema, configurations: config)
     }
 
+    func testIndependentGeoBeatStartMorphDefersAudioSessionAndDuration() async throws {
+        let runtime = CoreSessionRuntime(defaults: UserDefaults(suiteName: #function)!, restore: false)
+        let gate = GeoBeatPlaybackStartGate(delay: .milliseconds(100))
+        var audioStarts = 0
+
+        gate.request {
+            _ = runtime.startIndependentPlayback {
+                audioStarts += 1
+                return true
+            }
+        }
+
+        XCTAssertTrue(gate.isStarting)
+        XCTAssertEqual(audioStarts, 0)
+        XCTAssertFalse(runtime.hasStartedPlayback)
+        XCTAssertEqual(runtime.practiceDurationMilliseconds(), 0)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(audioStarts, 0)
+        XCTAssertFalse(runtime.hasStartedPlayback)
+        XCTAssertEqual(runtime.practiceDurationMilliseconds(), 0)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(audioStarts, 1)
+        XCTAssertTrue(runtime.hasStartedPlayback)
+    }
+
+    func testCancelledGeoBeatStartMorphCannotStartLater() async throws {
+        let runtime = CoreSessionRuntime(defaults: UserDefaults(suiteName: #function)!, restore: false)
+        let gate = GeoBeatPlaybackStartGate(delay: .milliseconds(80))
+        var audioStarts = 0
+        gate.request {
+            _ = runtime.startIndependentPlayback {
+                audioStarts += 1
+                return true
+            }
+        }
+        gate.cancel()
+        try await Task.sleep(for: .milliseconds(120))
+
+        XCTAssertFalse(gate.isStarting)
+        XCTAssertEqual(audioStarts, 0)
+        XCTAssertFalse(runtime.hasStartedPlayback)
+        XCTAssertEqual(runtime.practiceDurationMilliseconds(), 0)
+    }
+
+    func testIndependentGeoBeatResumeStartsImmediatelyWithoutMorphOrNewSession() {
+        let runtime = CoreSessionRuntime(defaults: UserDefaults(suiteName: #function)!, restore: false)
+        let gate = GeoBeatPlaybackStartGate(delay: .seconds(10))
+        let firstStart = Date(timeIntervalSinceReferenceDate: 100)
+        XCTAssertTrue(runtime.startIndependentPlayback(at: firstStart, using: { true }))
+        runtime.recordIndependent(preset: .standard, at: firstStart.addingTimeInterval(1))
+        runtime.pause(at: firstStart.addingTimeInterval(4))
+        let sessionID = runtime.independentActiveID
+        let count = runtime.count
+        var audioStarts = 0
+
+        gate.request(requiresMorph: !runtime.hasStartedPlayback) {
+            _ = runtime.startIndependentPlayback(at: firstStart.addingTimeInterval(10)) {
+                audioStarts += 1
+                return true
+            }
+        }
+
+        XCTAssertFalse(gate.isStarting, "Resume must not replay Start Morph")
+        XCTAssertEqual(audioStarts, 1, "Resume must start audio synchronously")
+        XCTAssertEqual(runtime.independentActiveID, sessionID)
+        XCTAssertEqual(runtime.count, count)
+        XCTAssertEqual(runtime.practiceDurationMilliseconds(at: firstStart.addingTimeInterval(12)), 6_000)
+    }
+
     func testFormalAppLifecycleRefreshesSubscriptionOnlyWhenActive() async {
         var refreshCount = 0
 
@@ -2315,6 +2384,66 @@ extension PracticeCoreE2ETests {
 
 
 extension PracticeCoreE2ETests {
+    func testPlannedFocusResumeStartsImmediatelyAndKeepsBeatSessionState() throws {
+        let store = try container()
+        let (piece, division) = try makeDivision(store.mainContext, handMode: .left)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, initialHand: .left,
+                          at: start, focusEnabled: true)
+        XCTAssertTrue(try runtime.startPlayback(at: start) { true })
+        runtime.record(preset: preset(100), at: start.addingTimeInterval(1))
+        runtime.pause(at: start.addingTimeInterval(4))
+        let sessionID = runtime.activeID
+        let count = runtime.count
+        let hand = runtime.currentHand
+        let gate = GeoBeatPlaybackStartGate(delay: .seconds(10))
+        var audioStarts = 0
+
+        gate.request(requiresMorph: !runtime.hasStartedPlayback) {
+            _ = try? runtime.startPlayback(at: self.start.addingTimeInterval(10)) {
+                audioStarts += 1
+                return true
+            }
+        }
+
+        XCTAssertFalse(gate.isStarting, "Resume must not replay Start Morph")
+        XCTAssertEqual(audioStarts, 1, "Resume must start audio synchronously")
+        XCTAssertEqual(runtime.activeID, sessionID)
+        XCTAssertEqual(runtime.count, count)
+        XCTAssertEqual(runtime.currentHand, hand)
+        XCTAssertEqual(runtime.practiceDurationMilliseconds(at: start.addingTimeInterval(12)), 6_000)
+        XCTAssertEqual(runtime.focusDurationMilliseconds(at: start.addingTimeInterval(12)), 6_000)
+    }
+
+    func testPlannedGeoBeatStartMorphDefersFormalSessionUntilAudioStarts() async throws {
+        let store = try container()
+        let (piece, division) = try makeDivision(store.mainContext, handMode: .left)
+        let runtime = CoreSessionRuntime(defaults: defaults())
+        try runtime.begin(piece: piece, division: division, initialHand: .left, at: start)
+        let gate = GeoBeatPlaybackStartGate(delay: .milliseconds(100))
+        var audioStarts = 0
+
+        gate.request {
+            _ = try? runtime.startPlayback(at: self.start) {
+                audioStarts += 1
+                return true
+            }
+        }
+
+        XCTAssertTrue(gate.isStarting)
+        XCTAssertEqual(audioStarts, 0)
+        XCTAssertNil(runtime.activeID)
+        XCTAssertFalse(runtime.hasStartedPlayback)
+        XCTAssertEqual(runtime.practiceDurationMilliseconds(at: start.addingTimeInterval(10)), 0)
+        try await Task.sleep(for: .milliseconds(40))
+        XCTAssertEqual(audioStarts, 0)
+        XCTAssertNil(runtime.activeID)
+        try await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(audioStarts, 1)
+        XCTAssertNotNil(runtime.activeID)
+        XCTAssertTrue(runtime.hasStartedPlayback)
+    }
+
     func testPhase01AProvisionalAndFailedPlaybackHaveNoSessionIdentityOrSideEffects() throws {
         for mode in CoreHandMode.allCases {
             let store = try container(), (piece, division) = try makeDivision(store.mainContext, handMode: mode)

@@ -2,6 +2,98 @@ import XCTest
 @testable import GeoPractice
 
 final class V52VisualLifecycleTests: XCTestCase {
+    func testApprovedGeoBeatDurationsAndAudioClockMapping() {
+        XCTAssertEqual(GeoBeatAnimation.startMorphDuration, 1.1)
+        XCTAssertEqual(GeoBeatAnimation.shapeMorphDuration, 0.7)
+        XCTAssertEqual(GeoBeatAnimation.rapidMorphDuration, 0.28)
+        XCTAssertEqual(GeoBeatAnimation.rapidChangeWindow, 0.65)
+        XCTAssertEqual(GeoBeatAnimation.stopMorphDuration, 1.5)
+
+        let presentedAt = Date(timeIntervalSinceReferenceDate: 100)
+        let pulse = BeatPlaybackPulse(
+            beat: 1,
+            subdivision: 1,
+            cycle: 0,
+            sequence: 4,
+            kind: .subdivision,
+            eventInterval: 0.5,
+            presentedAt: presentedAt
+        )
+        XCTAssertEqual(
+            GeoBeatAnimation.beat(
+                pulse: pulse,
+                pulsesPerBeat: 2,
+                at: presentedAt.addingTimeInterval(0.25)
+            ),
+            1.75,
+            accuracy: 0.000_001
+        )
+    }
+
+    func testApprovedTwoBeatBallsUseOpposedVerticalTracksAndAlignedDots() {
+        let start = GeoBeatAnimation.twoBeatBalls(beat: 0, reduceMotion: false)
+        let nextBeat = GeoBeatAnimation.twoBeatBalls(beat: 1, reduceMotion: false)
+
+        XCTAssertEqual(start[0].position.x, -0.31, accuracy: 0.000_001)
+        XCTAssertEqual(start[1].position.x, 0.31, accuracy: 0.000_001)
+        XCTAssertEqual(start[0].position.y, 0.39, accuracy: 0.000_001)
+        XCTAssertEqual(start[1].position.y, -0.39, accuracy: 0.000_001)
+        XCTAssertEqual(nextBeat[0].position.y, -0.39, accuracy: 0.000_001)
+        XCTAssertEqual(nextBeat[1].position.y, 0.39, accuracy: 0.000_001)
+        XCTAssertEqual(start[0].diameterScale, 0.49, accuracy: 0.000_001)
+        XCTAssertEqual(start[1].diameterScale, 0.43, accuracy: 0.000_001)
+        XCTAssertEqual(GeoBeatAnimation.beatDotX(index: 0, beats: 2), start[0].position.x, accuracy: 0.000_001)
+        XCTAssertEqual(GeoBeatAnimation.beatDotX(index: 1, beats: 2), start[1].position.x, accuracy: 0.000_001)
+    }
+
+    func testTwoBeatStopMergesAndPolygonStopStaysOnItsRadialRay() {
+        let source = GeoBeatAnimation.twoBeatBalls(beat: 0.25, reduceMotion: false)
+        let stopped = GeoBeatAnimation.stoppingTwoBeatBalls(source, progress: 1)
+        for ball in stopped {
+            XCTAssertEqual(ball.position.x, 0, accuracy: 0.000_001)
+            XCTAssertEqual(ball.position.y, 0, accuracy: 0.000_001)
+            XCTAssertEqual(ball.diameterScale, 0.8, accuracy: 0.000_001)
+        }
+
+        let sourcePoint = CGPoint(x: 0.3, y: -0.4)
+        let target = GeoBeatAnimation.radialCirclePoint(sourcePoint)
+        XCTAssertEqual(hypot(target.x, target.y), 0.4, accuracy: 0.000_001)
+        XCTAssertEqual(sourcePoint.x * target.y, sourcePoint.y * target.x, accuracy: 0.000_001)
+    }
+
+    func testReduceMotionKeepsBeatIdentityButRemovesTwoBallTravel() {
+        let firstBeat = GeoBeatAnimation.twoBeatBalls(beat: 0, reduceMotion: true)
+        let withinFirstBeat = GeoBeatAnimation.twoBeatBalls(beat: 0.75, reduceMotion: true)
+        let secondBeat = GeoBeatAnimation.twoBeatBalls(beat: 1, reduceMotion: true)
+
+        XCTAssertEqual(firstBeat[0].position.y, 0.39, accuracy: 0.000_001)
+        XCTAssertEqual(firstBeat[1].position.y, -0.39, accuracy: 0.000_001)
+        XCTAssertEqual(withinFirstBeat[0].position.y, 0.39, accuracy: 0.000_001)
+        XCTAssertEqual(withinFirstBeat[1].position.y, -0.39, accuracy: 0.000_001)
+        XCTAssertEqual(secondBeat[0].position.y, -0.39, accuracy: 0.000_001)
+        XCTAssertEqual(secondBeat[1].position.y, 0.39, accuracy: 0.000_001)
+        XCTAssertEqual(firstBeat[0].diameterScale, 0.49, accuracy: 0.000_001)
+        XCTAssertEqual(secondBeat[1].diameterScale, 0.49, accuracy: 0.000_001)
+    }
+
+    func testTwoBeatIdleAndCompletedStopUseOnlyTheCentralBall() {
+        XCTAssertFalse(GeoBeatAnimation.showsTwoBeatBalls(
+            beats: 2, isPlaying: false, isStarting: false, hasPulse: false, isStopping: false
+        ))
+        XCTAssertTrue(GeoBeatAnimation.showsTwoBeatBalls(
+            beats: 2, isPlaying: false, isStarting: true, hasPulse: false, isStopping: false
+        ))
+        XCTAssertTrue(GeoBeatAnimation.showsTwoBeatBalls(
+            beats: 2, isPlaying: true, isStarting: false, hasPulse: true, isStopping: false
+        ))
+        XCTAssertTrue(GeoBeatAnimation.showsTwoBeatBalls(
+            beats: 2, isPlaying: false, isStarting: false, hasPulse: false, isStopping: true
+        ))
+        XCTAssertFalse(GeoBeatAnimation.showsTwoBeatBalls(
+            beats: 2, isPlaying: false, isStarting: false, hasPulse: false, isStopping: false
+        ))
+    }
+
     func testMotionModelCompletesExactlyOneTurnForQuarterEighthAndSixteenth() throws {
         let beats = 4
 

@@ -1012,6 +1012,17 @@ private struct PrototypeMetronomeView: View {
 /// Direct port of Documentation/GeoBeat/sketch.js. Musical time comes only
 /// from the existing audible scheduler, never from the recording context.
 enum GeoBeatAnimation {
+    static let shapeMorphDuration = 0.700
+    static let rapidMorphDuration = 0.280
+    static let rapidChangeWindow = 0.650
+    static let startMorphDuration = 1.100
+    static let stopMorphDuration = 1.500
+
+    struct TwoBeatBall: Equatable {
+        let position: CGPoint
+        let diameterScale: Double
+    }
+
     static func mix(_ a: CGPoint, _ b: CGPoint, _ t: Double) -> CGPoint {
         CGPoint(x: a.x + (b.x - a.x) * t, y: a.y + (b.y - a.y) * t)
     }
@@ -1059,6 +1070,94 @@ enum GeoBeatAnimation {
         return Double(pulse.beat) + (Double(pulse.subdivision) + progress) / Double(max(1, pulsesPerBeat))
     }
 
+    static func eased(_ progress: Double) -> Double {
+        let value = min(1, max(0, progress))
+        return value * value * (3 - 2 * value)
+    }
+
+    static func gentle(_ progress: Double) -> Double {
+        let value = min(1, max(0, progress))
+        return value * value * value * (value * (value * 6 - 15) + 10)
+    }
+
+    static func rapid(_ progress: Double) -> Double {
+        1 - pow(1 - min(1, max(0, progress)), 3)
+    }
+
+    static func twoBeatBalls(
+        beat: Double,
+        reduceMotion: Bool
+    ) -> [TwoBeatBall] {
+        let phase = beat - floor(beat)
+        let current = Int(floor(beat)) % 2
+        let progress = reduceMotion ? 0 : eased(phase)
+        return (0..<2).map { index in
+            let startY = (index + current) % 2 == 0 ? 0.39 : -0.39
+            let emphasis = index == current ? 1 - progress : progress
+            return TwoBeatBall(
+                position: CGPoint(
+                    x: (Double(index) - 0.5) * 0.62,
+                    y: startY + (-startY - startY) * progress
+                ),
+                diameterScale: 0.43 + 0.06 * emphasis
+            )
+        }
+    }
+
+    static func startingTwoBeatBalls(
+        beat: Double,
+        progress: Double,
+        reduceMotion: Bool
+    ) -> [TwoBeatBall] {
+        let amount = gentle(progress)
+        return twoBeatBalls(beat: beat, reduceMotion: reduceMotion).map { ball in
+            TwoBeatBall(
+                position: CGPoint(
+                    x: ball.position.x * amount,
+                    y: ball.position.y * amount
+                ),
+                diameterScale: 0.8 + (ball.diameterScale - 0.8) * amount
+            )
+        }
+    }
+
+    static func stoppingTwoBeatBalls(
+        _ balls: [TwoBeatBall],
+        progress: Double
+    ) -> [TwoBeatBall] {
+        let amount = gentle(progress)
+        return balls.map { ball in
+            TwoBeatBall(
+                position: CGPoint(
+                    x: ball.position.x * (1 - amount),
+                    y: ball.position.y * (1 - amount)
+                ),
+                diameterScale: ball.diameterScale + (0.8 - ball.diameterScale) * amount
+            )
+        }
+    }
+
+    static func radialCirclePoint(_ point: CGPoint, radius: Double = 0.4) -> CGPoint {
+        let length = hypot(point.x, point.y)
+        guard length > 0 else { return CGPoint(x: 0, y: -radius) }
+        return CGPoint(x: point.x / length * radius, y: point.y / length * radius)
+    }
+
+    static func beatDotX(index: Int, beats: Int) -> Double {
+        let spacing = beats == 2 ? 0.62 : 24.0
+        return (Double(index) - Double(beats - 1) / 2) * spacing
+    }
+
+    static func showsTwoBeatBalls(
+        beats: Int,
+        isPlaying: Bool,
+        isStarting: Bool,
+        hasPulse: Bool,
+        isStopping: Bool
+    ) -> Bool {
+        beats == 2 && (isPlaying || isStarting || hasPulse || isStopping)
+    }
+
     static func outline(beats: Int, bpm: Int, beat: Double, idle: Bool,
                         date: Date, reduceMotion: Bool) -> [CGPoint] {
         let n = min(9, max(1, beats))
@@ -1084,40 +1183,161 @@ struct PrototypePulseStage: View {
     let preset: MetronomePreset
     let pulse: BeatPlaybackPulse?
     let isPlaying: Bool
+    var isStarting = false
     @State private var frozenAt: Date?
     @State private var morphFrom: [CGPoint]?
     @State private var morphStart = Date.distantPast
+    @State private var previousMeter = 1
+    @State private var lastMeterChange = Date.distantPast
+    @State private var rapidMeterChange = false
+    @State private var startAt: Date?
+    @State private var stopAt: Date?
+    @State private var stopMeter = 1
+    @State private var stopOutline: [CGPoint]?
+    @State private var stopTwoBeatBalls: [GeoBeatAnimation.TwoBeatBall] = []
 
-    private func outline(at date: Date, preset: MetronomePreset) -> [CGPoint] {
+    private func transitionProgress(
+        at date: Date,
+        duration: TimeInterval
+    ) -> Double {
+        reduceMotion ? 1 : min(1, max(0, date.timeIntervalSince(morphStart) / duration))
+    }
+
+    private func displayedOutline(at date: Date, preset: MetronomePreset) -> [CGPoint] {
         let presentationDate = frozenAt ?? date
         let beat = GeoBeatAnimation.beat(pulse: pulse, pulsesPerBeat: preset.pulsesPerBeat, at: presentationDate)
-        let target = GeoBeatAnimation.outline(beats: preset.beats, bpm: preset.bpm,
-            beat: beat, idle: pulse == nil && !isPlaying, date: presentationDate, reduceMotion: reduceMotion)
-        let t = reduceMotion ? 1 : min(1, max(0, date.timeIntervalSince(morphStart) / 0.420))
-        let soft = t * t * t * (t * (t * 6 - 15) + 10)
-        guard let morphFrom, t < 1 else { return target }
+        let starting = startAt.map { isStarting && date.timeIntervalSince($0) < GeoBeatAnimation.startMorphDuration } ?? false
+        let stopping = stopAt.map { !isPlaying && pulse == nil && date.timeIntervalSince($0) < GeoBeatAnimation.stopMorphDuration } ?? false
+        let target: [CGPoint]
+        if stopping, stopMeter >= 3, let stopOutline {
+            target = stopOutline.map { GeoBeatAnimation.radialCirclePoint($0) }
+        } else {
+            target = GeoBeatAnimation.outline(
+                beats: preset.beats,
+                bpm: preset.bpm,
+                beat: starting || stopping ? 0 : beat,
+                idle: pulse == nil && !isPlaying && !stopping,
+                date: presentationDate,
+                reduceMotion: reduceMotion
+            )
+        }
+        let duration = stopping ? GeoBeatAnimation.stopMorphDuration
+            : starting ? GeoBeatAnimation.startMorphDuration
+            : rapidMeterChange ? GeoBeatAnimation.rapidMorphDuration
+            : GeoBeatAnimation.shapeMorphDuration
+        let progress = transitionProgress(at: date, duration: duration)
+        let soft = rapidMeterChange && !starting && !stopping
+            ? GeoBeatAnimation.rapid(progress)
+            : GeoBeatAnimation.gentle(progress)
+        guard let morphFrom, progress < 1 else { return target }
         return zip(morphFrom, target).map { GeoBeatAnimation.mix($0, $1, soft) }
+    }
+
+    private func drawBalls(
+        _ balls: [GeoBeatAnimation.TwoBeatBall],
+        opacity: Double,
+        scale: Double,
+        center: CGPoint,
+        context: inout GraphicsContext
+    ) {
+        guard opacity > 0 else { return }
+        for ball in balls {
+            let diameter = scale * ball.diameterScale
+            let point = CGPoint(
+                x: center.x + ball.position.x * scale,
+                y: center.y + ball.position.y * scale
+            )
+            context.fill(
+                Path(ellipseIn: CGRect(
+                    x: point.x - diameter / 2,
+                    y: point.y - diameter / 2,
+                    width: diameter,
+                    height: diameter
+                )),
+                with: .color(GeoTheme.text.opacity(opacity))
+            )
+        }
     }
 
     var body: some View {
         TimelineView(.animation(paused: reduceMotion ? !isPlaying : false)) { timeline in
             Canvas { context, size in
                 let date = timeline.date
-                let points = outline(at: date, preset: preset)
+                let points = displayedOutline(at: date, preset: preset)
                 let scale = min(74, size.width * 0.2, size.height * 0.30)
                 let center = CGPoint(x: size.width / 2, y: size.height / 2 - min(20, size.height * 0.08))
-                var path = Path()
-                path.addLines(points.map { CGPoint(x: center.x + $0.x * scale, y: center.y + $0.y * scale) })
-                path.closeSubpath()
-                context.fill(path, with: .color(GeoTheme.text))
                 let n = preset.normalized.beats
                 let beat = GeoBeatAnimation.beat(pulse: pulse, pulsesPerBeat: preset.pulsesPerBeat, at: frozenAt ?? date)
                 let current = Int(floor(beat)) % n
                 let phase = beat - floor(beat)
+                let startingProgress = startAt.map { _ in
+                    transitionProgress(at: date, duration: GeoBeatAnimation.startMorphDuration)
+                } ?? 1
+                let stoppingProgress = stopAt.map { _ in
+                    transitionProgress(at: date, duration: GeoBeatAnimation.stopMorphDuration)
+                } ?? 1
+                let shapeProgress = transitionProgress(
+                    at: date,
+                    duration: rapidMeterChange
+                        ? GeoBeatAnimation.rapidMorphDuration
+                        : GeoBeatAnimation.shapeMorphDuration
+                )
+                let shapeMix = rapidMeterChange
+                    ? GeoBeatAnimation.rapid(shapeProgress)
+                    : GeoBeatAnimation.gentle(shapeProgress)
+                let starting = isStarting && startingProgress < 1
+                let stopping = !isPlaying && pulse == nil && stoppingProgress < 1
+                let showsTwoBalls = GeoBeatAnimation.showsTwoBeatBalls(
+                    beats: n,
+                    isPlaying: isPlaying,
+                    isStarting: isStarting,
+                    hasPulse: pulse != nil,
+                    isStopping: stopping
+                )
+                let enteringTwo = n == 2 && previousMeter != 2 && shapeProgress < 1
+                let leavingTwo = n != 2 && previousMeter == 2 && shapeProgress < 1
+                let shapeOpacity = stopping && stopMeter == 2 ? 0
+                    : showsTwoBalls ? (starting ? 1 - GeoBeatAnimation.gentle(startingProgress) : enteringTwo ? 1 - shapeMix : 0)
+                    : leavingTwo ? shapeMix : 1
+                if shapeOpacity > 0 {
+                    var path = Path()
+                    path.addLines(points.map { CGPoint(x: center.x + $0.x * scale, y: center.y + $0.y * scale) })
+                    path.closeSubpath()
+                    context.fill(path, with: .color(GeoTheme.text.opacity(shapeOpacity)))
+                }
+                if stopping && stopMeter == 2 {
+                    drawBalls(
+                        GeoBeatAnimation.stoppingTwoBeatBalls(stopTwoBeatBalls, progress: stoppingProgress),
+                        opacity: 1,
+                        scale: scale,
+                        center: center,
+                        context: &context
+                    )
+                } else if showsTwoBalls {
+                    let balls = starting
+                        ? GeoBeatAnimation.startingTwoBeatBalls(beat: 0, progress: startingProgress, reduceMotion: reduceMotion)
+                        : GeoBeatAnimation.twoBeatBalls(beat: beat, reduceMotion: reduceMotion)
+                    drawBalls(
+                        balls,
+                        opacity: enteringTwo ? shapeMix : 1,
+                        scale: scale,
+                        center: center,
+                        context: &context
+                    )
+                } else if leavingTwo {
+                    drawBalls(
+                        GeoBeatAnimation.twoBeatBalls(beat: beat, reduceMotion: reduceMotion),
+                        opacity: 1 - shapeMix,
+                        scale: scale,
+                        center: center,
+                        context: &context
+                    )
+                }
                 for i in 0..<n {
                     let active = pulse != nil && i == current
                     let diameter = active ? (reduceMotion ? 9.0 : 8 + 3 * pow(1 - phase, 4)) : 5
-                    let x = center.x + Double(i) * 24 - Double(n - 1) * 12
+                    let dotOffset = GeoBeatAnimation.beatDotX(index: i, beats: n)
+                    let x = center.x + (n == 2 ? dotOffset * scale : dotOffset)
                     let y = center.y + min(108, size.height * 0.36)
                     context.fill(Path(ellipseIn: CGRect(x: x - diameter / 2, y: y - diameter / 2,
                         width: diameter, height: diameter)), with: .color(active ? GeoTheme.text : GeoTheme.muted))
@@ -1128,14 +1348,59 @@ struct PrototypePulseStage: View {
             var oldPreset = preset
             oldPreset.beats = previous
             let now = Date.now
-            morphFrom = outline(at: now, preset: oldPreset)
+            morphFrom = displayedOutline(at: now, preset: oldPreset)
+            rapidMeterChange = now.timeIntervalSince(lastMeterChange) < GeoBeatAnimation.rapidChangeWindow
+            lastMeterChange = now
+            previousMeter = previous
             morphStart = now
         }
-        .onChange(of: isPlaying) { _, playing in
-            frozenAt = playing || pulse == nil ? nil : .now
+        .onChange(of: isStarting) { _, starting in
+            guard starting else { return }
+            let now = Date.now
+            frozenAt = nil
+            stopAt = nil
+            startAt = now
+            morphFrom = GeoBeatAnimation.outline(
+                beats: 1,
+                bpm: preset.bpm,
+                beat: 0,
+                idle: true,
+                date: now,
+                reduceMotion: reduceMotion
+            )
+            morphStart = now
         }
-        .onChange(of: pulse) { _, next in
-            if next == nil || isPlaying { frozenAt = nil }
+        .onChange(of: isPlaying) { wasPlaying, playing in
+            let now = Date.now
+            if playing {
+                frozenAt = nil
+                stopAt = nil
+            } else if pulse != nil {
+                frozenAt = now
+            }
+        }
+        .onChange(of: pulse) { previous, next in
+            if isPlaying {
+                frozenAt = nil
+            } else if previous != nil, next == nil {
+                let now = Date.now
+                let snapshotDate = frozenAt ?? now
+                stopMeter = preset.beats
+                stopOutline = displayedOutline(at: snapshotDate, preset: preset)
+                stopTwoBeatBalls = GeoBeatAnimation.twoBeatBalls(
+                    beat: GeoBeatAnimation.beat(
+                        pulse: previous,
+                        pulsesPerBeat: preset.pulsesPerBeat,
+                        at: snapshotDate
+                    ),
+                    reduceMotion: reduceMotion
+                )
+                morphFrom = stopOutline
+                morphStart = now
+                stopAt = now
+                startAt = nil
+                frozenAt = nil
+            }
         }
     }
 }

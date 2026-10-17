@@ -922,6 +922,116 @@ final class PracticeCoreE2ETests: XCTestCase {
     }
     private var start: Date { Date(timeIntervalSince1970: 1_790_467_200) }
 
+    private func weaknessAttempt(goal: CoreGoal, handMode: CoreHandMode,
+                                 samples: [(PracticeHand, Int, TempoReferenceNote)],
+                                 cycleStart: Date? = nil) throws -> PracticeAttempt {
+        let completions = samples.enumerated().map { index, sample in
+            PracticeCompletionSample(hand: sample.0, preset: preset(sample.1, sample.2),
+                completedAt: start.addingTimeInterval(Double(index + 1)))
+        }
+        func stats(_ hand: PracticeHand) -> HandPracticeStats {
+            HandPracticeStats(count: completions.filter { $0.hand == hand }.count)
+        }
+        let divisionID = UUID(), pieceID = UUID()
+        let summary = PracticeSessionSummary(sourceEventID: divisionID, startedAt: start,
+            finishedAt: start.addingTimeInterval(60), left: stats(.left), right: stats(.right),
+            both: stats(.both), completions: completions)
+        let attempt = PracticeAttempt(eventID: divisionID, summary: summary, createdAt: start.addingTimeInterval(60))
+        attempt.coreContextData = try JSONEncoder().encode(CoreSessionContext(pieceID: pieceID,
+            divisionID: divisionID, pieceName: "WLC", divisionName: "WLC", handMode: handMode,
+            goal: goal, cycleStart: cycleStart ?? calendar.startOfDay(for: start), timeZoneID: "GMT"))
+        return attempt
+    }
+
+    func testWLCT01CountCompleteBelowTargetRemainsWeakness() throws {
+        let goal = CoreGoal(hands: [.left: CoreHandGoal(count: 5, speed: CoreTargetSpeed(bpm: 120))])
+        let attempt = try weaknessAttempt(goal: goal, handMode: .left,
+            samples: Array(repeating: (.left, 100, .quarter), count: 5))
+        let definition = CoreDivisionDefinition(first: 1, last: 1, handMode: .left, goal: goal)
+        XCTAssertTrue(try XCTUnwrap(CoreAnalysis.divisionNeedsAttention([attempt], definition: definition)))
+        XCTAssertEqual(try XCTUnwrap(CoreAnalysis.divisionMastery([attempt], definition: definition)), 0.875, accuracy: 0.0001)
+    }
+
+    func testWLCT02CountExceededBelowTargetRemainsWeakness() throws {
+        let goal = CoreGoal(hands: [.left: CoreHandGoal(count: 5, speed: CoreTargetSpeed(bpm: 120))])
+        let attempt = try weaknessAttempt(goal: goal, handMode: .left,
+            samples: Array(repeating: (.left, 110, .quarter), count: 10))
+        XCTAssertTrue(try XCTUnwrap(CoreAnalysis.divisionNeedsAttention([attempt],
+            definition: CoreDivisionDefinition(first: 1, last: 1, handMode: .left, goal: goal))))
+    }
+
+    func testWLCT03ReachedSpeedUsesOriginalThreshold() throws {
+        let goal = CoreGoal(hands: [.left: CoreHandGoal(count: 5, speed: CoreTargetSpeed(bpm: 120))])
+        let attempt = try weaknessAttempt(goal: goal, handMode: .left,
+            samples: Array(repeating: (.left, 120, .quarter), count: 5))
+        let definition = CoreDivisionDefinition(first: 1, last: 1, handMode: .left, goal: goal)
+        XCTAssertFalse(CoreAnalysis.speedTargetProtectionApplies([attempt], hand: .left, goal: goal))
+        XCTAssertFalse(try XCTUnwrap(CoreAnalysis.divisionNeedsAttention([attempt], definition: definition)))
+    }
+
+    func testWLCT04ProHighScoreCannotBypassSpeedProtection() throws {
+        let goal = CoreGoal(hands: [.left: CoreHandGoal(count: 5, speed: CoreTargetSpeed(bpm: 120))])
+        let attempt = try weaknessAttempt(goal: goal, handMode: .left,
+            samples: Array(repeating: (.left, 100, .quarter), count: 5))
+        let definition = CoreDivisionDefinition(first: 1, last: 1, handMode: .left, goal: goal)
+        XCTAssertEqual(try XCTUnwrap(CoreAnalysis.divisionMastery([attempt], definition: definition, speedWeight: 0)), 1)
+        XCTAssertTrue(try XCTUnwrap(CoreAnalysis.divisionNeedsAttention([attempt], definition: definition,
+            speedWeight: 0, threshold: 0.05)))
+    }
+
+    func testWLCT05MissingStableBPMRemainsInsufficient() {
+        let goal = CoreGoal(hands: [.left: CoreHandGoal(count: 5, speed: CoreTargetSpeed(bpm: 120))])
+        let definition = CoreDivisionDefinition(first: 1, last: 1, handMode: .left, goal: goal)
+        XCTAssertNil(CoreAnalysis.divisionNeedsAttention([], definition: definition))
+        XCTAssertFalse(CoreAnalysis.speedTargetProtectionApplies([], hand: .left, goal: goal))
+    }
+
+    func testWLCT06AnyApplicableHandProtectsDivision() throws {
+        let target = CoreHandGoal(count: 5, speed: CoreTargetSpeed(bpm: 120))
+        let goal = CoreGoal(hands: [.left: target, .right: target, .both: target])
+        let samples = Array(repeating: (PracticeHand.left, 100, TempoReferenceNote.quarter), count: 5)
+            + Array(repeating: (.right, 120, .quarter), count: 5)
+            + Array(repeating: (.both, 120, .quarter), count: 5)
+        let attempt = try weaknessAttempt(goal: goal, handMode: .all, samples: samples)
+        let definition = CoreDivisionDefinition(first: 1, last: 1, handMode: .all, goal: goal)
+        XCTAssertGreaterThan(try XCTUnwrap(CoreAnalysis.divisionMastery([attempt], definition: definition)), 0.8)
+        XCTAssertTrue(try XCTUnwrap(CoreAnalysis.divisionNeedsAttention([attempt], definition: definition)))
+    }
+
+    func testWLCT07CountOnlyKeepsInsufficientRule() throws {
+        let goal = CoreGoal(hands: [.left: CoreHandGoal(count: 5)])
+        let attempt = try weaknessAttempt(goal: goal, handMode: .left,
+            samples: Array(repeating: (.left, 100, .quarter), count: 5))
+        let definition = CoreDivisionDefinition(first: 1, last: 1, handMode: .left, goal: goal)
+        XCTAssertNil(CoreAnalysis.divisionNeedsAttention([attempt], definition: definition))
+    }
+
+    func testWLCT08SpeedOnlyUsesOriginalThreshold() throws {
+        let goal = CoreGoal(hands: [.left: CoreHandGoal(speed: CoreTargetSpeed(bpm: 120))])
+        let attempt = try weaknessAttempt(goal: goal, handMode: .left, samples: [(.left, 100, .quarter)])
+        let definition = CoreDivisionDefinition(first: 1, last: 1, handMode: .left, goal: goal)
+        XCTAssertFalse(CoreAnalysis.speedTargetProtectionApplies([attempt], hand: .left, goal: goal))
+        XCTAssertFalse(try XCTUnwrap(CoreAnalysis.divisionNeedsAttention([attempt], definition: definition)))
+    }
+
+    func testWLCT09EquivalentNoteUnitsDoNotTriggerProtection() throws {
+        let goal = CoreGoal(hands: [.left: CoreHandGoal(count: 1,
+            speed: CoreTargetSpeed(bpm: 240, noteUnit: .eighth))])
+        let attempt = try weaknessAttempt(goal: goal, handMode: .left, samples: [(.left, 120, .quarter)])
+        XCTAssertFalse(CoreAnalysis.speedTargetProtectionApplies([attempt], hand: .left, goal: goal))
+    }
+
+    func testWLCT10ResetWithoutNewFactsKeepsDiagnosticSnapshot() throws {
+        var goal = CoreGoal(hands: [.left: CoreHandGoal(count: 5, speed: CoreTargetSpeed(bpm: 120))])
+        goal.reset = CoreResetConfiguration(enabled: true, days: 1, anchor: start)
+        let attempt = try weaknessAttempt(goal: goal, handMode: .left,
+            samples: Array(repeating: (.left, 100, .quarter), count: 5))
+        let definition = CoreDivisionDefinition(first: 1, last: 1, handMode: .left, goal: goal)
+        XCTAssertEqual(CoreAnalysis.divisionNeedsAttention([attempt], definition: definition, now: start),
+                       CoreAnalysis.divisionNeedsAttention([attempt], definition: definition,
+                                                           now: start.addingTimeInterval(172_800)))
+    }
+
     func testIndependentSavedHistoryAppearsInTrendWithoutChangingCurrentAnalysis() throws {
         let store = try container(), context = store.mainContext
         let (piece, division) = try makeDivision(context, handMode: .left)
@@ -1074,9 +1184,11 @@ final class PracticeCoreE2ETests: XCTestCase {
             let defaults = defaults()
             defaults.set(pro, forKey: "rovia.debug.testProEnabled")
             let subscription = SubscriptionStore(observesTransactions: false, defaults: defaults)
+            let settings = CorePracticeSettings(defaults: defaults)
             let host = UIHostingController(rootView: NavigationStack {
                 CoreAnalyzeView(scope: scope)
             }.modelContainer(store).environmentObject(subscription)
+                .environmentObject(settings)
                 .environment(\.dynamicTypeSize, large ? .accessibility3 : .large))
             let window = UIWindow(frame: CGRect(x: 0, y: 0, width: large ? 320 : 390, height: 900))
             window.rootViewController = host; window.makeKeyAndVisible()

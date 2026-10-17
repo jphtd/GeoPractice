@@ -1380,7 +1380,7 @@ struct CoreAnalyzeView: View {
                 } }
                 if !piece.isArchived { Section("当前状态") {
                     Text("\(pieceAttentionCount(id)) 个练习划分需要关注")
-                    let insufficient = events.filter { $0.songID == id && $0.coreDefinition != nil && diagnosis($0) == nil }.count
+                    let insufficient = events.filter { $0.songID == id && $0.coreDefinition != nil && classification($0) == nil }.count
                     if insufficient > 0 { Text("\(insufficient) 个练习划分诊断数据不足") }
                 } }
                 Section {
@@ -1393,7 +1393,7 @@ struct CoreAnalyzeView: View {
                             } label: {
                                 VStack(alignment: .leading) {
                                     Text(event.name)
-                                    Text(diagnosis(event).map { $0 <= weaknessBoundary ? "这个划分需要关注" : "当前无需要关注项" } ?? "诊断数据不足")
+                                    Text(classification(event).map { $0 ? "这个划分需要关注" : "当前无需要关注项" } ?? "诊断数据不足")
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                             }
@@ -1456,26 +1456,24 @@ struct CoreAnalyzeView: View {
         }
     }
     private var attentionCount: Int { currentEvents.filter { needsAttention($0) }.count }
-    private var insufficientCount: Int { currentEvents.filter { diagnosis($0) == nil }.count }
+    private var insufficientCount: Int { currentEvents.filter { classification($0) == nil }.count }
     private func pieceAttentionCount(_ id: UUID) -> Int {
         events.filter { $0.songID == id && needsAttention($0) }.count
     }
     private func needsAttention(_ event: PracticeEvent) -> Bool {
-        diagnosis(event).map { $0 <= weaknessBoundary } ?? false
+        classification(event) ?? false
     }
-    private func diagnosis(_ event: PracticeEvent) -> Double? {
+    private func classification(_ event: PracticeEvent) -> Bool? {
         guard let definition = event.coreDefinition else { return nil }
         let configuration = settings.weaknessConfiguration(isPro: subscription.isPro)
         let scoreTempo = subscription.isPro
             ? songs.first(where: { $0.id == event.songID })?.coreStructure?.preferences.scoreTempo
             : nil
-        return CoreAnalysis.divisionMastery(
+        return CoreAnalysis.divisionNeedsAttention(
             CoreAnalysis.planned(attempts, division: event.id), definition: definition,
-            scoreTempo: scoreTempo, speedWeight: configuration.speedWeight
+            scoreTempo: scoreTempo, speedWeight: configuration.speedWeight,
+            threshold: configuration.threshold
         )
-    }
-    private var weaknessBoundary: Double {
-        1 - settings.weaknessConfiguration(isPro: subscription.isPro).threshold
     }
     private func focusValue(_ attempts: [PracticeAttempt], interval: DateInterval?) -> String {
         AnalyzeFocus.duration(attempts: attempts, interval: interval).map { "\($0 / 1_000) 秒" } ?? "N/A"
@@ -2167,10 +2165,11 @@ struct CoreDivisionAnalysis: View {
         Text("划分当前目标完成度：\(CoreTargetCompletion.percentage(completion.combined))")
             .accessibilityIdentifier("analyze.target.division")
         let weakness = settings.weaknessConfiguration(isPro: subscription.isPro)
-        if let mastery = CoreAnalysis.divisionMastery(attempts, definition: definition,
-                                                       scoreTempo: scoreTempo,
-                                                       speedWeight: weakness.speedWeight) {
-            Text(mastery <= 1 - weakness.threshold ? "这个划分需要关注。" : "当前划分未触发基础弱项提醒。")
+        if let needsAttention = CoreAnalysis.divisionNeedsAttention(
+            attempts, definition: definition, scoreTempo: scoreTempo,
+            speedWeight: weakness.speedWeight, threshold: weakness.threshold
+        ) {
+            Text(needsAttention ? "这个划分需要关注。" : "当前划分未触发基础弱项提醒。")
         } else { Text("弱项诊断：数据不足").foregroundStyle(.secondary) }
         if !subscription.isPro {
             Text("详细目标差距为 Pro 分析。Free 可查看当前稳定速度、次数进度及当前目标完成度。").font(.caption).foregroundStyle(.secondary)

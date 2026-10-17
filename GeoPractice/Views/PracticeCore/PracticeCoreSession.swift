@@ -567,6 +567,26 @@ enum CoreAnalysis {
         guard values.count == definition.handMode.hands.count else { return nil }
         return values.count == 1 ? values[0] : values[0] * 0.25 + values[1] * 0.25 + values[2] * 0.5
     }
+    static func speedTargetProtectionApplies(_ attempts: [PracticeAttempt], hand: PracticeHand,
+                                             goal: CoreGoal, scoreTempo: CoreTargetSpeed? = nil) -> Bool {
+        guard let target = goal.hands[hand], let count = target.count, count > 0,
+              let speed = target.speed ?? scoreTempo, (20...300).contains(speed.bpm),
+              let stable = stable(attempts, hand: hand), stable.isFinite, stable > 0
+        else { return false }
+        return stable < speed.quarterEquivalent
+    }
+    static func divisionNeedsAttention(_ attempts: [PracticeAttempt], definition: CoreDivisionDefinition,
+                                       scoreTempo: CoreTargetSpeed? = nil, speedWeight: Double = 0.75,
+                                       threshold: Double = 0.20, now: Date = .now) -> Bool? {
+        guard let goal = definition.goal,
+              let score = divisionMastery(attempts, definition: definition, scoreTempo: scoreTempo,
+                                          speedWeight: speedWeight, now: now)
+        else { return nil }
+        if definition.handMode.hands.contains(where: {
+            speedTargetProtectionApplies(attempts, hand: $0, goal: goal, scoreTempo: scoreTempo)
+        }) { return true }
+        return score <= 1 - threshold
+    }
 }
 
 // A11-TC / A12-ANA-05: progress against finite goals, independent of Weakness.

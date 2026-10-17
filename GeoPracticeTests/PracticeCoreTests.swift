@@ -700,6 +700,196 @@ final class PracticeCoreTests: XCTestCase {
 }
 
 @MainActor
+final class RemainingFeaturesCompletionTests: XCTestCase {
+    private func container() throws -> ModelContainer {
+        let schema = Schema([PracticeSong.self, PracticeEvent.self, PracticeAttempt.self, PracticeDailyGoal.self, PracticeFolder.self])
+        return try ModelContainer(for: schema, configurations: ModelConfiguration(
+            schema: schema, isStoredInMemoryOnly: true, cloudKitDatabase: .none))
+    }
+
+    func testLegacyPieceStructureDecodesDefaultReminderWithoutInventingScoreTempo() throws {
+        let data = Data(#"{"mode":"sections","total":6}"#.utf8)
+        let structure = try JSONDecoder().decode(CorePieceStructure.self, from: data)
+        XCTAssertEqual(structure.preferences.reviewInterval, .sevenDays)
+        XCTAssertEqual(structure.preferences.reviewHour, 9)
+        XCTAssertNil(structure.preferences.scoreTempo)
+    }
+
+    func testReviewReminderRollsToFirstFutureIntervalAndNeverStaysDisabled() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Shanghai"))
+        let last = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 1, hour: 20)))
+        let now = try XCTUnwrap(calendar.date(from: DateComponents(year: 2026, month: 10, day: 9, hour: 10)))
+        var preferences = CorePiecePreferences(reviewInterval: .threeDays, reviewHour: 9, reviewMinute: 0)
+        XCTAssertEqual(CoreReviewReminder.nextDate(after: last, preferences: preferences, now: now, calendar: calendar),
+                       calendar.date(from: DateComponents(year: 2026, month: 10, day: 10, hour: 9)))
+        preferences.reviewInterval = .never
+        XCTAssertNil(CoreReviewReminder.nextDate(after: last, preferences: preferences, now: now, calendar: calendar))
+    }
+
+    func testFreeReminderAlwaysUsesLocalNineAfterProDowngrade() {
+        let custom = CorePiecePreferences(reviewInterval: .threeDays, reviewHour: 21, reviewMinute: 45)
+        let free = CoreReviewReminder.effectivePreferences(custom, isPro: false)
+        XCTAssertEqual(free.reviewHour, 9)
+        XCTAssertEqual(free.reviewMinute, 0)
+        XCTAssertEqual(CoreReviewReminder.effectivePreferences(custom, isPro: true), custom)
+    }
+
+    func testUnarchiveRequiresANewCompletedSessionBeforeReminder() throws {
+        let db = try container(), context = db.mainContext
+        let piece = PracticeSong(name: "复习")
+        piece.coreStructureData = try JSONEncoder().encode(CorePieceStructure(mode: .sections, total: 2))
+        piece.isArchived = true
+        context.insert(piece); try context.save()
+        let restoredAt = Date(timeIntervalSinceReferenceDate: 9_000)
+        try CoreContracts.unarchivePiece(piece: piece, context: context, at: restoredAt)
+        XCTAssertEqual(piece.coreStructure?.preferences.reviewRequiresCompletionAfter, restoredAt)
+    }
+
+    func testWeaknessCustomizationIsProOnlyAndUsesFivePercentSteps() {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        let settings = CorePracticeSettings(defaults: defaults)
+        settings.setWeaknessSpeedWeight(60, isPro: false)
+        settings.setWeaknessThreshold(10, isPro: false)
+        XCTAssertEqual(settings.weaknessConfiguration(isPro: false).speedWeight, 0.75)
+        XCTAssertEqual(settings.weaknessConfiguration(isPro: false).threshold, 0.20)
+        settings.setWeaknessSpeedWeight(60, isPro: true)
+        settings.setWeaknessThreshold(10, isPro: true)
+        XCTAssertEqual(settings.weaknessConfiguration(isPro: true).speedWeight, 0.60)
+        XCTAssertEqual(settings.weaknessConfiguration(isPro: true).threshold, 0.10)
+        settings.setWeaknessSpeedWeight(61, isPro: true)
+        XCTAssertEqual(settings.weaknessSpeedWeight, 60)
+    }
+
+    func testWeaknessZeroWeightPersistsReloadsAndParticipatesInCalculation() {
+        let defaults = UserDefaults(suiteName: #function)!
+        defaults.removePersistentDomain(forName: #function)
+        var settings = CorePracticeSettings(defaults: defaults)
+        settings.setWeaknessSpeedWeight(0, isPro: true)
+        XCTAssertEqual(settings.weaknessConfiguration(isPro: true).speedWeight, 0)
+        settings = CorePracticeSettings(defaults: defaults)
+        XCTAssertEqual(settings.weaknessSpeedWeight, 0)
+        XCTAssertEqual(settings.weaknessConfiguration(isPro: true).speedWeight, 0)
+    }
+
+    func testScoreTempoReferenceSuppliesProSpeedReferenceAndCustomWeight() throws {
+        let goal = CoreGoal(hands: [.both: CoreHandGoal(count: 4)])
+        let definition = CoreDivisionDefinition(first: 1, last: 1, handMode: .both, goal: goal)
+        var preset = MetronomePreset.standard; preset.bpm = 60
+        let completed = (0..<2).map { index in
+            PracticeCompletionSample(hand: .both, preset: preset,
+                completedAt: Date(timeIntervalSinceReferenceDate: 100 + Double(index)))
+        }
+        let summary = PracticeSessionSummary(startedAt: Date(timeIntervalSinceReferenceDate: 100),
+            finishedAt: Date(timeIntervalSinceReferenceDate: 110), both: HandPracticeStats(count: 2),
+            completions: completed)
+        let attempt = PracticeAttempt(eventID: UUID(), summary: summary)
+        let score = CoreTargetSpeed(bpm: 120, noteUnit: .quarter)
+        XCTAssertNil(CoreAnalysis.divisionMastery([attempt], definition: definition))
+        XCTAssertEqual(try XCTUnwrap(CoreAnalysis.divisionMastery([attempt], definition: definition,
+            scoreTempo: score, speedWeight: 0.60)), 0.3, accuracy: 0.0001)
+    }
+
+    func testHistoryBackfillIsSingleRecordInsideSessionAndDeleteRestoresExactIdentity() throws {
+        let db = try container(), context = db.mainContext
+        let song = PracticeSong(name: "历史记录")
+        let event = PracticeEvent(songID: song.id, name: "第一段")
+        context.insert(song); context.insert(event)
+        let start = Date(timeIntervalSinceReferenceDate: 1_000)
+        let summary = PracticeSessionSummary(sessionID: UUID(), sourceEventID: event.id,
+            startedAt: start, finishedAt: start.addingTimeInterval(120), both: HandPracticeStats())
+        let attempt = PracticeAttempt(eventID: event.id, eventNameSnapshot: event.name,
+                                      summary: summary, createdAt: start.addingTimeInterval(130))
+        context.insert(attempt); try context.save()
+        let store = try PracticeLibraryStore(modelContext: context)
+        var preset = MetronomePreset.standard; preset.bpm = 96
+        let sampleID = try store.addHistoryCompletion(recordID: attempt.id,
+            occurredAt: start.addingTimeInterval(30), hand: .both, preset: preset)
+        XCTAssertEqual(try XCTUnwrap(PracticeAttempt.find(id: attempt.id, in: context)).completions.first?.id, sampleID)
+        XCTAssertThrowsError(try store.addHistoryCompletion(recordID: attempt.id,
+            occurredAt: start.addingTimeInterval(121), hand: .both, preset: preset))
+
+        let sessionID = attempt.sessionID
+        XCTAssertTrue(try store.deleteHistoryRecord(id: attempt.id, retentionHours: 168, now: start.addingTimeInterval(200)))
+        XCTAssertNil(try PracticeAttempt.find(id: attempt.id, in: context))
+        XCTAssertTrue(try store.restoreHistoryRecord(id: attempt.id, now: start.addingTimeInterval(201)))
+        let restored = try XCTUnwrap(PracticeAttempt.find(id: attempt.id, in: context))
+        XCTAssertEqual(restored.sessionID, sessionID)
+        XCTAssertEqual(restored.completions.first?.id, sampleID)
+        XCTAssertEqual(restored.bothCount, 1)
+    }
+
+    func testBackfillPersistsOccurredAndEntryTimesSeparatelyAndLegacyDecodeRemainsCompatible() throws {
+        let occurred = Date(timeIntervalSinceReferenceDate: 1_020)
+        let entered = Date(timeIntervalSinceReferenceDate: 2_000)
+        let sample = PracticeCompletionSample(hand: .both, preset: .standard,
+            completedAt: occurred, source: .manualBackfill, enteredAt: entered)
+        let decoded = try JSONDecoder().decode(PracticeCompletionSample.self,
+            from: JSONEncoder().encode(sample))
+        XCTAssertEqual(decoded.completedAt, occurred)
+        XCTAssertEqual(decoded.enteredAt, entered)
+
+        var legacyObject = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: JSONEncoder().encode(sample)) as? [String: Any])
+        legacyObject.removeValue(forKey: "enteredAt")
+        legacyObject.removeValue(forKey: "source")
+        let legacy = try JSONSerialization.data(withJSONObject: legacyObject)
+        XCTAssertNil(try JSONDecoder().decode(PracticeCompletionSample.self, from: legacy).enteredAt)
+    }
+
+    func testHistoryCompletionEditCannotChangeProtectedOccurredOrEntryTime() throws {
+        let start = Date(timeIntervalSinceReferenceDate: 3_000)
+        let entered = start.addingTimeInterval(100)
+        let sample = PracticeCompletionSample(hand: .both, preset: .standard,
+            completedAt: start.addingTimeInterval(20), source: .manualBackfill, enteredAt: entered)
+        let summary = PracticeSessionSummary(startedAt: start, finishedAt: start.addingTimeInterval(60),
+            both: HandPracticeStats(count: 1), completions: [sample])
+        let attempt = PracticeAttempt(eventID: UUID(), summary: summary)
+        let entry = PracticeHistoryCompletionEntry(id: sample.id, sequenceNumber: 1,
+            completedAt: sample.completedAt, hand: sample.hand, preset: sample.preset)
+        var edit = PracticeHistoryCompletionEditDraft(recordID: attempt.id, completion: entry)
+        edit.completedAt = start.addingTimeInterval(999)
+        XCTAssertTrue(attempt.applyHistoryCompletionEdit(edit))
+        XCTAssertEqual(attempt.completions.first?.completedAt, sample.completedAt)
+        XCTAssertEqual(attempt.completions.first?.enteredAt, entered)
+        XCTAssertEqual(attempt.finishedAt, summary.finishedAt)
+    }
+
+    func testBackfillAggregateEditPreservesIdentityOccurredAndEntryTimesAfterReload() throws {
+        let db = try container(), context = db.mainContext
+        let song = PracticeSong(name: "补录编辑")
+        let event = PracticeEvent(songID: song.id, name: "第一段")
+        context.insert(song); context.insert(event)
+        let start = Date(timeIntervalSinceReferenceDate: 4_000)
+        let attempt = PracticeAttempt(eventID: event.id, eventNameSnapshot: event.name,
+            summary: PracticeSessionSummary(startedAt: start, finishedAt: start.addingTimeInterval(120)))
+        context.insert(attempt); try context.save()
+        let store = try PracticeLibraryStore(modelContext: context)
+        var originalPreset = MetronomePreset.standard; originalPreset.bpm = 80
+        let occurred = start.addingTimeInterval(30), entered = start.addingTimeInterval(300)
+        let sampleID = try store.addHistoryCompletion(recordID: attempt.id, occurredAt: occurred,
+            hand: .both, preset: originalPreset, enteredAt: entered)
+
+        var edit = PracticeHistoryRecordEditDraft(record: attempt.statisticsSnapshot)
+        edit.moveSingleHand(from: .both, to: .left)
+        edit.update(hand: .left) { value in
+            var changed = originalPreset; changed.bpm = 104
+            value.preset = changed
+        }
+        try store.updateHistoryRecord(edit)
+
+        let reloaded = try XCTUnwrap(PracticeAttempt.find(id: attempt.id, in: context))
+        let preserved = try XCTUnwrap(reloaded.completions.first)
+        XCTAssertEqual(preserved.id, sampleID)
+        XCTAssertEqual(preserved.hand, .left)
+        XCTAssertEqual(preserved.preset.bpm, 104)
+        XCTAssertEqual(preserved.completedAt, occurred)
+        XCTAssertEqual(preserved.enteredAt, entered)
+    }
+}
+
+@MainActor
 final class PracticeCoreE2ETests: XCTestCase {
     private func container(url: URL? = nil) throws -> ModelContainer {
         let schema = Schema([PracticeSong.self, PracticeEvent.self, PracticeAttempt.self, PracticeDailyGoal.self, PracticeFolder.self])

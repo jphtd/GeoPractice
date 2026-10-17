@@ -18,6 +18,7 @@ enum CoreSubscriptionLifecycle {
 struct PracticeCoreRootView: View {
     @Query(sort: [SortDescriptor(\PracticeSong.sortIndex), SortDescriptor(\PracticeSong.createdAt)]) private var songs: [PracticeSong]
     @Query private var events: [PracticeEvent]
+    @Query private var attempts: [PracticeAttempt]
     @StateObject private var settings: CorePracticeSettings
     @StateObject private var navigation = CoreNavigation()
     @StateObject private var practiceStore = PracticeLibraryStore()
@@ -25,6 +26,7 @@ struct PracticeCoreRootView: View {
     @State private var practiceStoreError: String?
     @State private var boundaryMessage: String?
     @State private var editingComposerID: UUID?
+    @State private var editingPieceSettingsID: UUID?
     @State private var composerDraft = ""
     @State private var recovery: CoreRecovery?
     @State private var pendingLegacySession = false
@@ -224,6 +226,11 @@ struct PracticeCoreRootView: View {
             configurePracticeStore()
             expireDeletedPieces()
             loadInitialContext()
+            reconcileReviewReminders()
+        }
+        .onChange(of: attempts.count) { _, _ in reconcileReviewReminders() }
+        .onChange(of: songs.map { "\($0.id.uuidString):\($0.isArchived):\($0.deletedAt?.timeIntervalSinceReferenceDate ?? 0)" }) { _, _ in
+            reconcileReviewReminders()
         }
         .onReceive(checkpoint) { _ in runtime.persist(); expireDeletedPieces() }
         .onChange(of: engine.preset) { _, value in
@@ -253,6 +260,10 @@ struct PracticeCoreRootView: View {
             practiceStore.protectedEventID = eventID
             if fixture == nil { cloudSync.retryNow() }
         }
+        .onChange(of: subscription.isPro) { _, isPro in
+            practiceStore.historyRetentionHours = isPro ? 168 : 24
+            reconcileReviewReminders()
+        }
     }
 
     private var protectedSyncEventID: UUID? {
@@ -267,6 +278,7 @@ struct PracticeCoreRootView: View {
         do {
             try practiceStore.configure(modelContext: modelContext)
             practiceStore.protectedEventID = protectedSyncEventID
+            practiceStore.historyRetentionHours = subscription.isPro ? 168 : 24
             practiceStoreError = nil
             if fixture == nil { cloudSync.start(store: practiceStore) }
         } catch {
@@ -278,6 +290,13 @@ struct PracticeCoreRootView: View {
         guard songs.contains(where: { $0.deletionExpiresAt.map { $0 <= Date.now } == true }) else { return }
         do { try CoreContracts.expireDeletedPieces(in: modelContext) }
         catch { boundaryMessage = error.localizedDescription }
+    }
+
+    private func reconcileReviewReminders() {
+        guard fixture == nil else { return }
+        for piece in songs {
+            Task { await CoreReviewReminder.reconcile(piece: piece, attempts: attempts, isPro: subscription.isPro) }
+        }
     }
 
     private var practiceStack: some View {
@@ -360,6 +379,7 @@ struct PracticeCoreRootView: View {
             HStack(spacing: 0) {
                 CorePageHeader(title: "曲目详情", back: back)
                 Menu {
+                    Button("曲目设置") { editingPieceSettingsID = piece.id }
                     Button("编辑作曲家") {
                         composerDraft = piece.composerText ?? ""
                         editingComposerID = piece.id
@@ -384,6 +404,12 @@ struct PracticeCoreRootView: View {
                         .accessibilityIdentifier("core.focus.savedSummary")
                 }
                 CoreNavigationRow { request(.analyze(.piece(piece.id))) }.padding(.top, 24)
+                NavigationLink("历史练习记录") {
+                    PrototypeSongHistoryView(songID: piece.id)
+                        .environmentObject(practiceStore)
+                }
+                .padding(.top, 12)
+                .accessibilityIdentifier("piece.history")
                 VStack(alignment: .leading, spacing: 12) {
                     section("练习划分")
                     if divisions.isEmpty {
@@ -400,7 +426,20 @@ struct PracticeCoreRootView: View {
                     }
                 }.padding(.top, 32)
             }.padding(.top, 20)
-        }.alert("作曲家", isPresented: Binding(get: { editingComposerID == piece.id },
+        }.sheet(isPresented: Binding(get: { editingPieceSettingsID == piece.id }, set: {
+            if !$0 { editingPieceSettingsID = nil }
+        })) {
+            CorePiecePreferencesView(piece: piece, structure: structure) { updated in
+                do {
+                    piece.coreStructureData = try JSONEncoder().encode(updated)
+                    piece.updatedAt = .now
+                    try modelContext.save()
+                    Task { await CoreReviewReminder.reconcile(piece: piece, attempts: attempts, isPro: subscription.isPro) }
+                } catch { boundaryMessage = error.localizedDescription }
+                editingPieceSettingsID = nil
+            }
+        }
+        .alert("作曲家", isPresented: Binding(get: { editingComposerID == piece.id },
                                             set: { if !$0 { editingComposerID = nil } })) {
             TextField("作曲家（可选）", text: $composerDraft)
             Button("保存") {

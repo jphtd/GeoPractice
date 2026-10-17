@@ -368,20 +368,37 @@ enum PracticeLibraryStoreError: LocalizedError, Equatable {
 /// immutable snapshots rebuilt after every successful transaction.
 @MainActor
 final class PracticeLibraryStore: ObservableObject {
+    struct RecentlyDeletedHistoryRecord: Identifiable, Equatable {
+        let id: UUID
+        let eventID: UUID
+        let title: String
+        let deletedAt: Date
+        let expiresAt: Date
+    }
+    private struct DeletedHistoryEntry: Codable {
+        let attempt: PracticeLibraryBackupDocument.Attempt
+        let title: String
+        let deletedAt: Date
+        let expiresAt: Date
+    }
+    private static let deletedHistoryKey = "rovia.history.recentlyDeleted.v1"
     @Published private(set) var songs: [PracticeSongSnapshot] = []
     @Published private(set) var records: [PracticeHistoryRecordSnapshot] = []
+    @Published private(set) var recentlyDeletedHistory: [RecentlyDeletedHistoryRecord] = []
     @Published private(set) var lastErrorMessage: String?
 
     /// The live session controller updates this value. Song deletion refuses
     /// to remove any child event matching it.
     var protectedEventID: UUID?
+    var historyRetentionHours = 24
 
     private var modelContext: ModelContext?
     private var songIDByEventID: [UUID: UUID] = [:]
 
-    init() {}
+    init() { reloadDeletedHistory() }
 
     init(modelContext: ModelContext) throws {
+        reloadDeletedHistory()
         try configure(modelContext: modelContext)
     }
 
@@ -977,7 +994,7 @@ final class PracticeLibraryStore: ObservableObject {
     /// Deletes only after the caller's confirmation action invokes this
     /// method. There is deliberately no optimistic removal from `records`.
     @discardableResult
-    func deleteHistoryRecord(id: UUID) throws -> Bool {
+    func deleteHistoryRecord(id: UUID, retentionHours: Int? = nil, now: Date = .now) throws -> Bool {
         let context = try requireContext()
         guard let attempt = try PracticeAttempt.find(id: id, in: context),
               let event = try fetchEvent(id: attempt.eventID, in: context)
@@ -990,6 +1007,12 @@ final class PracticeLibraryStore: ObservableObject {
             attempt.stats(for: .left).durationMilliseconds,
             attempt.stats(for: .right).durationMilliseconds,
             attempt.stats(for: .both).durationMilliseconds
+        )
+        let deleted = DeletedHistoryEntry(
+            attempt: PracticeLibraryBackupDocument.Attempt(attempt),
+            title: attempt.resolvedEventName(fallback: event.name),
+            deletedAt: now,
+            expiresAt: now.addingTimeInterval(Double(max(1, retentionHours ?? historyRetentionHours)) * 3_600)
         )
         do {
             Self.replaceAttemptAggregate(
@@ -1012,6 +1035,10 @@ final class PracticeLibraryStore: ObservableObject {
             }
             context.delete(attempt)
             try context.save()
+            var entries = deletedHistoryEntries(now: now)
+            entries.removeAll { $0.attempt.id == id }
+            entries.append(deleted)
+            saveDeletedHistory(entries)
             reloadAfterCommittedMutation()
             return true
         } catch {
@@ -1021,6 +1048,86 @@ final class PracticeLibraryStore: ObservableObject {
             context.rollback()
             record(error)
             throw error
+        }
+    }
+
+    @discardableResult
+    func restoreHistoryRecord(id: UUID, now: Date = .now) throws -> Bool {
+        let context = try requireContext()
+        var entries = deletedHistoryEntries(now: now)
+        guard let index = entries.firstIndex(where: { $0.attempt.id == id && $0.expiresAt > now }) else { return false }
+        let entry = entries[index]
+        guard try PracticeAttempt.find(id: id, in: context) == nil,
+              let event = try fetchEvent(id: entry.attempt.eventID, in: context) else { return false }
+        let eventSnapshot = event.aggregateSnapshot()
+        let oldPlan = event.goalPlan
+        let attempt = entry.attempt.makeModel()
+        let counts = PracticeGoalCounts(attempt: attempt)
+        let durations = (attempt.leftDurationMilliseconds, attempt.rightDurationMilliseconds, attempt.bothDurationMilliseconds)
+        do {
+            context.insert(attempt)
+            Self.replaceAttemptAggregate(on: event, removing: (0, 0, 0),
+                adding: (counts.left, counts.right, counts.both), removingDuration: (0, 0, 0), addingDuration: durations)
+            if let oldPlan, attempt.finishedAt < oldPlan.enabledAt {
+                event.setGoalPlan(PracticeGoalPlan(id: oldPlan.id, targets: oldPlan.targets,
+                    baseline: oldPlan.baseline.adding(counts), enabledAt: oldPlan.enabledAt), at: .now)
+            }
+            try context.save()
+            entries.remove(at: index)
+            saveDeletedHistory(entries)
+            reloadAfterCommittedMutation()
+            return true
+        } catch {
+            context.rollback()
+            event.restoreAggregate(from: eventSnapshot)
+            event.setGoalPlan(oldPlan, at: eventSnapshot.updatedAt)
+            throw error
+        }
+    }
+
+    @discardableResult
+    func addHistoryCompletion(recordID: UUID, occurredAt: Date, hand: PracticeHand,
+                              preset: MetronomePreset, enteredAt: Date = .now) throws -> UUID {
+        let context = try requireContext()
+        guard let attempt = try PracticeAttempt.find(id: recordID, in: context),
+              let event = try fetchEvent(id: attempt.eventID, in: context) else {
+            throw PracticeLibraryStoreError.historyRecordNotFound
+        }
+        let snapshot = event.aggregateSnapshot()
+        do {
+            guard let sample = attempt.appendManualBackfill(hand: hand, preset: preset,
+                                                            occurredAt: occurredAt, enteredAt: enteredAt) else {
+                throw PracticeLibraryStoreError.invalidHistoryRecordTime
+            }
+            Self.replaceAttemptAggregate(on: event, removing: (0, 0, 0),
+                adding: (hand == .left ? 1 : 0, hand == .right ? 1 : 0, hand == .both ? 1 : 0),
+                removingDuration: (0, 0, 0), addingDuration: (0, 0, 0))
+            try context.save()
+            reloadAfterCommittedMutation()
+            return sample.id
+        } catch {
+            context.rollback()
+            event.restoreAggregate(from: snapshot)
+            throw error
+        }
+    }
+
+    private func deletedHistoryEntries(now: Date = .now) -> [DeletedHistoryEntry] {
+        guard let data = UserDefaults.standard.data(forKey: Self.deletedHistoryKey),
+              let decoded = try? JSONDecoder().decode([DeletedHistoryEntry].self, from: data) else { return [] }
+        return decoded.filter { $0.expiresAt > now }
+    }
+
+    private func reloadDeletedHistory(now: Date = .now) {
+        saveDeletedHistory(deletedHistoryEntries(now: now))
+    }
+
+    private func saveDeletedHistory(_ entries: [DeletedHistoryEntry]) {
+        if entries.isEmpty { UserDefaults.standard.removeObject(forKey: Self.deletedHistoryKey) }
+        else if let data = try? JSONEncoder().encode(entries) { UserDefaults.standard.set(data, forKey: Self.deletedHistoryKey) }
+        recentlyDeletedHistory = entries.sorted { $0.deletedAt > $1.deletedAt }.map {
+            RecentlyDeletedHistoryRecord(id: $0.attempt.id, eventID: $0.attempt.eventID, title: $0.title,
+                                         deletedAt: $0.deletedAt, expiresAt: $0.expiresAt)
         }
     }
 

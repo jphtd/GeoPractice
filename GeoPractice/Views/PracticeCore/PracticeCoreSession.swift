@@ -540,8 +540,10 @@ enum CoreAnalysis {
             .reduce(0) { $0 + $1.completions.filter { $0.hand == hand }.count }
     }
     static func mastery(_ attempts: [PracticeAttempt], hand: PracticeHand, goal: CoreGoal,
+                        scoreTempo: CoreTargetSpeed? = nil, speedWeight: Double = 0.75,
                         now: Date = .now, calendar: Calendar = .current) -> Double? {
-        guard let target = goal.hands[hand], let speed = target.speed, let stable = stable(attempts, hand: hand) else { return nil }
+        guard let target = goal.hands[hand], let speed = target.speed ?? scoreTempo,
+              let stable = stable(attempts, hand: hand) else { return nil }
         let speedProgress = min(1, stable / speed.quarterEquivalent)
         guard let targetCount = target.count else { return speedProgress }
         let today = calendar.startOfDay(for: now)
@@ -551,12 +553,17 @@ enum CoreAnalysis {
         let editedAfterLatest = (goal.updatedAt ?? .distantPast) > (latest?.finishedAt ?? .distantPast)
         let cycle = editedAfterLatest ? calendar.startOfDay(for: goal.updatedAt ?? now) : (latest?.coreContext?.cycleStart ?? today)
         let countProgress = min(1, Double(count(attempts, hand: hand, cycleStart: cycle)) / Double(targetCount))
-        return 0.75 * speedProgress + 0.25 * countProgress
+        let weight = min(1, max(0, speedWeight))
+        return weight * speedProgress + (1 - weight) * countProgress
     }
     static func divisionMastery(_ attempts: [PracticeAttempt], definition: CoreDivisionDefinition,
+                                scoreTempo: CoreTargetSpeed? = nil, speedWeight: Double = 0.75,
                                 now: Date = .now) -> Double? {
         guard let goal = definition.goal else { return nil }
-        let values = definition.handMode.hands.compactMap { mastery(attempts, hand: $0, goal: goal, now: now) }
+        let values = definition.handMode.hands.compactMap {
+            mastery(attempts, hand: $0, goal: goal, scoreTempo: scoreTempo,
+                    speedWeight: speedWeight, now: now)
+        }
         guard values.count == definition.handMode.hands.count else { return nil }
         return values.count == 1 ? values[0] : values[0] * 0.25 + values[1] * 0.25 + values[2] * 0.5
     }

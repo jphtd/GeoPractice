@@ -38,6 +38,8 @@ struct PracticeCompletionSample: Codable, Equatable, Identifiable, Sendable {
     let hand: PracticeHand
     let preset: MetronomePreset
     let completedAt: Date
+    /// System entry time for a manual backfill. Legacy and live records omit it.
+    let enteredAt: Date?
     /// Additive provenance. Payloads written before this field existed decode
     /// as `.live`, preserving their historical tap-by-tap behavior.
     let source: PracticeCompletionSource
@@ -51,18 +53,20 @@ struct PracticeCompletionSample: Codable, Equatable, Identifiable, Sendable {
         hand: PracticeHand,
         preset: MetronomePreset,
         completedAt: Date = .now,
-        source: PracticeCompletionSource = .live
+        source: PracticeCompletionSource = .live,
+        enteredAt: Date? = nil
     ) {
         self.id = id
         self.hand = hand
         self.preset = preset.normalized
         self.completedAt = completedAt
+        self.enteredAt = enteredAt
         self.source = source
         self.hasExplicitSource = true
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, hand, preset, completedAt, source
+        case id, hand, preset, completedAt, enteredAt, source
     }
 
     init(from decoder: Decoder) throws {
@@ -71,6 +75,7 @@ struct PracticeCompletionSample: Codable, Equatable, Identifiable, Sendable {
         hand = try container.decode(PracticeHand.self, forKey: .hand)
         preset = try container.decode(MetronomePreset.self, forKey: .preset).normalized
         completedAt = try container.decode(Date.self, forKey: .completedAt)
+        enteredAt = try container.decodeIfPresent(Date.self, forKey: .enteredAt)
         if let decodedSource = try container.decodeIfPresent(
             PracticeCompletionSource.self,
             forKey: .source
@@ -89,6 +94,7 @@ struct PracticeCompletionSample: Codable, Equatable, Identifiable, Sendable {
         try container.encode(hand, forKey: .hand)
         try container.encode(preset, forKey: .preset)
         try container.encode(completedAt, forKey: .completedAt)
+        try container.encodeIfPresent(enteredAt, forKey: .enteredAt)
         if hasExplicitSource {
             try container.encode(source, forKey: .source)
         }

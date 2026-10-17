@@ -1309,14 +1309,17 @@ private enum PrototypeHistoryEditTarget: Identifiable {
     }
 }
 
-private struct PrototypeSongHistoryView: View {
+struct PrototypeSongHistoryView: View {
     @EnvironmentObject private var store: PracticeLibraryStore
+    @EnvironmentObject private var subscription: SubscriptionStore
     let songID: UUID
 
     @State private var period: PrototypeHistoryPeriod = .week
     @State private var anchorDate = Date.now
     @State private var hand: PrototypeHistoryHandFilter = .all
     @State private var editTarget: PrototypeHistoryEditTarget?
+    @State private var showsBackfill = false
+    @State private var operationError: String?
 
     var body: some View {
         ZStack {
@@ -1332,6 +1335,30 @@ private struct PrototypeSongHistoryView: View {
                         .frame(maxWidth: .infinity)
                     }
                     .frame(maxWidth: .infinity)
+
+                    let eventIDs = Set(store.song(id: songID)?.sections.map(\.id) ?? [])
+                    let deleted = store.recentlyDeletedHistory.filter { eventIDs.contains($0.eventID) }
+                    if !deleted.isEmpty {
+                        GeoCard(cornerRadius: 20) {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("最近删除").font(.headline)
+                                ForEach(deleted) { record in
+                                    HStack {
+                                        VStack(alignment: .leading) {
+                                            Text(record.title)
+                                            Text("保留至 \(record.expiresAt.formatted(date: .abbreviated, time: .shortened))")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        Button("恢复") {
+                                            do { _ = try store.restoreHistoryRecord(id: record.id) }
+                                            catch { operationError = error.localizedDescription }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
 
                     if groupedSessions.isEmpty {
                         GeoCard(cornerRadius: 20) {
@@ -1369,6 +1396,10 @@ private struct PrototypeSongHistoryView: View {
         }
         .navigationTitle("历史记录")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbar { Button("补录") { showsBackfill = true } }
+        .sheet(isPresented: $showsBackfill) {
+            PrototypeBackfillView(store: store, songID: songID)
+        }
         .sheet(item: $editTarget) { target in
             switch target {
             case .record(let record):
@@ -1387,6 +1418,9 @@ private struct PrototypeSongHistoryView: View {
                 )
             }
         }
+        .alert("操作失败", isPresented: Binding(get: { operationError != nil }, set: { if !$0 { operationError = nil } })) {
+            Button("知道了", role: .cancel) {}
+        } message: { Text(operationError ?? "") }
     }
 
     private var periodControl: some View {
@@ -1685,14 +1719,9 @@ private struct PrototypeHistoryRecordEditor: View {
         NavigationStack {
             Form {
                 Section("记录") {
-                    DatePicker(
-                        "记录时间",
-                        selection: Binding(
-                            get: { draft.finishedAt },
-                            set: { draft.move(to: $0) }
-                        ),
-                        displayedComponents: [.date, .hourAndMinute]
-                    )
+                    LabeledContent("记录时间", value: record.finishedAt.formatted(.dateTime.year().month().day().hour().minute()))
+                    Text("系统时间受保护；如需纠正，请删除后重新补录。")
+                        .font(.footnote).foregroundStyle(GeoTheme.muted)
                     LabeledContent("练习段落", value: record.eventNameSnapshot)
                 }
 
@@ -1947,16 +1976,9 @@ private struct PrototypeHistoryUnitemizedEditor: View {
                     LabeledContent("类型", value: summary.title)
                     LabeledContent("练习段落", value: record.eventNameSnapshot)
                     if draft.completedAt != nil {
-                        DatePicker(
-                            "记录时间",
-                            selection: completedAtBinding,
-                            displayedComponents: [.date, .hourAndMinute]
-                        )
-                        Stepper(
-                            "秒 \(secondComponent)",
-                            value: secondBinding,
-                            in: 0...59
-                        )
+                        LabeledContent("记录时间", value: draft.completedAt!.formatted(.dateTime.year().month().day().hour().minute().second()))
+                        Text("实际发生时间已锁定；如需纠正，请删除后重新补录。")
+                            .font(.footnote).foregroundStyle(GeoTheme.muted)
                     } else {
                         LabeledContent(
                             "场次时间",
@@ -2201,16 +2223,9 @@ private struct PrototypeHistoryCompletionEditor: View {
         NavigationStack {
             Form {
                 Section("完成记录") {
-                    DatePicker(
-                        "完成时间",
-                        selection: $draft.completedAt,
-                        displayedComponents: [.date, .hourAndMinute]
-                    )
-                    Stepper(
-                        "秒 \(secondComponent)",
-                        value: secondBinding,
-                        in: 0...59
-                    )
+                    LabeledContent("完成时间", value: draft.completedAt.formatted(.dateTime.year().month().day().hour().minute().second()))
+                    Text("实际发生时间已锁定；如需纠正，请删除后重新补录。")
+                        .font(.footnote).foregroundStyle(GeoTheme.muted)
                     Picker("手型", selection: $draft.hand) {
                         ForEach(PracticeHand.controlOrder) { value in
                             Text(value.title).tag(value)
@@ -2430,25 +2445,25 @@ private struct PrototypeBackfillView: View {
     let songID: UUID
 
     @State private var date = Date.now
-    @State private var sectionID: UUID?
+    @State private var recordID: UUID?
     @State private var hand: PrototypePracticeHand = .left
     @State private var bpm = 80
     @State private var note = "八分音符"
-    @State private var minutes = 5
-    @State private var count = 1
     @State private var saveError: String?
 
     var body: some View {
         NavigationStack {
             Form {
                 Section("补录") {
-                    DatePicker("记录时间", selection: $date)
-                    if let song = store.song(id: songID) {
-                        Picker("练习段落", selection: $sectionID) {
-                            ForEach(song.sections) { section in
-                                Text(section.name).tag(Optional(section.id))
-                            }
+                    Picker("所属练习会话", selection: $recordID) {
+                        ForEach(eligibleRecords) { record in
+                            Text("\(record.eventNameSnapshot) · \(record.startedAt.formatted(date: .abbreviated, time: .shortened))")
+                                .tag(Optional(record.id))
                         }
+                    }
+                    if let record = selectedRecord {
+                        DatePicker("实际发生时间", selection: $date,
+                                   in: record.startedAt...record.finishedAt)
                     }
                     Picker("手型", selection: $hand) {
                         ForEach(PrototypePracticeHand.allCases) { value in
@@ -2459,12 +2474,10 @@ private struct PrototypeBackfillView: View {
                     Picker("训练音符", selection: $note) {
                         ForEach(["四分音符", "八分音符", "十六分音符"], id: \.self) { Text($0) }
                     }
-                    Stepper("时长 \(minutes) 分钟", value: $minutes, in: 1...240)
-                    Stepper("完成 \(count) 次", value: $count, in: 1...999)
                 }
 
                 Section {
-                    Text("保存后会写入该段落的正式练习历史和统计。")
+                    Text("每次只补录已有练习会话中漏记的一条记录；发生时间与录入时间会分别保留。")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -2481,12 +2494,15 @@ private struct PrototypeBackfillView: View {
                     Button("保存") {
                         save()
                     }
-                    .disabled(sectionID == nil)
+                    .disabled(recordID == nil)
                 }
             }
         }
         .onAppear {
-            if sectionID == nil { sectionID = store.song(id: songID)?.sections.first?.id }
+            if recordID == nil, let first = eligibleRecords.first {
+                recordID = first.id
+                date = first.finishedAt
+            }
         }
         .alert("补录失败", isPresented: Binding(
             get: { saveError != nil },
@@ -2500,20 +2516,25 @@ private struct PrototypeBackfillView: View {
 
     private func save() {
         do {
-            _ = try store.addRecord(
-                songID: songID,
-                sectionID: sectionID,
-                date: date,
-                hand: hand,
-                bpm: bpm,
-                note: note,
-                duration: TimeInterval(minutes * 60),
-                count: count
-            )
+            guard let recordID else { throw PracticeLibraryStoreError.historyRecordNotFound }
+            var preset = MetronomePreset.standard
+            preset.bpm = bpm
+            preset.subdivision = note.contains("十六") ? 4 : note.contains("八") ? 2 : 1
+            _ = try store.addHistoryCompletion(recordID: recordID, occurredAt: date,
+                                               hand: hand.practiceHand, preset: preset)
             dismiss()
         } catch {
             saveError = error.localizedDescription
         }
+    }
+
+    private var eligibleRecords: [PracticeHistoryRecordSnapshot] {
+        let eventIDs = Set(store.song(id: songID)?.sections.map(\.id) ?? [])
+        return store.records.filter { $0.sourceEventID.map(eventIDs.contains) == true }
+    }
+
+    private var selectedRecord: PracticeHistoryRecordSnapshot? {
+        eligibleRecords.first { $0.id == recordID }
     }
 }
 

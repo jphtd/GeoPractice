@@ -1,6 +1,82 @@
 import Combine
 import Foundation
 import SwiftData
+import UserNotifications
+
+enum CoreReviewInterval: Int, Codable, CaseIterable, Identifiable {
+    case never = 0, oneDay = 1, threeDays = 3, fiveDays = 5, sevenDays = 7
+    var id: Int { rawValue }
+    var title: String { self == .never ? "永不提醒" : "\(rawValue) 天" }
+}
+
+struct CorePiecePreferences: Codable, Equatable {
+    var reviewInterval: CoreReviewInterval = .sevenDays
+    var reviewHour: Int = 9
+    var reviewMinute: Int = 0
+    var scoreTempo: CoreTargetSpeed?
+    var reviewRequiresCompletionAfter: Date?
+}
+
+enum CoreReviewReminder {
+    static func effectivePreferences(_ preferences: CorePiecePreferences, isPro: Bool) -> CorePiecePreferences {
+        guard !isPro else { return preferences }
+        var result = preferences
+        result.reviewHour = 9
+        result.reviewMinute = 0
+        return result
+    }
+
+    static func nextDate(after lastCompleted: Date, preferences: CorePiecePreferences,
+                         now: Date = .now, calendar: Calendar = .current) -> Date? {
+        guard preferences.reviewInterval != .never else { return nil }
+        var components = calendar.dateComponents([.year, .month, .day], from: lastCompleted)
+        components.hour = preferences.reviewHour
+        components.minute = preferences.reviewMinute
+        components.second = 0
+        guard var result = calendar.date(from: components),
+              let first = calendar.date(byAdding: .day, value: preferences.reviewInterval.rawValue, to: result)
+        else { return nil }
+        result = first
+        while result <= now {
+            guard let following = calendar.date(byAdding: .day, value: preferences.reviewInterval.rawValue, to: result)
+            else { return nil }
+            result = following
+        }
+        return result
+    }
+
+    static func reconcile(piece: PracticeSong, attempts: [PracticeAttempt], isPro: Bool,
+                          calendar: Calendar = .current) async {
+        let center = UNUserNotificationCenter.current()
+        let identifier = "rovia.review.\(piece.id.uuidString)"
+        let identifiers = [identifier] + (0..<32).map { "\(identifier).\($0)" }
+        center.removePendingNotificationRequests(withIdentifiers: identifiers)
+        guard !piece.isArchived, piece.deletedAt == nil, let structure = piece.coreStructure,
+              let latest = attempts.filter({ attempt in
+                  attempt.coreContext?.pieceID == piece.id && attempt.coreContext?.source == "planned"
+                    && attempt.finishedAt > (structure.preferences.reviewRequiresCompletionAfter ?? .distantPast)
+              }).map(\.finishedAt).max(),
+              let next = nextDate(after: latest,
+                                  preferences: effectivePreferences(structure.preferences, isPro: isPro),
+                                  calendar: calendar)
+        else { return }
+        guard (try? await center.requestAuthorization(options: [.alert, .sound])) == true else { return }
+        let content = UNMutableNotificationContent()
+        content.title = "该复习《\(piece.name)》了"
+        content.body = "上次完成练习后已到设定的复习间隔。"
+        content.sound = .default
+        for index in 0..<32 {
+            guard let date = calendar.date(byAdding: .day,
+                value: structure.preferences.reviewInterval.rawValue * index, to: next) else { break }
+            let trigger = UNCalendarNotificationTrigger(
+                dateMatching: calendar.dateComponents([.year, .month, .day, .hour, .minute], from: date),
+                repeats: false
+            )
+            try? await center.add(UNNotificationRequest(
+                identifier: "\(identifier).\(index)", content: content, trigger: trigger))
+        }
+    }
+}
 
 // Frozen Product DIV-01 / HAND-01 / GOAL-01…03,07. No legacy inference.
 enum CoreDivisionMode: String, Codable, CaseIterable {
@@ -12,6 +88,17 @@ enum CoreDivisionMode: String, Codable, CaseIterable {
 struct CorePieceStructure: Codable, Equatable {
     var mode: CoreDivisionMode
     var total: Int?
+    var preferences: CorePiecePreferences = CorePiecePreferences()
+    init(mode: CoreDivisionMode, total: Int? = nil, preferences: CorePiecePreferences = CorePiecePreferences()) {
+        self.mode = mode; self.total = total; self.preferences = preferences
+    }
+    private enum CodingKeys: String, CodingKey { case mode, total, preferences }
+    init(from decoder: Decoder) throws {
+        let values = try decoder.container(keyedBy: CodingKeys.self)
+        mode = try values.decode(CoreDivisionMode.self, forKey: .mode)
+        total = try values.decodeIfPresent(Int.self, forKey: .total)
+        preferences = try values.decodeIfPresent(CorePiecePreferences.self, forKey: .preferences) ?? CorePiecePreferences()
+    }
     var isValid: Bool { total == nil || total! > 0 }
     var label: String {
         guard let total, total > 0 else { return mode.label }
@@ -84,11 +171,18 @@ struct CoreLadderActivation: Equatable {
     @Published private(set) var focusEnabled: Bool
     @Published private(set) var ladderEnabled: Bool
     @Published private(set) var ladderEpoch: Int
+    @Published private(set) var weaknessSpeedWeight: Int
+    @Published private(set) var weaknessThreshold: Int
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         focusEnabled = defaults.object(forKey: "rovia.focus.enabled") as? Bool ?? true
         ladderEnabled = defaults.bool(forKey: "rovia.globalLadder.enabled")
         ladderEpoch = defaults.integer(forKey: "rovia.globalLadder.epoch")
+        let storedWeight = defaults.integer(forKey: "rovia.weakness.speedWeight")
+        weaknessSpeedWeight = defaults.object(forKey: "rovia.weakness.speedWeight") != nil
+            && (0...100).contains(storedWeight) && storedWeight.isMultiple(of: 5) ? storedWeight : 75
+        let storedThreshold = defaults.integer(forKey: "rovia.weakness.threshold")
+        weaknessThreshold = [5, 10, 15, 20, 25, 30].contains(storedThreshold) ? storedThreshold : 20
     }
     func setFocusEnabled(_ value: Bool, isPro: Bool) {
         guard isPro else { return }
@@ -105,6 +199,19 @@ struct CoreLadderActivation: Equatable {
     }
     func activation(isPro: Bool) -> CoreLadderActivation {
         CoreLadderActivation(enabled: ladderEnabled, isPro: isPro, epoch: ladderEpoch)
+    }
+    func setWeaknessSpeedWeight(_ value: Int, isPro: Bool) {
+        guard isPro, (0...100).contains(value), value.isMultiple(of: 5) else { return }
+        weaknessSpeedWeight = value
+        defaults.set(value, forKey: "rovia.weakness.speedWeight")
+    }
+    func setWeaknessThreshold(_ value: Int, isPro: Bool) {
+        guard isPro, [5, 10, 15, 20, 25, 30].contains(value) else { return }
+        weaknessThreshold = value
+        defaults.set(value, forKey: "rovia.weakness.threshold")
+    }
+    func weaknessConfiguration(isPro: Bool) -> (speedWeight: Double, threshold: Double) {
+        isPro ? (Double(weaknessSpeedWeight) / 100, Double(weaknessThreshold) / 100) : (0.75, 0.20)
     }
 }
 
@@ -392,6 +499,10 @@ enum CoreContracts {
         guard piece.isArchived else { return }
 
         piece.isArchived = false
+        if var structure = piece.coreStructure {
+            structure.preferences.reviewRequiresCompletionAfter = date
+            piece.coreStructureData = try JSONEncoder().encode(structure)
+        }
         piece.updatedAt = date
 
         do {

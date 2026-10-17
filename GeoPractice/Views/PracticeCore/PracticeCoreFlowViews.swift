@@ -1250,6 +1250,7 @@ enum AnalyzeFocus {
 struct CoreAnalyzeView: View {
     @Environment(\.calendar) private var environmentCalendar
     @EnvironmentObject private var subscription: SubscriptionStore
+    @EnvironmentObject private var settings: CorePracticeSettings
     @Query private var events: [PracticeEvent]
     @Query private var songs: [PracticeSong]
     @Query private var attempts: [PracticeAttempt]
@@ -1392,7 +1393,7 @@ struct CoreAnalyzeView: View {
                             } label: {
                                 VStack(alignment: .leading) {
                                     Text(event.name)
-                                    Text(diagnosis(event).map { $0 <= 0.8 ? "这个划分需要关注" : "当前无需要关注项" } ?? "诊断数据不足")
+                                    Text(diagnosis(event).map { $0 <= weaknessBoundary ? "这个划分需要关注" : "当前无需要关注项" } ?? "诊断数据不足")
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
                             }
@@ -1409,10 +1410,14 @@ struct CoreAnalyzeView: View {
             }
             if case .division = scope { ForEach(filteredEvents) { event in
                 if let definition = event.coreDefinition {
+                    let divisionScoreTempo: CoreTargetSpeed? = subscription.isPro
+                        ? songs.first(where: { $0.id == event.songID })?.coreStructure?.preferences.scoreTempo
+                        : nil
                     Section("《\(songs.first { $0.id == event.songID }?.name ?? "曲目")》 · \(event.name)") {
                         CoreDivisionAnalysis(
                             definition: definition,
                             attempts: CoreAnalysis.planned(attempts, division: event.id),
+                            scoreTempo: divisionScoreTempo,
                             divisionID: event.id,
                             historicalAttempts: attempts.filter { $0.eventID == event.id },
                             historicalRange: interval,
@@ -1456,11 +1461,21 @@ struct CoreAnalyzeView: View {
         events.filter { $0.songID == id && needsAttention($0) }.count
     }
     private func needsAttention(_ event: PracticeEvent) -> Bool {
-        diagnosis(event).map { $0 <= 0.8 } ?? false
+        diagnosis(event).map { $0 <= weaknessBoundary } ?? false
     }
     private func diagnosis(_ event: PracticeEvent) -> Double? {
         guard let definition = event.coreDefinition else { return nil }
-        return CoreAnalysis.divisionMastery(CoreAnalysis.planned(attempts, division: event.id), definition: definition)
+        let configuration = settings.weaknessConfiguration(isPro: subscription.isPro)
+        let scoreTempo = subscription.isPro
+            ? songs.first(where: { $0.id == event.songID })?.coreStructure?.preferences.scoreTempo
+            : nil
+        return CoreAnalysis.divisionMastery(
+            CoreAnalysis.planned(attempts, division: event.id), definition: definition,
+            scoreTempo: scoreTempo, speedWeight: configuration.speedWeight
+        )
+    }
+    private var weaknessBoundary: Double {
+        1 - settings.weaknessConfiguration(isPro: subscription.isPro).threshold
     }
     private func focusValue(_ attempts: [PracticeAttempt], interval: DateInterval?) -> String {
         AnalyzeFocus.duration(attempts: attempts, interval: interval).map { "\($0 / 1_000) 秒" } ?? "N/A"
@@ -1819,7 +1834,8 @@ struct CoreAnalyzeShareView: View {
                     Text("图片暂无法生成")
                 }
             }
-        }.navigationTitle("分享")
+        }.contentMargins(.bottom, 64, for: .scrollContent)
+            .navigationTitle("分享")
             .sheet(item: $selectedComposer) { node in
                 NavigationStack {
                     List {
@@ -2041,8 +2057,10 @@ struct CoreDivisionAnalysis: View {
     @State private var historicalHand: PracticeHand?
     @State private var didInitializeHand = false
     @EnvironmentObject private var subscription: SubscriptionStore
+    @EnvironmentObject private var settings: CorePracticeSettings
     let definition: CoreDivisionDefinition
     let attempts: [PracticeAttempt]
+    var scoreTempo: CoreTargetSpeed? = nil
     var divisionID: UUID? = nil
     var historicalAttempts: [PracticeAttempt] = []
     var historicalRange: DateInterval? = nil
@@ -2148,8 +2166,11 @@ struct CoreDivisionAnalysis: View {
         }
         Text("划分当前目标完成度：\(CoreTargetCompletion.percentage(completion.combined))")
             .accessibilityIdentifier("analyze.target.division")
-        if let mastery = CoreAnalysis.divisionMastery(attempts, definition: definition) {
-            Text(mastery <= 0.8 ? "这个划分需要关注。" : "当前划分未触发基础弱项提醒。")
+        let weakness = settings.weaknessConfiguration(isPro: subscription.isPro)
+        if let mastery = CoreAnalysis.divisionMastery(attempts, definition: definition,
+                                                       scoreTempo: scoreTempo,
+                                                       speedWeight: weakness.speedWeight) {
+            Text(mastery <= 1 - weakness.threshold ? "这个划分需要关注。" : "当前划分未触发基础弱项提醒。")
         } else { Text("弱项诊断：数据不足").foregroundStyle(.secondary) }
         if !subscription.isPro {
             Text("详细目标差距为 Pro 分析。Free 可查看当前稳定速度、次数进度及当前目标完成度。").font(.caption).foregroundStyle(.secondary)
@@ -2646,6 +2667,88 @@ struct CoreExitHandoffView: View {
 }
 
 
+struct CorePiecePreferencesView: View {
+    @EnvironmentObject private var subscription: SubscriptionStore
+    @Environment(\.dismiss) private var dismiss
+    let piece: PracticeSong
+    let onSave: (CorePieceStructure) -> Void
+    @State private var structure: CorePieceStructure
+    @State private var hasScoreTempo: Bool
+
+    init(piece: PracticeSong, structure: CorePieceStructure, onSave: @escaping (CorePieceStructure) -> Void) {
+        self.piece = piece; self.onSave = onSave
+        _structure = State(initialValue: structure)
+        _hasScoreTempo = State(initialValue: structure.preferences.scoreTempo != nil)
+    }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section("复习提醒") {
+                    Picker("提醒间隔", selection: $structure.preferences.reviewInterval) {
+                        ForEach(CoreReviewInterval.allCases) { Text($0.title).tag($0) }
+                    }
+                    if subscription.isPro && structure.preferences.reviewInterval != .never {
+                        DatePicker("提醒时间", selection: reviewTime, displayedComponents: .hourAndMinute)
+                    } else if structure.preferences.reviewInterval != .never {
+                        LabeledContent("提醒时间", value: "09:00")
+                    }
+                }
+                if subscription.isPro {
+                    Section("谱面速度基准") {
+                        Toggle("记录谱面速度", isOn: $hasScoreTempo)
+                        if hasScoreTempo {
+                            Stepper("BPM：\(structure.preferences.scoreTempo?.bpm ?? 80)", value: scoreBPM, in: 20...300)
+                            Picker("基准音符", selection: scoreNoteUnit) {
+                                ForEach(CoreNoteUnit.allCases, id: \.self) { Text($0.title).tag($0) }
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle(piece.name)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) { Button("取消") { dismiss() } }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("保存") {
+                        if !subscription.isPro {
+                            structure.preferences.reviewHour = 9
+                            structure.preferences.reviewMinute = 0
+                        }
+                        if subscription.isPro && hasScoreTempo && structure.preferences.scoreTempo == nil {
+                            structure.preferences.scoreTempo = CoreTargetSpeed(bpm: 80)
+                        }
+                        if !hasScoreTempo { structure.preferences.scoreTempo = nil }
+                        onSave(structure)
+                    }
+                }
+            }
+        }
+    }
+
+    private var scoreBPM: Binding<Int> { Binding(
+        get: { structure.preferences.scoreTempo?.bpm ?? 80 },
+        set: { structure.preferences.scoreTempo = CoreTargetSpeed(bpm: $0,
+            noteUnit: structure.preferences.scoreTempo?.noteUnit ?? .quarter) }
+    ) }
+    private var scoreNoteUnit: Binding<CoreNoteUnit> { Binding(
+        get: { structure.preferences.scoreTempo?.noteUnit ?? .quarter },
+        set: { structure.preferences.scoreTempo = CoreTargetSpeed(
+            bpm: structure.preferences.scoreTempo?.bpm ?? 80, noteUnit: $0) }
+    ) }
+    private var reviewTime: Binding<Date> { Binding(
+        get: {
+            Calendar.current.date(from: DateComponents(hour: structure.preferences.reviewHour,
+                                                       minute: structure.preferences.reviewMinute)) ?? .now
+        },
+        set: {
+            let parts = Calendar.current.dateComponents([.hour, .minute], from: $0)
+            structure.preferences.reviewHour = parts.hour ?? 9
+            structure.preferences.reviewMinute = parts.minute ?? 0
+        }
+    ) }
+}
+
 struct CoreGlobalSettingsView: View {
     @EnvironmentObject private var settings: CorePracticeSettings
     @EnvironmentObject private var subscription: SubscriptionStore
@@ -2674,6 +2777,24 @@ struct CoreGlobalSettingsView: View {
                         Toggle("速度阶梯", isOn: Binding(get: { settings.ladderEnabled }, set: {
                             settings.setLadderEnabled($0, isPro: subscription.isPro)
                         })).accessibilityIdentifier("core.settings.globalLadder")
+                        Picker("弱项速度权重", selection: Binding(
+                            get: { settings.weaknessSpeedWeight },
+                            set: { settings.setWeaknessSpeedWeight($0, isPro: subscription.isPro) }
+                        )) {
+                            ForEach(Array(stride(from: 0, through: 100, by: 5)), id: \.self) { value in
+                                Text("\(value)% / \(100 - value)%").tag(value)
+                            }
+                        }
+                        .accessibilityIdentifier("core.settings.weaknessWeight")
+                        Picker("弱项阈值", selection: Binding(
+                            get: { settings.weaknessThreshold },
+                            set: { settings.setWeaknessThreshold($0, isPro: subscription.isPro) }
+                        )) {
+                            ForEach([5, 10, 15, 20, 25, 30], id: \.self) { value in
+                                Text("差距 \(value)%").tag(value)
+                            }
+                        }
+                        .accessibilityIdentifier("core.settings.weaknessThreshold")
                         if activeSessionID != nil { Text("下一次练习生效").font(.caption) }
                     }
                     NavigationLink("Rovia Pro 权益") { PrototypeProView() }

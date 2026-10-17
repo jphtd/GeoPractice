@@ -253,6 +253,31 @@ final class PracticeAttempt {
         speedSummary(for: hand).mostPracticed?.preset
     }
 
+    @discardableResult
+    func appendManualBackfill(hand: PracticeHand, preset: MetronomePreset,
+                              occurredAt: Date, enteredAt: Date = .now) -> PracticeCompletionSample? {
+        guard occurredAt >= startedAt, occurredAt <= finishedAt else { return nil }
+        let sample = PracticeCompletionSample(hand: hand, preset: preset,
+                                              completedAt: occurredAt, source: .manualBackfill,
+                                              enteredAt: enteredAt)
+        var stats = Dictionary(uniqueKeysWithValues: PracticeHand.controlOrder.map { ($0, self.stats(for: $0)) })
+        stats[hand]?.adjustCount(by: 1)
+        var samples = completions
+        samples.append(sample)
+        samples.sort { $0.completedAt == $1.completedAt ? $0.id.uuidString < $1.id.uuidString : $0.completedAt < $1.completedAt }
+        let fallback = Dictionary(uniqueKeysWithValues: PracticeHand.controlOrder.compactMap { value in
+            statisticsPreset(for: value).map { (value, $0) }
+        })
+        var sessionPresets = Dictionary(uniqueKeysWithValues: PracticeHand.controlOrder.compactMap { value in
+            sessionPreset(for: value).map { (value, $0) }
+        })
+        sessionPresets[hand] = preset.normalized
+        replaceHistoryDetails(startedAt: startedAt, finishedAt: finishedAt,
+                              statsByHand: stats, samples: samples,
+                              fallbackPresets: fallback, sessionPresets: sessionPresets)
+        return sample
+    }
+
     /// Applies a user-confirmed history edit to the persisted attempt.
     ///
     /// Existing real completion samples are retained whenever possible. A
@@ -324,7 +349,8 @@ final class PracticeAttempt {
                         hand: hand,
                         preset: targetPreset ?? sample.preset,
                         completedAt: boundedTime,
-                        source: sample.source
+                        source: sample.source,
+                        enteredAt: sample.enteredAt
                     )
                 )
             }
@@ -467,8 +493,9 @@ final class PracticeAttempt {
             id: oldSample.id,
             hand: edit.hand,
             preset: edit.preset.normalized,
-            completedAt: edit.completedAt,
-            source: oldSample.source
+            completedAt: oldSample.completedAt,
+            source: oldSample.source,
+            enteredAt: oldSample.enteredAt
         )
         samples[index] = replacement
 
@@ -502,11 +529,9 @@ final class PracticeAttempt {
             }
         )
         sessionPresets[edit.hand] = edit.preset.normalized
-        let revisedStartedAt = min(startedAt, edit.completedAt)
-        let revisedFinishedAt = max(finishedAt, edit.completedAt)
         replaceHistoryDetails(
-            startedAt: revisedStartedAt,
-            finishedAt: revisedFinishedAt,
+            startedAt: startedAt,
+            finishedAt: finishedAt,
             statsByHand: statsByHand,
             samples: samples,
             fallbackPresets: fallbackPresets,
@@ -615,7 +640,8 @@ final class PracticeAttempt {
                     hand: sample.hand,
                     preset: sample.preset,
                     completedAt: sample.completedAt,
-                    source: .manualBackfill
+                    source: .manualBackfill,
+                    enteredAt: sample.enteredAt
                 )
             })
             return true
@@ -632,7 +658,8 @@ final class PracticeAttempt {
                     hand: edit.hand,
                     preset: targetPreset,
                     completedAt: batchTime,
-                    source: .manualBackfill
+                    source: .manualBackfill,
+                    enteredAt: sample.enteredAt
                 )
             )
         }

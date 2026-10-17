@@ -2,6 +2,19 @@ import Combine
 import SwiftData
 import SwiftUI
 
+@MainActor
+enum CoreSubscriptionLifecycle {
+    @discardableResult
+    static func refreshEntitlementsIfActive(
+        _ phase: ScenePhase,
+        refresh: () async -> Void
+    ) async -> Bool {
+        guard phase == .active else { return false }
+        await refresh()
+        return true
+    }
+}
+
 struct PracticeCoreRootView: View {
     @Query(sort: [SortDescriptor(\PracticeSong.sortIndex), SortDescriptor(\PracticeSong.createdAt)]) private var songs: [PracticeSong]
     @Query private var events: [PracticeEvent]
@@ -227,6 +240,11 @@ struct PracticeCoreRootView: View {
             guard fixture == nil else { return }
             if phase == .active {
                 cloudSync.syncWhenAppBecomesActive()
+                Task {
+                    await CoreSubscriptionLifecycle.refreshEntitlementsIfActive(phase) {
+                        await subscription.refreshEntitlements()
+                    }
+                }
             } else {
                 cloudSync.syncBeforeBackgrounding()
             }

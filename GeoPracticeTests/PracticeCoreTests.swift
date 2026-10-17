@@ -13,6 +13,35 @@ final class PracticeCoreTests: XCTestCase {
         return try ModelContainer(for: schema, configurations: config)
     }
 
+    func testFormalAppLifecycleRefreshesSubscriptionOnlyWhenActive() async {
+        var refreshCount = 0
+
+        let backgroundRefresh = await CoreSubscriptionLifecycle.refreshEntitlementsIfActive(.background) {
+            refreshCount += 1
+        }
+        let activeRefresh = await CoreSubscriptionLifecycle.refreshEntitlementsIfActive(.active) {
+            refreshCount += 1
+        }
+
+        XCTAssertFalse(backgroundRefresh)
+        XCTAssertTrue(activeRefresh)
+        XCTAssertEqual(refreshCount, 1)
+    }
+
+    func testForegroundRefreshAppliesFreeAndProEntitlementChanges() async {
+        var isPro = false
+
+        await CoreSubscriptionLifecycle.refreshEntitlementsIfActive(.active) {
+            isPro = true
+        }
+        XCTAssertTrue(isPro)
+
+        await CoreSubscriptionLifecycle.refreshEntitlementsIfActive(.active) {
+            isPro = false
+        }
+        XCTAssertFalse(isPro)
+    }
+
     func testGoalValidityUsesEveryApplicableHandAndNotDate() {
         let count = CoreHandGoal(count: 3)
         let speed = CoreHandGoal(speed: CoreTargetSpeed(bpm: 80, noteUnit: .quarter))
